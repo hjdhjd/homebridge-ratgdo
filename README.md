@@ -28,6 +28,12 @@ In the interest of the community seeking a solution outside of myQ, I'm releasin
   * Control of the light attached to the garage door opener, when available.
   * Obstruction detection.
 
+## Getting Started
+To get started with `homebridge-ratgdo`:
+
+  * Install `homebridge-ratgdo` using the Homebridge webUI. Make sure you make `homebridge-ratgdo` a child bridge for the best performance.
+  * [Carefully](#known-caveats) edit the MQTT server and port on your Ratgdo device to the IP address of your Homebridge server, and port 18830 (unless you've changed the default port in `homebridge-ratgdo`).
+
 ## Known Caveats
 Ratgdo is a terrific solution that solves a problem for many stranded former myQ users and others. There are some quirks and caveats to note, however. As of Ratgdo firmware v2.51:
 

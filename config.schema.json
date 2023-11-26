@@ -16,7 +16,7 @@
         "minimum": 1024,
         "maximum": 65535,
         "required": false,
-        "description": "Set the port to use for the builtin MQTT broker. Ensure you set the Ratgdo hardware control board to use the same MQTT server port."
+        "description": "Set the port to use for the builtin MQTT broker. Ensure you set the Ratgdo hardware control board to use the same MQTT server port. Default: 18830"
       },
 
       "name": {
