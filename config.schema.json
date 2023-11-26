@@ -1,0 +1,106 @@
+{
+  "pluginAlias": "Ratgdo",
+  "pluginType": "platform",
+  "singular": true,
+  "customUi": false,
+  "headerDisplay": "[homebridge-ratgdo](https://github.com/hjdhjd/homebridge-ratgdo) provides HomeKit support to Chamberlain and Liftmaster garage door openers that use the Ratgdo hardware control board without using myQ. This version is a beta and should not be relied upon daily.",
+  "footerDisplay": "See the [homebridge-ratgdo developer page](https://github.com/hjdhjd/homebridge-ratgdo) for detailed documentation, including [feature options](https://github.com/hjdhjd/homebridge-ratgdo#feature-options). This version is a beta and should not be relied upon daily.",
+  "schema": {
+    "type": "object",
+    "properties": {
+
+      "port": {
+        "title": "MQTT Broker Port",
+        "type": "number",
+        "placeholder": "e.g. 18830",
+        "minimum": 1024,
+        "maximum": 65535,
+        "required": false,
+        "description": "Set the port to use for the builtin MQTT broker. Ensure you set the Ratgdo hardware control board to use the same MQTT server port."
+      },
+
+      "name": {
+        "title": "Plugin Name",
+        "type": "string",
+        "required": true,
+        "default": "Ratgdo",
+        "description": "Name to use for Homebridge logging purposes. Default: Ratgdo."
+      },
+
+      "options": {
+        "title": "Feature Options",
+        "type": "array",
+
+        "items": {
+          "type": "string",
+          "title": "Feature Option",
+          "required": false,
+          "description": "Enter only one option per entry. See the plugin documentation for the complete list of available options or use the feature options webUI tab above.",
+          "placeholder": "e.g. Disable.Device"
+        }
+      },
+
+      "debug": {
+        "title": "Debug Logging",
+        "type": "boolean",
+        "required": false,
+        "description": "Logging verbosity for debugging. Default: false."
+      }
+
+    }
+  },
+
+  "layout": [
+    {
+      "type": "section",
+      "title": "Settings",
+      "expandable": true,
+      "expanded": false,
+      "items": [
+        {
+          "description": "Ensure your Ratgdo hardware control board is configured to use the IP address of your Homebridge server for the MQTT server IP",
+          "items": [
+            "port"
+          ]
+        }
+      ]
+    },
+
+    {
+      "type": "section",
+      "title": "Plugin Feature Options (Not Available Yet)",
+      "expandable": true,
+      "expanded": false,
+      "items": [
+        {
+          "key": "options",
+          "type": "array",
+          "orderable": true,
+          "title": " ",
+          "description": "Use the feature options webUI tab above instead of manually configuring feature options here.",
+          "buttonText": "Add Feature Option",
+          "items": [
+            "options[]"
+          ]
+        }
+      ]
+    },
+
+    {
+      "type": "section",
+      "title": "Advanced Settings (Optional)",
+      "expandable": true,
+      "expanded": false,
+      "items": [
+        {
+          "description": "These settings should be rarely used or needed by most people. Use these with caution.",
+          "items": [
+            "name",
+            "debug"
+          ]
+        }
+      ]
+    }
+
+  ]
+}

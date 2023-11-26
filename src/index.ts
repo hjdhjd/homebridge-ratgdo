@@ -1,11 +1,13 @@
-import { API } from "homebridge";
-
-import { PLATFORM_NAME } from "./settings";
-import { ExampleHomebridgePlatform } from "./platform"; 
-
-/**
- * This method registers the platform with Homebridge
+/* Copyright(C) 2017-2023, HJD (https://github.com/hjdhjd). All rights reserved.
+ *
+ * index.ts: homebridge-ratgdo plugin registration.
  */
-export = (api: API) => {
-  api.registerPlatform(PLATFORM_NAME, ExampleHomebridgePlatform);
-}
+import { PLATFORM_NAME, PLUGIN_NAME } from "./settings.js";
+import { API } from "homebridge";
+import { ratgdoPlatform } from "./ratgdo-platform.js";
+
+// Register our platform with homebridge.
+export default (api: API): void => {
+
+  api.registerPlatform(PLUGIN_NAME, PLATFORM_NAME, ratgdoPlatform);
+};
