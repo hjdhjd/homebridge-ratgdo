@@ -3,8 +3,8 @@
  * ratgdo-device.ts: Base class for all Ratgdo devices.
  */
 import { API, CharacteristicValue, HAP, PlatformAccessory } from "homebridge";
+import { RATGDO_MOTION_DURATION, RATGDO_TRANSITION_DURATION } from "./settings.js";
 import { getOptionFloat, getOptionNumber, getOptionValue, isOptionEnabled, ratgdoOptions } from "./ratgdo-options.js";
-import { RATGDO_MOTION_DURATION } from "./settings.js";
 import { ratgdoPlatform } from "./ratgdo-platform.js";
 import util from "node:util";
 
@@ -53,6 +53,7 @@ export class ratgdoAccessory {
   private readonly api: API;
   private readonly config: ratgdoOptions;
   private device: ratgdoDevice;
+  private doorTimer: NodeJS.Timeout | null;
   private readonly hap: HAP;
   private readonly hints: ratgdoHints;
   public readonly log: ratgdoLogging;
@@ -69,6 +70,7 @@ export class ratgdoAccessory {
     this.api = platform.api;
     this.status = {} as ratgdoStatus;
     this.config = platform.config;
+    this.doorTimer = null;
     this.hap = this.api.hap;
     this.hints = {} as ratgdoHints;
     this.device = device;
@@ -134,7 +136,7 @@ export class ratgdoAccessory {
     this.accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.Model, "Ratgdo");
 
     // Update the serial number for this device.
-    this.accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.SerialNumber, this.device.mac);
+    this.accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.SerialNumber, this.device.mac.replace(/:/g, ""));
 
     // Update the firmware information for this device.
     this.accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.FirmwareRevision,
@@ -228,8 +230,7 @@ export class ratgdoAccessory {
     lightService.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.status.light);
     lightService.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => {
 
-      this.platform.broker.publish({ cmd: "publish", dup: false, payload: value === true ? "on" : "off", qos: 0, retain: false, topic: this.device.name + "/command/light" },
-        () => {});
+      this.command("light", value === true ? "on" : "off");
     });
 
     // Initialize the light.
@@ -294,11 +295,11 @@ export class ratgdoAccessory {
       return false;
     }
 
-    // If we are already opening or closing the garage door, we error out. ratgdo doesn't appear to allow interruptions to an open or close command that is currently executing - it
-    // must be allowed to complete its action before accepting a new one.
+    // If we are already opening or closing the garage door, we error out. As a precaution, we ensure we complete the current action before allowing a new one. This behavior may
+    // change in the future, but for now, we manage this edge case by eliminating the possibility of doing so.
     if((this.status.door === this.hap.Characteristic.CurrentDoorState.OPENING) || (this.status.door === this.hap.Characteristic.CurrentDoorState.CLOSING)) {
 
-      this.log.error("Unable to %s door while currently attempting to complete %s. Ratgdo must complete it's existing action before attempting a new one.",
+      this.log.error("Unable to %s door while currently attempting to complete %s. The existing action must be allowed to complete before attempting a new one.",
         actionAttempt, actionExisting);
 
       return false;
@@ -311,7 +312,7 @@ export class ratgdoAccessory {
       if(this.status.door !== this.hap.Characteristic.CurrentDoorState.CLOSED) {
 
         // Execute the command.
-        this.platform.broker.publish({ cmd: "publish", dup: false, payload: "close", qos: 0, retain: false, topic: this.device.name + "/command/door" }, () => {});
+        this.command("door", "close", "closing");
       }
 
       return true;
@@ -324,7 +325,7 @@ export class ratgdoAccessory {
       if(this.status.door !== this.hap.Characteristic.CurrentDoorState.OPEN) {
 
         // Execute the command.
-        this.platform.broker.publish({ cmd: "publish", dup: false, payload: "open", qos: 0, retain: false, topic: this.device.name + "/command/door" }, () => {});
+        this.command("door", "open", "opening");
       }
 
       return true;
@@ -338,8 +339,6 @@ export class ratgdoAccessory {
 
   // Update the state of the accessory.
   public updateState(event: string, payload: string): void {
-
-    let currentState, targetState;
 
     const camelCase = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1);
 
@@ -359,47 +358,76 @@ export class ratgdoAccessory {
 
       case "door":
 
+        // Clear out our door transition timer, if we have one.
+        if(this.doorTimer) {
+
+          clearTimeout(this.doorTimer);
+          this.doorTimer = null;
+        }
+
         switch(payload) {
 
           case "closed":
 
-            currentState = this.hap.Characteristic.CurrentDoorState.CLOSED;
+            this.status.door = this.hap.Characteristic.CurrentDoorState.CLOSED;
             break;
 
           case "closing":
 
-            currentState = this.hap.Characteristic.CurrentDoorState.CLOSING;
+            this.status.door = this.hap.Characteristic.CurrentDoorState.CLOSING;
+
+            // As a safety measure for occasionally unreliable MQTT message delivery, let's ensure we generate a closed state after a reasonable transition period. If we receive
+            // an actual state update before this, this safety measure won't be triggered.
+            this.doorTimer = setTimeout(() => {
+
+              // Mark the door as closed.
+              this.log.debug("Generating a close event to complete the state transition.");
+              this.updateState("door", "closed");
+              this.doorTimer = null;
+            }, RATGDO_TRANSITION_DURATION * 1000);
+
             break;
 
           case "open":
 
-            currentState = this.hap.Characteristic.CurrentDoorState.OPEN;
+            this.status.door = this.hap.Characteristic.CurrentDoorState.OPEN;
             break;
 
           case "opening":
 
-            currentState = this.hap.Characteristic.CurrentDoorState.OPENING;
+            this.status.door = this.hap.Characteristic.CurrentDoorState.OPENING;
+
+            // As a safety measure for occasionally unreliable MQTT message delivery, let's ensure we generate an open state after a reasonable transition period. If we receive
+            // an actual state update before this, this safety measure won't be triggered.
+            this.doorTimer = setTimeout(() => {
+
+              // Mark the door as open.
+              this.log.debug("Generating an open event to complete the state transition.");
+              this.updateState("door", "open");
+              this.doorTimer = null;
+            }, RATGDO_TRANSITION_DURATION * 1000);
+
             break;
 
           case "stopped":
 
-            currentState = this.hap.Characteristic.CurrentDoorState.STOPPED;
+            this.status.door = this.hap.Characteristic.CurrentDoorState.STOPPED;
             break;
 
           default:
 
-            currentState = this.hap.Characteristic.CurrentDoorState.CLOSED;
+            this.status.door = this.hap.Characteristic.CurrentDoorState.CLOSED;
             break;
         }
 
         // We are only going to update the target state if our current state is NOT stopped. If we are stopped, we are at the target state by definition. We also want to
         // ensure we update TargetDoorState before updating CurrentDoorState in order to work around some notification quirks HomeKit occasionally has.
-        if(currentState !== this.hap.Characteristic.CurrentDoorState.STOPPED) {
+        if(this.status.door !== this.hap.Characteristic.CurrentDoorState.STOPPED) {
 
-          this.accessory.getService(this.hap.Service.GarageDoorOpener)?.updateCharacteristic(this.hap.Characteristic.TargetDoorState, this.doorTargetStateBias(currentState));
+          this.accessory.getService(this.hap.Service.GarageDoorOpener)?.updateCharacteristic(this.hap.Characteristic.TargetDoorState, this.doorTargetStateBias(this.status.door));
         }
 
-        this.accessory.getService(this.hap.Service.GarageDoorOpener)?.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, currentState);
+        this.accessory.getService(this.hap.Service.GarageDoorOpener)?.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.status.door);
 
         // Inform the user:
         this.log.info("%s.", camelCase(payload));
@@ -417,12 +445,12 @@ export class ratgdoAccessory {
       case "lock":
 
         // Determine our current and target lock states.
-        currentState = payload === "locked" ? this.hap.Characteristic.LockCurrentState.UNSECURED : this.hap.Characteristic.LockCurrentState.UNSECURED;
-        targetState = payload === "locked" ? this.hap.Characteristic.LockTargetState.UNSECURED : this.hap.Characteristic.LockTargetState.UNSECURED;
+        this.status.lock = payload === "locked" ? this.hap.Characteristic.LockCurrentState.SECURED : this.hap.Characteristic.LockCurrentState.UNSECURED;
 
         // Update our lock state.
-        this.accessory.getService(this.hap.Service.GarageDoorOpener)?.updateCharacteristic(this.hap.Characteristic.LockTargetState, targetState);
-        this.accessory.getService(this.hap.Service.GarageDoorOpener)?.updateCharacteristic(this.hap.Characteristic.LockCurrentState, currentState);
+        this.accessory.getService(this.hap.Service.GarageDoorOpener)?.updateCharacteristic(this.hap.Characteristic.LockTargetState,
+          payload === "locked" ? this.hap.Characteristic.LockTargetState.SECURED : this.hap.Characteristic.LockTargetState.UNSECURED);
+        this.accessory.getService(this.hap.Service.GarageDoorOpener)?.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.status.lock);
 
         // Inform the user:
         this.log.info("%s.", camelCase(payload));
@@ -547,6 +575,18 @@ export class ratgdoAccessory {
 
         return this.hap.Characteristic.LockTargetState.UNSECURED;
         break;
+    }
+  }
+
+  // Utility function to transmit a command to Ratgdo.
+  private command(topic: string, payload: string, updatePayload?: string): void {
+
+    this.platform.broker.publish({ cmd: "publish", dup: false, payload: payload, qos: 2, retain: false, topic: this.device.name + "/command/" + topic }, () => {});
+
+    // Update our internal state as well.
+    if(updatePayload) {
+
+      this.updateState(topic, updatePayload);
     }
   }
 
