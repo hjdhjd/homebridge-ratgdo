@@ -188,8 +188,7 @@ export class ratgdoPlatform implements DynamicPlatformPlugin {
       }
 
       // Log unknown / unhandled messages.
-      this.log.debug("Topic: %s", packet.topic);
-      this.log.debug("Message: %s", packet.payload.toString());
+      this.log.debug("Topic: " + packet.topic + " | Message: " + packet.payload.toString());
     });
 
     // Start the broker so we can receive connections from Ratgdo MQTT clients.
@@ -271,7 +270,7 @@ export class ratgdoPlatform implements DynamicPlatformPlugin {
 
     if(this.config.debug) {
 
-      this.log.info(util.format(message, ...parameters));
+      this.log.error(util.format(message, ...parameters));
     }
   }
 }
