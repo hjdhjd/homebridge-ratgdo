@@ -2,21 +2,35 @@
   "pluginAlias": "Ratgdo",
   "pluginType": "platform",
   "singular": true,
-  "customUi": false,
+  "customUi": true,
   "headerDisplay": "[homebridge-ratgdo](https://github.com/hjdhjd/homebridge-ratgdo) provides HomeKit support to Chamberlain and Liftmaster garage door openers that use the Ratgdo hardware control board without using myQ. This version is a beta and should not be relied upon daily.",
   "footerDisplay": "See the [homebridge-ratgdo developer page](https://github.com/hjdhjd/homebridge-ratgdo) for detailed documentation, including [feature options](https://github.com/hjdhjd/homebridge-ratgdo#feature-options). This version is a beta and should not be relied upon daily.",
   "schema": {
     "type": "object",
     "properties": {
 
-      "port": {
-        "title": "MQTT Broker Port",
-        "type": "number",
-        "placeholder": "e.g. 18830",
-        "minimum": 1024,
-        "maximum": 65535,
+      "debug": {
+        "title": "Debug Logging",
+        "type": "boolean",
         "required": false,
-        "description": "Set the port to use for the builtin MQTT broker. Ensure you set the Ratgdo hardware control board to use the same MQTT server port. Default: 18830"
+        "description": "Logging verbosity for debugging. Default: false."
+      },
+
+      "mqttTopic": {
+        "type": "string",
+        "title": "MQTT Base Topic",
+        "required": false,
+        "placeholder": "e.g. ratgdo",
+        "description": "The base MQTT topic to publish to. Default: ratgdo."
+      },
+
+      "mqttUrl": {
+        "type": "string",
+        "title": "MQTT Broker URL",
+        "required": false,
+        "format": "uri",
+        "placeholder": "e.g. mqtt://1.2.3.4",
+        "description": "URL for the MQTT broker you'd like to publish event messages to. Default: None."
       },
 
       "name": {
@@ -40,13 +54,15 @@
         }
       },
 
-      "debug": {
-        "title": "Debug Logging",
-        "type": "boolean",
+      "port": {
+        "title": "MQTT Broker Port",
+        "type": "number",
+        "placeholder": "e.g. 18830",
+        "minimum": 1024,
+        "maximum": 65535,
         "required": false,
-        "description": "Logging verbosity for debugging. Default: false."
+        "description": "Set the port to use for the builtin MQTT broker. Ensure you set the Ratgdo hardware control board to use the same MQTT server port. Default: 18830"
       }
-
     }
   },
 
@@ -68,7 +84,7 @@
 
     {
       "type": "section",
-      "title": "Plugin Feature Options (Not Available Yet)",
+      "title": "Plugin Feature Options",
       "expandable": true,
       "expanded": false,
       "items": [
@@ -81,6 +97,22 @@
           "buttonText": "Add Feature Option",
           "items": [
             "options[]"
+          ]
+        }
+      ]
+    },
+
+    {
+      "type": "section",
+      "title": "MQTT Settings (Optional)",
+      "expandable": true,
+      "expanded": false,
+      "items": [
+        {
+          "description": "MQTT support will only be enabled if an MQTT broker URL is specified below.",
+          "items": [
+            "mqttUrl",
+            "mqttTopic"
           ]
         }
       ]

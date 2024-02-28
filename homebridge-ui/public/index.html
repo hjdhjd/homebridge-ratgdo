@@ -1,0 +1,116 @@
+<p class="text-center">
+  <img src="https://raw.githubusercontent.com/hjdhjd/homebridge-ratgdo/main/images/homebridge-ratgdo.svg" alt="homebridge-ratgdo logo" class="w-50" />
+</p>
+<div id="pageFirstRun" style="display: none;">
+  <div class="text-left">
+    <p>Welcome to <strong>homebridge-ratgdo</strong>. To get started:
+      <ol>
+        <li>Ensure you're running the latest <a href="https://paulwieland.github.io/ratgdo/flash.html">Ratgdo MQTT firmware</a>.</li>
+        <li>Edit the MQTT server and port configuration using the webUI on your Ratgdo devices to the IP address of this Homebridge server and port <code id="serverPortInfo" class="font-weight-bold"></code>.</li>
+      </ol>
+    </p>
+  </div>
+  <div class="text-center">
+    <br>
+      <button type="button" class="btn btn-primary" id="firstRun">Configure homebridge-ratgdo &rarr;</button>
+    <br>
+      To optimize performance and responsiveness, please make this plugin a <a target="_blank" href="https://github.com/homebridge/homebridge/wiki/Child-Bridges">child bridge</a> once you've completed configuration.
+  </div>
+</div>
+<div id="menuWrapper" class="btn-group w-100 mb-0" role="group" aria-label="UI Menu" style="display: none;">
+  <button type="button" class="btn btn-primary" id="menuSettings">Settings</button>
+  <button type="button" class="btn btn-primary" id="menuFeatureOptions">Feature Options</button>
+  <button type="button" class="btn btn-primary mr-0" id="menuHome">Support</button>
+</div>
+<div id="pageFeatureOptions" class="mt-4" style="display: none;">
+  <div id="deviceInfo">
+    <table class="table table-sm table-borderless">
+      <tr class="align-center">
+        <td id="headerInfo" colspan="2" class="m-0 p-2 text-center font-weight-bold"></td>
+      </tr>
+      <tr class="align-top">
+        <td rowspan="3" class="w-25">
+          <table id="sidebar" class="table table-sm table-bordered m-0 p-0">
+            <tr>
+              <td>
+                <table class="table table-sm table-borderless m-0 p-0" id="controllersTable"></table>
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <table class="table table-sm table-borderless m-0 p-0" id="devicesTable"></table>
+              </td>
+            </tr>
+          </table>
+        </td>
+        <td id="deviceStatsTable">
+          <table class="table table-sm table-borderless border-bottom m-0 p-0">
+            <tr id="deviceStatsHeader">
+              <th class="m-0 p-0 w-25"><B>Serial</B></th>
+              <th class="m-0 p-0 w-25"><B>Firmware<B></th>
+            </tr>
+            <tr>
+              <td id="device_serial" class="m-0 p-0"></td>
+              <td id="device_firmware" class="m-0 p-0"></td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+      <tr>
+        <td id="configTable" class="w-100"></td>
+      </tr>
+    </table>
+  </div>
+</div>
+<div id="pageSupport" class="mt-4" style="display: none;">
+  <h5>Introduction</h5>
+    <p class="px-4">I hope you enjoy <a target="_blank" href="https://github.com/hjdhjd/homebridge-ratgdo">homebridge-ratgdo</a> as much as I enjoy developing it. All my projects are labors of love. If you'd like to show your appreciation - <a target="_blank" href="https://github.com/hjdhjd/homebridge-ratgdo">star this project on Github</A> and do some good in your community, either financially or with your time: a food bank, an animal shelter (two of my passions), or whatever resonates with you that can give something back to the world around you.</p>
+
+    <div class="px-4">
+      Other plugins by <a target="_blank" href="https://github.com/hjdhjd">HJD</a>:
+
+      <ul dir="auto">
+        <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-protect">homebridge-unifi-protect: Complete HomeKit integration for the entire UniFi Protect ecosystem</a></li>
+      </ul>
+    </div>
+
+  <h5>Getting Started</h5>
+    <ul dir="auto">
+      <li>
+        <a target="_blank" href="https://github.com/hjdhjd/homebridge-ratgdo#installation">Installation</a>: installing this plugin, including system requirements.
+      </li>
+      <li>
+        <a target="_blank" href="https://github.com/hjdhjd/homebridge-ratgdo#plugin-configuration">Plugin Configuration</a>: how to quickly get up and running.
+      </li>
+      <li>
+        <a target="_blank" href="https://github.com/hjdhjd/homebridge-ratgdo#notes">Additional Notes</a>: some things you should be aware of, including Ratgdo-specific quirks.
+      </li>
+    </ul>
+
+  <h5>Advanced Topics</h5>
+    <ul dir="auto">
+      <li>
+        <a target="_blank" href="https://github.com/hjdhjd/homebridge-ratgdo/blob/main/docs/FeatureOptions.md">Feature Options</a>: granular options to allow you to show or hide specific garage door and gate openers, and more.
+      </li>
+      <li>
+        <a target="_blank" href="https://github.com/hjdhjd/homebridge-ratgdo/blob/main/docs/MQTT.md">MQTT</a>: how to configure MQTT support.
+      </li>
+      <li>
+        <a target="_blank" href="https://github.com/hjdhjd/homebridge-ratgdo/blob/main/docs/AdvancedOptions.md">Advanced Configuration</a>: complete list of configuration options available in this plugin.
+      </li>
+    </ul>
+
+  <h5>Support</h5>
+  <ul>
+    <li>
+      <a target="_blank" href="https://discord.gg/QXqfHEW">Discord Support Channel</a>
+    </li>
+    <li>
+      <a target="_blank" href="https://github.com/hjdhjd/homebridge-ratgdo/issues/new/choose">Create a Developer Support Request</a>
+    </li>
+    <li>
+      <a target="_blank" href="https://github.com/hjdhjd/homebridge-ratgdo/blob/main/docs/Changelog.md">Changelog and Release Notes</a>
+    </li>
+  </ul>
+</div>
+<script src="./ui.mjs" type="module"></script>
