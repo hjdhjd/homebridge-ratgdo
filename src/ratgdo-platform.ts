@@ -1,20 +1,23 @@
-/* Copyright(C) 2017-2023, HJD (https://github.com/hjdhjd). All rights reserved.
+/* Copyright(C) 2017-2024, HJD (https://github.com/hjdhjd). All rights reserved.
  *
  * ratgdo-platform.ts: homebridge-ratgdo platform class.
  */
 import { API, APIEvent, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
-import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_API_PORT } from "./settings.js";
+import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_API_PORT, RATGDO_MQTT_TOPIC } from "./settings.js";
+import { RatgdoOptions, featureOptionCategories, featureOptions, isOptionEnabled } from "./ratgdo-options.js";
 import { Server, createServer } from "node:net";
-import { featureOptionCategories, featureOptions, ratgdoOptions } from "./ratgdo-options.js";
 import Aedes from "aedes";
-import { ratgdoAccessory } from "./ratgdo-device.js";
-
+import { RatgdoAccessory } from "./ratgdo-device.js";
+import { RatgdoMqtt } from "./ratgdo-mqtt.js";
+import { URL } from "node:url";
 import util from "node:util";
 
 interface haConfigJson {
+
   "~": string,
   device: {
 
+    configuration_url: string,
     identifiers: string,
     manufacturer: string,
     model: string,
@@ -25,18 +28,19 @@ interface haConfigJson {
   unique_id: string,
 }
 
-export class ratgdoPlatform implements DynamicPlatformPlugin {
+export class RatgdoPlatform implements DynamicPlatformPlugin {
 
   private readonly accessories: PlatformAccessory[];
   public readonly api: API;
   public broker: Aedes;
   private deviceMac: { [index: string]: string };
   private featureOptionDefaults: { [index: string]: boolean };
-  public config!: ratgdoOptions;
+  public config!: RatgdoOptions;
   public readonly configOptions: string[];
-  public readonly configuredDevices: { [index: string]: ratgdoAccessory };
+  public readonly configuredDevices: { [index: string]: RatgdoAccessory };
   public readonly hap: HAP;
   public readonly log: Logging;
+  public readonly mqtt: RatgdoMqtt | null;
   private server: Server;
   private unsupportedDevices: { [index: string]: boolean };
 
@@ -52,6 +56,7 @@ export class ratgdoPlatform implements DynamicPlatformPlugin {
     this.hap = api.hap;
     this.log = log;
     this.log.debug = this.debug.bind(this);
+    this.mqtt = null;
     this.server = createServer(this.broker.handle);
     this.server.unref();
     this.unsupportedDevices = {};
@@ -86,6 +91,8 @@ export class ratgdoPlatform implements DynamicPlatformPlugin {
     this.config = {
 
       debug: config.debug === true,
+      mqttTopic: (config.mqttTopic as string) ?? RATGDO_MQTT_TOPIC,
+      mqttUrl: config.mqttUrl as string,
       options: config.options as string[],
       port: "port" in config ? parseInt(config.port as string) : RATGDO_API_PORT
     };
@@ -97,6 +104,12 @@ export class ratgdoPlatform implements DynamicPlatformPlugin {
 
         this.configOptions.push(featureOption.toLowerCase());
       }
+    }
+
+    // Initialize MQTT, if needed.
+    if(this.config.mqttUrl) {
+
+      this.mqtt = new RatgdoMqtt(this);
     }
 
     this.log.debug("Debug logging on. Expect a lot of data.");
@@ -225,30 +238,55 @@ export class ratgdoPlatform implements DynamicPlatformPlugin {
     // Generate this device's unique identifier.
     const uuid = this.hap.uuid.generate(mac);
 
-    // See if we already know about this accessory or if it's truly new. If it is new, add it to HomeKit.
+    // See if we already know about this accessory or if it's truly new.
     let accessory = this.accessories.find(x => x.UUID === uuid);
 
+    // Our device details.
+    const device = {
+
+      address: new URL(deviceInfo.device.configuration_url)?.hostname ?? "unknown",
+      firmwareVersion: deviceInfo.device.sw_version,
+      mac: mac.replace(/:/g, ""),
+      name: deviceInfo["~"]
+    };
+
+    // Inform the user.
+    this.log.info("Discovered: %s (address: %s mac: %s firmware: v%s).", device.name, device.address, device.mac, device.firmwareVersion);
+
+    // Check to see if the user has disabled the device.
+    if(!isOptionEnabled(this.configOptions, device, "Device", this.featureOptionDefault("Device"))) {
+
+      // If the accessory already exists, let's remove it.
+      if(accessory) {
+
+        // Inform the user.
+        this.log.info("%s: Removing device from HomeKit.", accessory.displayName);
+
+        // Unregister the accessory and delete it's remnants from HomeKit.
+        this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [ accessory ]);
+        this.accessories.splice(this.accessories.indexOf(accessory), 1);
+        this.api.updatePlatformAccessories(this.accessories);
+      }
+
+      // We're done.
+      return;
+    }
+
+    // It's a new device - let's add it to HomeKit.
     if(!accessory) {
 
-      accessory = new this.api.platformAccessory(deviceInfo["~"], uuid);
+      accessory = new this.api.platformAccessory(device.name, uuid);
 
       // Register this accessory with Homebridge and add it to the accessory array so we can track it.
       this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
       this.accessories.push(accessory);
     }
 
-    const garageDoor = this.configuredDevices[accessory.UUID] = new ratgdoAccessory(this, accessory, {
-
-      firmwareVersion: deviceInfo.device.sw_version,
-      mac: mac,
-      name: deviceInfo["~"]
-    });
+    // Add it to our list of configured devices.
+    this.configuredDevices[accessory.UUID] = new RatgdoAccessory(this, accessory, device);
 
     // Refresh the accessory cache.
     this.api.updatePlatformAccessories([accessory]);
-
-    // Inform the user.
-    garageDoor.log.info("Device configured.");
   }
 
   // Utility to return the default value for a feature option.

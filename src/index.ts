@@ -1,13 +1,13 @@
-/* Copyright(C) 2017-2023, HJD (https://github.com/hjdhjd). All rights reserved.
+/* Copyright(C) 2017-2024, HJD (https://github.com/hjdhjd). All rights reserved.
  *
  * index.ts: homebridge-ratgdo plugin registration.
  */
 import { PLATFORM_NAME, PLUGIN_NAME } from "./settings.js";
 import { API } from "homebridge";
-import { ratgdoPlatform } from "./ratgdo-platform.js";
+import { RatgdoPlatform } from "./ratgdo-platform.js";
 
 // Register our platform with homebridge.
 export default (api: API): void => {
 
-  api.registerPlatform(PLUGIN_NAME, PLATFORM_NAME, ratgdoPlatform);
+  api.registerPlatform(PLUGIN_NAME, PLATFORM_NAME, RatgdoPlatform);
 };

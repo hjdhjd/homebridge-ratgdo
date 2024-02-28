@@ -19,14 +19,18 @@ In a nutshell, the aim of this plugin for things to *just work* with minimal req
 
 What does *just work* mean in practice? It means that this plugin will discover all your Ratgdo devices without the need for additional configuration beyond telling the Ratgdo device about `homebridge-ratgdo`.
 
-**I rely on this plugin every day and actively maintain and support it. That said, at the moment, this plugin should be considered beta and is still evolving its core feature set. I am currently not accepting any issues or feedback through GitHub for the time being, though support on the Homebridge Discord is available on the ratgdo channel.**
+**I rely on this plugin every day and actively maintain and support it.**
 
-In the interest of the community seeking a solution outside of myQ, I'm releasing an initial implementation that enables the following features:
+In the interest of the community seeking a solution outside of myQ, I've developed a full-featured Homebridge plugin that enables the following features:
 
   * Control of the garage door opener. This includes, for those that have always wanted the feature, the ability to close the garage door without the requisite safety warning and delay that Chamberlain and Liftmaster garage door openers emit when being controlled remotely.
   * A motion sensor when it's available.
   * Control of the light attached to the garage door opener, when available.
   * Obstruction detection.
+  * Occupancy sensor support.
+  * Read-only garage door opener support.
+  * Automation switch support.
+  * A rich webUI for configuration.
 
 ## Getting Started
 To get started with `homebridge-ratgdo`:
@@ -35,7 +39,7 @@ To get started with `homebridge-ratgdo`:
   * [Carefully](#known-caveats) edit the MQTT server and port on your Ratgdo device to the IP address of your Homebridge server, and port 18830 (unless you've changed the default port in `homebridge-ratgdo`).
 
 ## Known Caveats
-Ratgdo is a terrific solution that solves a problem for many stranded former myQ users and others. There are some quirks and caveats to note, however. As of Ratgdo firmware v2.51:
+Ratgdo is a terrific solution that solves a problem for many stranded former myQ users and others. There are some quirks and caveats to note, however. As of Ratgdo firmware v2.57:
 
   * Misconfiguring your MQTT server IP or port number in any way **will** lock up / brick the Ratgdo. The only fix for this I've discovered is to reflash the Ratgdo and don't misconfigure it the next time around.
   * Ratgdo currently has no useful way to query it's state over MQTT. That means that on startup, the state of the garage door opener in Homebridge / HomeKit will be unknowable. Given that challenge, `homebridge-ratgdo` will assume the garage door opener is closed on startup. Once an action is taken, the state of the garage door opener will be accurately reflected in Homebridge / HomeKit. There is technically a *query* command available through the MQTT interface to Ratgdo, but all that currently does is to set the Ratgdo state information to an unknown state, awaiting the next state update from the garage door opener, rather than actually publish the current state, which is really what we need.

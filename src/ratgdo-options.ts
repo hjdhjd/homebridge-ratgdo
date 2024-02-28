@@ -1,14 +1,16 @@
-/* Copyright(C) 2017-2023, HJD (https://github.com/hjdhjd). All rights reserved.
+/* Copyright(C) 2017-2024, HJD (https://github.com/hjdhjd). All rights reserved.
  *
  * ratgdo-options.ts: Feature option and type definitions for Ratgdo.
  */
 import { RATGDO_OCCUPANCY_DURATION } from "./settings.js";
-import { ratgdoDevice } from "./ratgdo-device.js";
+import { RatgdoDevice } from "./ratgdo-types.js";
 
 // Plugin configuration options.
-export interface ratgdoOptions {
+export interface RatgdoOptions {
 
   debug: boolean,
+  mqttTopic: string,
+  mqttUrl: string,
   options: string[],
   port: number
 }
@@ -17,10 +19,12 @@ export interface ratgdoOptions {
 export const featureOptionCategories = [
 
   { description: "Device feature options.", name: "Device", validFor: [ "all" ] },
-  { description: "Opener feature options.", name: "Opener", validFor: [ "opener" ] }
+  { description: "Opener feature options.", name: "Opener", validFor: [ "opener" ] },
+  { description: "Opener light feature options.", name: "Light", validFor: [ "opener" ] },
+  { description: "Opener motion feature options.", name: "Motion", validFor: [ "opener" ] }
 ];
 
-/* eslint-disable max-len */
+/* eslint-disable @stylistic/max-len */
 // Individual feature options, broken out by category.
 export const featureOptions: { [index: string]: FeatureOption[] } = {
 
@@ -28,7 +32,21 @@ export const featureOptions: { [index: string]: FeatureOption[] } = {
   "Device": [
 
     { default: true, description: "Make this device available in HomeKit.", name: "" },
-    { default: false, description: "Synchronize the Ratgdo name of this device with HomeKit. Synchronization is one-way only, syncing the device name from Ratgdo to HomeKit.", name: "SyncNames" }
+    { default: false, description: "Synchronize the Ratgdo name of this device with HomeKit. Synchronization is one-way only, syncing the device name from Ratgdo to HomeKit.", name: "SyncName" }
+  ],
+
+  // Light options.
+  "Light": [
+
+    { default: true, description: "Make the light on the opener available in HomeKit.", name: "" }
+  ],
+
+  // Motion options.
+  "Motion": [
+
+    { default: true, description: "Make the motion sensor on the opener available in HomeKit.", name: "" },
+    { default: false, description: "Add an occupancy sensor accessory using motion sensor activity to determine occupancy.", name: "OccupancySensor" },
+    { default: false, defaultValue: RATGDO_OCCUPANCY_DURATION, description: "Duration, in seconds, to wait without receiving a motion event to determine when occupancy is no longer detected.", group: "OccupancySensor", name: "OccupancySensor.Duration" }
   ],
 
   // Opener options.
@@ -40,7 +58,7 @@ export const featureOptions: { [index: string]: FeatureOption[] } = {
     { default: false, defaultValue: RATGDO_OCCUPANCY_DURATION, description: "Duration, in seconds, to wait once the opener has reached the open state before indicating occupancy.", group: "OccupancySensor", name: "OccupancySensor.Duration" }
   ]
 };
-/* eslint-enable max-len */
+/* eslint-enable @stylistic/max-len */
 
 export interface FeatureOption {
 
@@ -48,13 +66,11 @@ export interface FeatureOption {
   defaultValue?: number,      // Default value for value-based feature options.
   description: string,        // Description of the feature option.
   group?: string,             // Feature option grouping for related options.
-  hasFeature?: string[],      // What hardware-specific features, if any, is this feature option dependent on.
-  hasProperty?: string[],     // What Ratgdo JSON property, if any, is this feature option dependent on.
   name: string                // Name of the feature option.
 }
 
 // Utility function to let us know whether a feature option should be enabled or not, traversing the scope hierarchy.
-export function isOptionEnabled(configOptions: string[], device: ratgdoDevice | null, option = "", defaultReturnValue = true): boolean {
+export function isOptionEnabled(configOptions: string[], device: RatgdoDevice | null, option = "", defaultReturnValue = true): boolean {
 
   // Nothing configured - we assume the default return value.
   if(!configOptions.length) {
@@ -105,7 +121,7 @@ export function isOptionEnabled(configOptions: string[], device: ratgdoDevice | 
 }
 
 // Utility function to return a value-based feature option for a Ratgdo device.
-export function getOptionValue(configOptions: string[], device: ratgdoDevice | null, option: string): string | undefined {
+export function getOptionValue(configOptions: string[], device: RatgdoDevice | null, option: string): string | undefined {
 
   // Nothing configured - we assume there's nothing.
   if(!configOptions.length || !option) {

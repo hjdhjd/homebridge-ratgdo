@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 1.0.0 (2024-02-28)
+  * New feature: a rich webUI is now available for `homebridge-ratgdo`.
+  * New feature: read-only support to prevent someone from being able to open or close your garage door opener. Disabled by default.
+  * New feature: door open state occupancy sensor support. This is a useful feature to those who want to create automations based on the opener being **open** for an extended duration of time. By default the duration is 5 minutes and is configurable within the Ratgdo webUI. See the feature option tab for all the goodies. Disabled by default.
+  * New feature: occupancy sensor support, using the garage door opener's motion sensor. If you enable the occupancy sensor feature option, an occupancy sensor accessory will be added to the opener. The occupancy sensor works like this: when any motion is detected by that opener's motion sensor, occupancy is triggered. When no motion has been detected for a certain amount of time (5 minutes by default), occupancy will no longer be triggered. This is useful in various automation scenarios that folks might want (e.g. occupancy triggering a light turning on/off). Disabled by default.
+  * New feature: you can now synchronize names of your Ratgdo devices with HomeKit. Synchronization is one-way and it will always view the Ratgdo name as the definitive source. Synchronization is only done at plugin startup - you'll need to restart `homebridge-ratgdo` to trigger a name synchronization event. The option is disabled by default.
+  * New feature: MQTT support.
+  * Housekeeping.
+
 ## 0.2.0 (2023-11-29)
   * Improvement: make open/close state transitions more robust to gracefully handle scenarios where Ratgdo doesn't seem to always share notifications when state transitions complete.
   * Housekeeping.
