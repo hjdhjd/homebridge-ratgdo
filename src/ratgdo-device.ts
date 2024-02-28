@@ -119,6 +119,16 @@ export class RatgdoAccessory {
     this.hints.readOnly = this.hasFeature("Opener.ReadOnly");
     this.hints.syncName = this.hasFeature("Device.SyncName");
 
+    if(this.hints.readOnly) {
+
+      this.log.info("Garage door opener is read-only. The opener will not respond to open and close requests from HomeKit.");
+    }
+
+    if(this.hints.syncName) {
+
+      this.log.info("Syncing Ratgdo device name to HomeKit.");
+    }
+
     return true;
   }
 
@@ -333,14 +343,13 @@ export class RatgdoAccessory {
       }
 
       lightService.addOptionalCharacteristic(this.hap.Characteristic.ConfiguredName);
+      lightService.updateCharacteristic(this.hap.Characteristic.Name, this.name);
+      this.setServiceName(lightService, this.name);
       this.accessory.addService(lightService);
       this.log.info("Enabling light.");
     }
 
     // Initialize the light.
-    lightService.displayName = this.name;
-    lightService.updateCharacteristic(this.hap.Characteristic.Name, this.name);
-    lightService.updateCharacteristic(this.hap.Characteristic.ConfiguredName, this.name);
     lightService.updateCharacteristic(this.hap.Characteristic.On, this.status.light);
 
     // Turn the light on or off.
@@ -384,14 +393,13 @@ export class RatgdoAccessory {
       }
 
       motionService.addOptionalCharacteristic(this.hap.Characteristic.ConfiguredName);
+      motionService.updateCharacteristic(this.hap.Characteristic.Name, this.name);
+      this.setServiceName(motionService, this.name);
       this.accessory.addService(motionService);
       this.log.info("Enabling motion sensor.");
     }
 
     // Initialize the state of the motion sensor.
-    motionService.displayName = this.name;
-    motionService.updateCharacteristic(this.hap.Characteristic.Name, this.name);
-    motionService.updateCharacteristic(this.hap.Characteristic.ConfiguredName, this.name);
     motionService.updateCharacteristic(this.hap.Characteristic.MotionDetected, false);
     motionService.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
 
@@ -430,6 +438,7 @@ export class RatgdoAccessory {
       }
 
       switchService.addOptionalCharacteristic(this.hap.Characteristic.ConfiguredName);
+      this.setServiceName(switchService, this.name + " Automation Switch");
       this.accessory.addService(switchService);
     }
 
@@ -458,7 +467,6 @@ export class RatgdoAccessory {
     });
 
     // Initialize the switch.
-    switchService.updateCharacteristic(this.hap.Characteristic.ConfiguredName, this.name + " Automation Switch");
     switchService.updateCharacteristic(this.hap.Characteristic.On, this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED);
 
     this.log.info("Enabling automation switch.");
@@ -497,11 +505,9 @@ export class RatgdoAccessory {
       }
 
       occupancyService.addOptionalCharacteristic(this.hap.Characteristic.ConfiguredName);
+      this.setServiceName(occupancyService, this.name + " Open");
       this.accessory.addService(occupancyService);
     }
-
-    // Ensure we can configure the name of the occupancy sensor.
-    occupancyService.updateCharacteristic(this.hap.Characteristic.ConfiguredName, this.name + " Open");
 
     // Initialize the state of the occupancy sensor.
     occupancyService.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, false);
@@ -549,11 +555,9 @@ export class RatgdoAccessory {
       }
 
       occupancyService.addOptionalCharacteristic(this.hap.Characteristic.ConfiguredName);
+      this.setServiceName(occupancyService, this.name);
       this.accessory.addService(occupancyService);
     }
-
-    // Ensure we can configure the name of the occupancy sensor.
-    occupancyService.updateCharacteristic(this.hap.Characteristic.ConfiguredName, this.name);
 
     // Initialize the state of the occupancy sensor.
     occupancyService.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, false);
@@ -572,7 +576,6 @@ export class RatgdoAccessory {
   // Open or close the garage door.
   private setDoorState(value: CharacteristicValue): boolean {
 
-    const actionExisting = this.status.door === this.hap.Characteristic.CurrentDoorState.OPENING ? "opening" : "closing";
     const actionAttempt = value === this.hap.Characteristic.TargetDoorState.CLOSED ? "close" : "open";
 
     // If this garage door is read-only, we won't process any requests to set state.
@@ -590,14 +593,14 @@ export class RatgdoAccessory {
       return false;
     }
 
-    // If we are already opening or closing the garage door, we error out. As a precaution, we ensure we complete the current action before allowing a new one.
-    // This behavior may change in the future, but for now, we manage this edge case by eliminating the possibility of doing so.
+    // If we are already opening or closing the garage door, we assume the user wants to stop the garage door opener at it's current location.
     if((this.status.door === this.hap.Characteristic.CurrentDoorState.OPENING) || (this.status.door === this.hap.Characteristic.CurrentDoorState.CLOSING)) {
 
-      this.log.error("Unable to %s door while currently attempting to complete %s. The existing action must be allowed to complete before attempting a new one.",
-        actionAttempt, actionExisting);
+      this.log.debug("Stop requested from user while transitioning between open and close states.");
 
-      return false;
+      // Execute the stop command.
+      this.command("door", "stop");
+      return true;
     }
 
     // Close the garage door.
@@ -642,6 +645,9 @@ export class RatgdoAccessory {
     const motionOccupancyService = this.accessory.getServiceById(this.hap.Service.OccupancySensor, RatgdoReservedNames.OCCUPANCY_SENSOR_MOTION);
     const motionService = this.accessory.getService(this.hap.Service.MotionSensor);
     const switchService = this.accessory.getServiceById(this.hap.Service.Switch, RatgdoReservedNames.SWITCH_OPENER_AUTOMATION);
+
+    // We continuously rebroadcast our device information.
+    this.configureInfo();
 
     switch(event) {
 
