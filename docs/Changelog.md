@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 1.1.0 (2024-02-29)
+  * Improvement: when tapping on the garage door opener while an open or close event is inflight and has not yet completed, the garage door opener will now stop.
+  * Fix: accessory names were being overwritten when the user has not requested them to be.
+  * Housekeeping.
+
 ## 1.0.0 (2024-02-28)
   * New feature: a rich webUI is now available for `homebridge-ratgdo`.
   * New feature: read-only support to prevent someone from being able to open or close your garage door opener. Disabled by default.
