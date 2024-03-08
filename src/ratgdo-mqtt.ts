@@ -136,9 +136,9 @@ export class RatgdoMqtt {
   }
 
   // Publish an MQTT event to a broker.
-  public publish(ratgdoAccessory: RatgdoAccessory, topic: string, message: string): void {
+  public publish(accessory: RatgdoAccessory, topic: string, message: string): void {
 
-    const expandedTopic = this.expandTopic(ratgdoAccessory.device.mac, topic);
+    const expandedTopic = this.expandTopic(accessory.device.mac, topic);
 
     // No valid topic returned, we're done.
     if(!expandedTopic) {
@@ -146,16 +146,16 @@ export class RatgdoMqtt {
       return;
     }
 
-    ratgdoAccessory.log.debug("MQTT publish: %s Message: %s.", expandedTopic, message);
+    accessory.log.debug("MQTT publish: %s Message: %s.", expandedTopic, message);
 
     // By default, we publish as: ratgdo/mac/event/name
     this.mqtt?.publish(expandedTopic, message);
   }
 
   // Subscribe to an MQTT topic.
-  public subscribe(ratgdoAccessory: RatgdoAccessory, topic: string, callback: (cbBuffer: Buffer) => void): void {
+  public subscribe(accessory: RatgdoAccessory, topic: string, callback: (cbBuffer: Buffer) => void): void {
 
-    const expandedTopic = this.expandTopic(ratgdoAccessory.device.mac, topic);
+    const expandedTopic = this.expandTopic(accessory.device.mac, topic);
 
     // No valid topic returned, we're done.
     if(!expandedTopic) {
@@ -163,7 +163,7 @@ export class RatgdoMqtt {
       return;
     }
 
-    ratgdoAccessory.log.debug("MQTT subscribe: %s.", expandedTopic);
+    accessory.log.debug("MQTT subscribe: %s.", expandedTopic);
 
     // Add to our callback list.
     this.subscriptions[expandedTopic] = callback;
@@ -173,10 +173,10 @@ export class RatgdoMqtt {
   }
 
   // Subscribe to a specific MQTT topic and publish a value on a get request.
-  public subscribeGet(ratgdoAccessory: RatgdoAccessory, topic: string, type: string, getValue: () => string): void {
+  public subscribeGet(accessory: RatgdoAccessory, topic: string, type: string, getValue: () => string): void {
 
     // Return the current status of a given sensor.
-    this.platform.mqtt?.subscribe(ratgdoAccessory, topic + "/get", (message: Buffer) => {
+    this.platform.mqtt?.subscribe(accessory, topic + "/get", (message: Buffer) => {
 
       const value = message.toString().toLowerCase();
 
@@ -187,29 +187,29 @@ export class RatgdoMqtt {
       }
 
       // Publish our value and inform the user.
-      this.platform.mqtt?.publish(ratgdoAccessory, topic, getValue());
-      ratgdoAccessory.log.info("MQTT: %s status published.", type);
+      this.platform.mqtt?.publish(accessory, topic, getValue());
+      accessory.log.info("MQTT: %s status published.", type);
     });
   }
 
   // Subscribe to a specific MQTT topic and set a value on a set request.
-  public subscribeSet(ratgdoAccessory: RatgdoAccessory, topic: string, type: string, setValue: (value: string) => void): void {
+  public subscribeSet(accessory: RatgdoAccessory, topic: string, type: string, setValue: (value: string) => void): void {
 
     // Return the current status of a given sensor.
-    this.platform.mqtt?.subscribe(ratgdoAccessory, topic + "/set", (message: Buffer) => {
+    this.platform.mqtt?.subscribe(accessory, topic + "/set", (message: Buffer) => {
 
       const value = message.toString().toLowerCase();
 
       // Set our value and inform the user.
       setValue(value);
-      ratgdoAccessory.log.info("MQTT: set message received for %s: %s.", type, value);
+      accessory.log.info("MQTT: set message received for %s: %s.", type, value);
     });
   }
 
   // Unsubscribe to an MQTT topic.
-  public unsubscribe(ratgdoAccessory: RatgdoAccessory, topic: string): void {
+  public unsubscribe(accessory: RatgdoAccessory, topic: string): void {
 
-    const expandedTopic = this.expandTopic(ratgdoAccessory.device.mac, topic);
+    const expandedTopic = this.expandTopic(accessory.device.mac, topic);
 
     // No valid topic returned, we're done.
     if(!expandedTopic) {
