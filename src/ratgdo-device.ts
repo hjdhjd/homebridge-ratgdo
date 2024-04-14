@@ -960,6 +960,11 @@ export class RatgdoAccessory {
           this.platform.mqtt?.publish(this, "motion", this.status.motion.toString());
         }, RATGDO_MOTION_DURATION * 1000);
 
+        // If we don't have occupancy sensor support configured, we're done.
+        if(!this.hints.motionOccupancySensor) {
+
+          break;
+        }
 
         // Kill any inflight occupancy sensor.
         if(this.motionOccupancyTimer) {
