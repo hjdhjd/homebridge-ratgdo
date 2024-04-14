@@ -69,7 +69,7 @@ The topics that `homebridge-ratgdo` subscribes to are:
 |-------------------------|----------------------------------
 | `dooropenoccupancy/get` | `true` will trigger a publish event of the current garage door opener door open indicator occupancy status.
 | `garagedoor/get`        | `true` will trigger a publish event of the current garage door opener state.
-| `garagedoor/set`        | One of `close` or `open`. This will send the respective command to the garage door opener.
+| `garagedoor/set`        | One of `close` or `open`. This will send the respective command to the garage door opener. When using the ESPHome firmware, `open` takes an optional parameter between 0 and 100 to set the door position appropriately: `open 50` will set the garage door to the 50% open position.
 | `light/get`             | `true` will trigger a publish event of the current garage door opener light.
 | `motion/get`            | `true` will trigger a publish event of the current garage door opener motion sensor.
 | `obstruction/get`       | `true` will trigger a publish event of the current garage door opener obstruction sensor.

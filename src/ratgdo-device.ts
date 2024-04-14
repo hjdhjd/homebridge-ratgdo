@@ -3,8 +3,9 @@
  * ratgdo-device.ts: Base class for all Ratgdo devices.
  */
 import { API, CharacteristicValue, HAP, PlatformAccessory, Service } from "homebridge";
-import { RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION, RATGDO_TRANSITION_DURATION } from "./settings.js";
-import { RatgdoDevice, RatgdoLogging, RatgdoReservedNames } from "./ratgdo-types.js";
+import { FetchError, fetch } from "@adobe/fetch";
+import { Firmware, RatgdoDevice, RatgdoLogging, RatgdoReservedNames } from "./ratgdo-types.js";
+import { RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION } from "./settings.js";
 import { RatgdoOptions, getOptionFloat, getOptionNumber, getOptionValue, isOptionEnabled } from "./ratgdo-options.js";
 import { RatgdoPlatform } from "./ratgdo-platform.js";
 import util from "node:util";
@@ -12,6 +13,7 @@ import util from "node:util";
 // Device-specific options and settings.
 interface RatgdoHints {
 
+  automationDimmer: boolean,
   automationSwitch: boolean,
   doorOpenOccupancyDuration: number,
   doorOpenOccupancySensor: boolean,
@@ -29,6 +31,7 @@ interface RatgdoStatus {
 
   availability: boolean,
   door: CharacteristicValue,
+  doorPosition: number,
   light: boolean,
   lock: CharacteristicValue,
   motion: boolean,
@@ -42,7 +45,6 @@ export class RatgdoAccessory {
   private readonly config: RatgdoOptions;
   public readonly device: RatgdoDevice;
   private doorOccupancyTimer: NodeJS.Timeout | null;
-  private doorTimer: NodeJS.Timeout | null;
   private readonly hap: HAP;
   private readonly hints: RatgdoHints;
   public readonly log: RatgdoLogging;
@@ -59,7 +61,6 @@ export class RatgdoAccessory {
     this.api = platform.api;
     this.status = {} as RatgdoStatus;
     this.config = platform.config;
-    this.doorTimer = null;
     this.hap = this.api.hap;
     this.hints = {} as RatgdoHints;
     this.device = device;
@@ -76,6 +77,7 @@ export class RatgdoAccessory {
     // Initialize our internal state.
     this.status.availability = false;
     this.status.door = this.hap.Characteristic.CurrentDoorState.CLOSED;
+    this.status.doorPosition = 0;
     this.status.light = false;
     this.status.lock = this.hap.Characteristic.LockCurrentState.UNSECURED;
     this.status.motion = false;
@@ -99,6 +101,7 @@ export class RatgdoAccessory {
     this.configureInfo();
     this.configureGarageDoor();
     this.configureMqtt();
+    this.configureAutomationDimmer();
     this.configureAutomationSwitch();
     this.configureDoorOpenOccupancySensor();
     this.configureLight();
@@ -109,6 +112,7 @@ export class RatgdoAccessory {
   // Configure device-specific settings.
   private configureHints(): boolean {
 
+    this.hints.automationDimmer = this.hasFeature("Opener.Dimmer");
     this.hints.automationSwitch = this.hasFeature("Opener.Switch");
     this.hints.doorOpenOccupancySensor = this.hasFeature("Opener.OccupancySensor");
     this.hints.doorOpenOccupancyDuration = this.getFeatureNumber("Opener.OccupancySensor.Duration") ?? RATGDO_OCCUPANCY_DURATION;
@@ -119,6 +123,12 @@ export class RatgdoAccessory {
     this.hints.readOnly = this.hasFeature("Opener.ReadOnly");
     this.hints.syncName = this.hasFeature("Device.SyncName");
 
+    if(this.hints.automationDimmer && (this.device.type !== Firmware.ESPHOME)) {
+
+      this.hints.automationDimmer = false;
+      this.log.info("Automation dimmer support is only available on Ratgdo devices running on ESPHome firmware versions.");
+    }
+
     if(this.hints.readOnly) {
 
       this.log.info("Garage door opener is read-only. The opener will not respond to open and close requests from HomeKit.");
@@ -126,7 +136,14 @@ export class RatgdoAccessory {
 
     if(this.hints.syncName) {
 
-      this.log.info("Syncing Ratgdo device name to HomeKit.");
+      if(this.device.type !== Firmware.MQTT) {
+
+        this.hints.syncName = false;
+        this.log.info("Syncing names is only available on Ratgdo devices running on MQTT firmware versions.");
+      } else {
+
+        this.log.info("Syncing Ratgdo device name to HomeKit.");
+      }
     }
 
     return true;
@@ -165,8 +182,11 @@ export class RatgdoAccessory {
     this.platform.mqtt?.subscribeSet(this, "garagedoor", "Garage Door", (value: string) => {
 
       let command;
+      let position;
 
-      switch(value) {
+      const action = value.split(" ");
+
+      switch(action[0]) {
 
         case "close":
 
@@ -176,6 +196,18 @@ export class RatgdoAccessory {
         case "open":
 
           command = this.hap.Characteristic.TargetDoorState.OPEN;
+
+          // Parse the position information, if set.
+          if(this.device.type === Firmware.ESPHOME) {
+
+            position = parseFloat(action[1]);
+
+            if(isNaN(position) || (position < 0) || (position > 100)) {
+
+              position = undefined;
+            }
+          }
+
           break;
 
         default:
@@ -186,7 +218,7 @@ export class RatgdoAccessory {
       }
 
       // Set our door state accordingly.
-      this.setDoorState(command);
+      this.setDoorState(command, position);
     });
 
     // Return our obstruction state.
@@ -356,7 +388,7 @@ export class RatgdoAccessory {
     lightService.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.status.light);
     lightService.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => {
 
-      this.command("light", value === true ? "on" : "off");
+      void this.command("light", value === true ? "on" : "off");
     });
 
     return true;
@@ -404,6 +436,94 @@ export class RatgdoAccessory {
     motionService.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
 
     motionService.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => this.status.availability);
+
+    return true;
+  }
+
+  // Configure a dimmer to automate open and close events in HomeKit beyond what HomeKit might allow for a garage opener service that gets treated as a secure service.
+  private configureAutomationDimmer(): boolean {
+
+    // Find the dimmer service, if it exists.
+    let dimmerService = this.accessory.getServiceById(this.hap.Service.Lightbulb, RatgdoReservedNames.DIMMER_OPENER_AUTOMATION);
+
+    // The switch is disabled by default and primarily exists for automation purposes.
+    if(!this.hints.automationDimmer) {
+
+      if(dimmerService) {
+
+        this.accessory.removeService(dimmerService);
+        this.log.info("Disabling automation dimmer.");
+      }
+
+      return false;
+    }
+
+    // Add the dimmer to the opener, if needed.
+    if(!dimmerService) {
+
+      dimmerService = new this.hap.Service.Lightbulb(this.name + " Automation Dimmer", RatgdoReservedNames.DIMMER_OPENER_AUTOMATION);
+
+      if(!dimmerService) {
+
+        this.log.error("Unable to add automation dimmer.");
+        return false;
+      }
+
+      dimmerService.displayName = this.name + " Automation Dimmer";
+      dimmerService.updateCharacteristic(this.hap.Characteristic.Name, this.name + " Automation Dimmer");
+      this.accessory.addService(dimmerService);
+    }
+
+    // Return the current state of the opener.
+    dimmerService.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => {
+
+      // We're on if we are in any state other than closed (specifically open or stopped).
+      return this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED;
+    });
+
+    // Close the opener. Opening is really handled in the brightness event.
+    dimmerService.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => {
+
+      // We really only want to act when the opener is open. Otherwise, it's handled by the brightness event.
+      if(value) {
+
+        return;
+      }
+
+      // Inform the user.
+      this.log.info("Automation dimmer: closing.");
+
+      // Send the command.
+      if(!this.setDoorState(this.hap.Characteristic.TargetDoorState.CLOSED)) {
+
+        // Something went wrong. Let's make sure we revert the dimmer to it's prior state.
+        setTimeout(() => {
+
+          dimmerService?.updateCharacteristic(this.hap.Characteristic.On, !value);
+        }, 50);
+      }
+    });
+
+    // Return the door position of the opener.
+    dimmerService.getCharacteristic(this.hap.Characteristic.Brightness)?.onGet(() => {
+
+      return this.status.doorPosition;
+    });
+
+    // Adjust the door position of the opener by adjusting brightness of the light.
+    dimmerService.getCharacteristic(this.hap.Characteristic.Brightness)?.onSet((value: CharacteristicValue) => {
+
+      this.log.info("Automation dimmer: moving opener to %s%.", (value as number).toFixed(0));
+
+      this.setDoorState((value as number) > 0 ?
+        this.hap.Characteristic.TargetDoorState.OPEN : this.hap.Characteristic.TargetDoorState.CLOSED, value as number);
+    });
+
+    // Initialize the switch.
+    dimmerService.updateCharacteristic(this.hap.Characteristic.On, this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED);
+    dimmerService.updateCharacteristic(this.hap.Characteristic.Brightness, this.status.doorPosition);
+
+    this.log.info("Enabling automation dimmer.");
 
     return true;
   }
@@ -574,14 +694,24 @@ export class RatgdoAccessory {
   }
 
   // Open or close the garage door.
-  private setDoorState(value: CharacteristicValue): boolean {
+  private setDoorState(value: CharacteristicValue, position?: number): boolean {
 
-    const actionAttempt = value === this.hap.Characteristic.TargetDoorState.CLOSED ? "close" : "open";
+    // Understand what we're targeting.
+    const targetAction = (position !== undefined) ? "set" : this.translateTargetDoorState(value);
+
+    // If we have an invalid target state, we're done.
+    if(targetAction === "unknown") {
+
+      // HomeKit has told us something that we don't know how to handle.
+      this.log.error("Unknown HomeKit set event received: %s.", value);
+
+      return false;
+    }
 
     // If this garage door is read-only, we won't process any requests to set state.
     if(this.hints.readOnly) {
 
-      this.log.info("Unable to %s door. The door has been configured to be read only.", actionAttempt);
+      this.log.info("Unable to %s garage door: read-only mode enabled.", targetAction);
 
       // Tell HomeKit that we haven't in fact changed our state so we don't end up in an inadvertent opening or closing state.
       setImmediate(() => {
@@ -596,49 +726,31 @@ export class RatgdoAccessory {
     // If we are already opening or closing the garage door, we assume the user wants to stop the garage door opener at it's current location.
     if((this.status.door === this.hap.Characteristic.CurrentDoorState.OPENING) || (this.status.door === this.hap.Characteristic.CurrentDoorState.CLOSING)) {
 
-      this.log.debug("Stop requested from user while transitioning between open and close states.");
+      this.log.debug("User-initiated stop requested while transitioning between open and close states.");
 
       // Execute the stop command.
-      this.command("door", "stop");
-      return true;
-    }
-
-    // Close the garage door.
-    if(value === this.hap.Characteristic.TargetDoorState.CLOSED) {
-
-      // HomeKit is asking us to close the garage door, but let's make sure it's not already closed first.
-      if(this.status.door !== this.hap.Characteristic.CurrentDoorState.CLOSED) {
-
-        // Execute the command.
-        this.command("door", "close");
-      }
+      void this.command("door", "stop");
 
       return true;
     }
 
-    // Open the garage door.
-    if(value === this.hap.Characteristic.TargetDoorState.OPEN) {
+    // Set the door state, assuming we're not already there.
+    if(this.status.door !== value) {
 
-      // HomeKit is informing us to open the door, but we don't want to act if it's already open.
-      if(this.status.door !== this.hap.Characteristic.CurrentDoorState.OPEN) {
+      this.log.debug("User-initiated door state change: %s%s.", this.translateTargetDoorState(value), (position !== undefined) ? " (" + position.toString() + "%)" : "");
 
-        // Execute the command.
-        this.command("door", "open");
-      }
-
-      return true;
+      // Execute the command.
+      void this.command("door", targetAction, position);
     }
 
-    // HomeKit has told us something that we don't know how to handle.
-    this.log.error("Unknown HomeKit set event received: %s.", value);
-
-    return false;
+    return true;
   }
 
   // Update the state of the accessory.
-  public updateState(event: string, payload: string): void {
+  public updateState(event: string, payload: string, position?: number): void {
 
     const camelCase = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1);
+    const dimmerService = this.accessory.getServiceById(this.hap.Service.Lightbulb, RatgdoReservedNames.DIMMER_OPENER_AUTOMATION);
     const doorOccupancyService = this.accessory.getServiceById(this.hap.Service.OccupancySensor, RatgdoReservedNames.OCCUPANCY_SENSOR_DOOR_OPEN);
     const garageDoorService = this.accessory.getService(this.hap.Service.GarageDoorOpener);
     const lightBulbService = this.accessory.getService(this.hap.Service.Lightbulb);
@@ -662,10 +774,21 @@ export class RatgdoAccessory {
         motionService?.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
 
         // Inform the user:
-        this.log.info("Device %s.", this.status.availability ? "connected" : "disconnected");
+        this.log.info("Device %s (%s v%s).", this.status.availability ? "connected" : "disconnected", this.device.type === Firmware.MQTT ? "MQTT" : "ESPHome",
+          this.device.firmwareVersion);
         break;
 
       case "door":
+
+        // Update our door position automation dimmer.
+        if(position !== undefined) {
+
+          this.status.doorPosition = position;
+
+          dimmerService?.updateCharacteristic(this.hap.Characteristic.Brightness, this.status.doorPosition);
+          dimmerService?.updateCharacteristic(this.hap.Characteristic.On, this.status.doorPosition > 0);
+          this.log.debug("Door state: %s% open.", this.status.doorPosition.toFixed(0));
+        }
 
         // If we're already in the state we're updating to, we're done.
         if(this.translateCurrentDoorState(this.status.door) === payload) {
@@ -673,33 +796,17 @@ export class RatgdoAccessory {
           break;
         }
 
-        // Clear out our door transition timer, if we have one.
-        if(this.doorTimer) {
-
-          clearTimeout(this.doorTimer);
-          this.doorTimer = null;
-        }
-
         switch(payload) {
 
           case "closed":
 
             this.status.door = this.hap.Characteristic.CurrentDoorState.CLOSED;
+
             break;
 
           case "closing":
 
             this.status.door = this.hap.Characteristic.CurrentDoorState.CLOSING;
-
-            // As a safety measure for occasionally unreliable MQTT message delivery, let's ensure we generate a closed state after a reasonable transition period. If we
-            // receive an actual state update before this, this safety measure won't be triggered.
-            this.doorTimer = setTimeout(() => {
-
-              // Mark the door as closed.
-              this.log.debug("Generating a close event to complete the state transition.");
-              this.updateState("door", "closed");
-              this.doorTimer = null;
-            }, RATGDO_TRANSITION_DURATION * 1000);
 
             break;
 
@@ -726,21 +833,12 @@ export class RatgdoAccessory {
 
             this.status.door = this.hap.Characteristic.CurrentDoorState.OPENING;
 
-            // As a safety measure for occasionally unreliable MQTT message delivery, let's ensure we generate an open state after a reasonable transition period. If we
-            // receive an actual state update before this, this safety measure won't be triggered.
-            this.doorTimer = setTimeout(() => {
-
-              // Mark the door as open.
-              this.log.debug("Generating an open event to complete the state transition.");
-              this.updateState("door", "open");
-              this.doorTimer = null;
-            }, RATGDO_TRANSITION_DURATION * 1000);
-
             break;
 
           case "stopped":
 
             this.status.door = this.hap.Characteristic.CurrentDoorState.STOPPED;
+
             break;
 
           default:
@@ -828,16 +926,13 @@ export class RatgdoAccessory {
 
       case "motion":
 
-        this.status.motion = payload === "detected";
-
-        // Motion no longer detected, clear out the motion sensor timer, and we're done.
-        if(!this.status.motion && this.motionTimer) {
-
-          clearTimeout(this.motionTimer);
-          this.motionTimer = null;
+        // We only want motion detected events. We timeout the motion event on our own to allow for automations and a more holistic user experience.
+        if(payload !== "detected") {
 
           break;
         }
+
+        this.status.motion = true;
 
         // Update the motion sensor state.
         motionService?.updateCharacteristic(this.hap.Characteristic.MotionDetected, this.status.motion);
@@ -926,6 +1021,115 @@ export class RatgdoAccessory {
     }
   }
 
+  // Utility function to transmit a command to Ratgdo.
+  private async command(topic: string, payload: string, position?: number): Promise<void> {
+
+    if(this.device.type === Firmware.MQTT) {
+
+      this.platform.broker.publish({ cmd: "publish", dup: false, payload: payload, qos: 2, retain: false, topic: this.device.name + "/command/" + topic },
+        (error?: Error) => {
+
+          if(error) {
+
+            this.log.error("Publish error:");
+            this.log.error(util.inspect(error), { colors: true, depth: null, sorted: true });
+          }
+        }
+      );
+
+      return;
+    }
+
+    // Now we handle ESPHome firmware commands.
+    let endpoint;
+    let action;
+
+    switch(topic) {
+
+      case "door":
+
+        endpoint = "cover/door";
+
+        switch(payload) {
+
+          case "closed":
+
+            action = "close";
+            break;
+
+          case "open":
+          case "stop":
+
+            action = payload;
+            break;
+
+          case "set":
+
+            if(position === undefined) {
+
+              this.log.error("Invalid door set command received: no position specified.");
+              return;
+            }
+
+            action = "set?position=" + (position / 100).toString();
+            break;
+
+          default:
+
+            this.log.error("Unknown door command received: %s.", payload);
+            return;
+            break;
+        }
+
+        break;
+
+      case "light":
+
+        endpoint = "light/light";
+        action = (payload === "on") ? "turn_on" : "turn_off";
+        break;
+
+      default:
+
+        this.log.error("Unknown command received: %s - %s.", topic, payload);
+        return;
+        break;
+    }
+
+    try {
+
+      // Execute the action.
+      const response = await fetch("http://" + this.device.address + "/" + endpoint + "/" + action, { body: JSON.stringify({}), method: "POST"});
+
+      if(!response?.ok) {
+
+        this.log.error("Unable to execute command: %s - %s.", event, payload);
+        return;
+      }
+    } catch(error) {
+
+      if(error instanceof FetchError) {
+
+        switch(error.code) {
+
+          case "ECONNRESET":
+
+            this.log.error("Connection to the Ratgdo controller has been reset.");
+            break;
+
+          default:
+
+            this.log.error("Error sending command: %s %s.", error.code, error.message);
+            break;
+        }
+
+        return;
+      }
+
+      this.log.error("Error sending command: %s", error);
+    }
+  }
+
   // Utility function to translate HomeKit's current door state values into human-readable form.
   private translateCurrentDoorState(value: CharacteristicValue): string {
 
@@ -955,6 +1159,30 @@ export class RatgdoAccessory {
       case this.hap.Characteristic.CurrentDoorState.STOPPED:
 
         return "stopped";
+        break;
+
+      default:
+
+        break;
+    }
+
+    return "unknown";
+  }
+
+  // Utility function to translate HomeKit's target door state values into human-readable form.
+  private translateTargetDoorState(value: CharacteristicValue): string {
+
+    // HomeKit state decoder ring.
+    switch(value) {
+
+      case this.hap.Characteristic.TargetDoorState.CLOSED:
+
+        return "closed";
+        break;
+
+      case this.hap.Characteristic.TargetDoorState.OPEN:
+
+        return "open";
         break;
 
       default:
@@ -1044,21 +1272,6 @@ export class RatgdoAccessory {
         return this.hap.Characteristic.LockTargetState.UNSECURED;
         break;
     }
-  }
-
-  // Utility function to transmit a command to Ratgdo.
-  private command(topic: string, payload: string): void {
-
-    this.platform.broker.publish({ cmd: "publish", dup: false, payload: payload, qos: 2, retain: false, topic: this.device.name + "/command/" + topic },
-      (error?: Error) => {
-
-        if(error) {
-
-          this.log.error("Publish error:");
-          this.log.error(util.inspect(error), { colors: true, depth: null, sorted: true });
-        }
-      }
-    );
   }
 
   // Utility function to return a floating point configuration parameter on a device.

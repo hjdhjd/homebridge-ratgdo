@@ -44,13 +44,14 @@ Feature options provide a rich mechanism for tailoring your `homebridge-ratgdo` 
 | Option                                           | Description
 |--------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 | `Device`                                         | Make this device available in HomeKit. **(default: enabled)**.
-| `Device.SyncName`                                | Synchronize the Ratgdo name of this device with HomeKit. Synchronization is one-way only, syncing the device name from Ratgdo to HomeKit. **(default: disabled)**.
+| `Device.SyncName`                                | Synchronize the Ratgdo name of this device with HomeKit. Synchronization is one-way only, syncing the device name from Ratgdo to HomeKit. This option is only available on Ratgdo devices running MQTT firmware versions. **(default: disabled)**.
 
 #### <A NAME="opener"></A>Opener feature options.
 
 | Option                                           | Description
 |--------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 | `Opener.ReadOnly`                                | Make this opener read-only by ignoring open and close requests from HomeKit. **(default: disabled)**.
+| `Opener.Dimmer`                                  | Add a dimmer accessory to control the opener. This can be useful in automation scenarios where you want to set the door to a specific percentage. This option is only available on Ratgdo devices running ESPHome firmware versions. **(default: disabled)**.
 | `Opener.Switch`                                  | Add a switch accessory to control the opener. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling garage door openers. **(default: disabled)**.
 | `Opener.OccupancySensor`                         | Add an occupancy sensor accessory using the open state of the opener to determine occupancy. This can be useful in automation scenarios where you want to trigger an action based on the opener being open for an extended period of time. **(default: disabled)**.
 | `Opener.OccupancySensor.Duration<I>.Value</I>`   | Duration, in seconds, to wait once the opener has reached the open state before indicating occupancy. **(default: 300)**.

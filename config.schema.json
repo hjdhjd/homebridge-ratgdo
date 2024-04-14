@@ -69,7 +69,7 @@
   "layout": [
     {
       "type": "section",
-      "title": "Settings",
+      "title": "Ratgdo Settings (MQTT Firmware)",
       "expandable": true,
       "expanded": false,
       "items": [

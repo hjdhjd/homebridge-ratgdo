@@ -3,13 +3,20 @@
  * ratgdo-types.ts: Interface and type definitions for Ratgdo.
  */
 
+export enum Firmware {
+
+  ESPHOME = 1,
+  MQTT
+}
+
 // Ratgdo device settings.
 export interface RatgdoDevice {
 
   address: string,
   firmwareVersion: string,
   mac: string,
-  name: string
+  name: string,
+  type: Firmware
 }
 
 // Define Ratgdo logging conventions.
@@ -23,6 +30,9 @@ export interface RatgdoLogging {
 
 // Ratgdo reserved names.
 export enum RatgdoReservedNames {
+
+  // Manage our dimmer types.
+  DIMMER_OPENER_AUTOMATION = "Dimmer.Opener.Automation",
 
   // Manage our occupancy sensor types.
   OCCUPANCY_SENSOR_DOOR_OPEN = "OccupancySensor.DoorOpen",
