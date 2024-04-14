@@ -2,8 +2,11 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 1.2.1 (2024-04-14)
+  * Fix: address a minor regression related to occupancy sensor logging.
+
 ## 1.2.0 (2024-04-14)
-  * New feature: ESPHome firmware support. homebridge-ratgdo now supports both the MQTT and ESPHome firmwares. **A future release of homebridge-ratgdo will remove support for using the Ratgdo MQTT firmware. I encourage everyone to upgrade to the ESPHome firmware sooner than later.** The ESPHome firmware appears to be far better maintained and issue-free than the MQTT firmware. It's been far more stable and reliable in my extensive testing. In addition, it enables some new functionality, particularly for certain automation scenarios. ESPHome firmware support "just works": homebridge-ratgdo will autodetect it's presence and configure it accordingly. There is nothing you need to do beyond installing the Ratgdo ESPHome firmware - the devices will be autodiscovered and autoconfigured by homebridge-ratgdo. You also do not need to remove your prior accessories. homebridge-ratgdo will gracefully handle things.
+  * New feature: ESPHome firmware support. homebridge-ratgdo now supports both the MQTT and ESPHome firmwares. **A future release of homebridge-ratgdo will remove support for using the Ratgdo MQTT firmware. I encourage everyone to upgrade to the ESPHome firmware sooner than later.** The ESPHome firmware appears to be far better maintained and issue-free than the MQTT firmware. It's been significantly more stable and reliable in my extensive testing. In addition, it enables some new functionality, particularly for certain automation scenarios. ESPHome firmware support "just works": homebridge-ratgdo will autodetect it's presence and configure it accordingly. There is nothing you need to do beyond installing the Ratgdo ESPHome firmware - the devices will be autodiscovered and autoconfigured by homebridge-ratgdo. You also do not need to remove your prior accessories. homebridge-ratgdo will gracefully handle things.
   * New feature: automation dimmer support. You can now set automations to open and close yoru garage door opener to specific percentage levels, if you choose to do so. This feature is only available when using the ESPHome Ratgdo firmware.
   * Improvement: enhanced MQTT support for opening and closing, allowing you to specify where you want the door to be opened to, if using the ESPHome Ratgdo firmware.
   * Housekeeping.
