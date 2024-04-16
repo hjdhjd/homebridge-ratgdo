@@ -291,8 +291,8 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     // Add an ESPHome device.
     mdnsBrowser.on("up", (service: Service) => {
 
-      // No addresses found for this entry. We're done.
-      if(!service.addresses) {
+      // We're only interested in Ratgdo devices with valid IP addresses. Otherwise, we're done.
+      if(((service.txt as Record<string, string>).project_name !== "ratgdo.esphome") || !service.addresses) {
 
         return;
       }
@@ -447,8 +447,8 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
           // Handle heartbeat errors.
           socket.on("error", (err) => {
 
-            ratgdoAccessory.log.error("ESPHome API heartbeat error: %s", err.message);
-            setTimeout(() => heartbeat(), 60000);
+            ratgdoAccessory.log.debug("ESPHome API heartbeat error: %s", err.message);
+            ratgdoAccessory.log.debug(util.inspect(err, { sorted: true }));
           });
 
           // Perpetually restart our heartbeat when it ends.

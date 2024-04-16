@@ -758,9 +758,6 @@ export class RatgdoAccessory {
     const motionService = this.accessory.getService(this.hap.Service.MotionSensor);
     const switchService = this.accessory.getServiceById(this.hap.Service.Switch, RatgdoReservedNames.SWITCH_OPENER_AUTOMATION);
 
-    // We continuously rebroadcast our device information.
-    this.configureInfo();
-
     switch(event) {
 
       case "availability":

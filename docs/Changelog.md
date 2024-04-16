@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 1.2.2 (2024-04-14)
+  * Improvement: increase the robustness of ESPHome Ratgdo autodiscovery.
+  * Housekeeping.
+
 ## 1.2.1 (2024-04-14)
   * Fix: address a minor regression related to occupancy sensor logging.
 
