@@ -2,7 +2,11 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
-## 1.2.2 (2024-04-14)
+## 1.2.3 (2024-04-20)
+  * Change: Support for Ratgdo MQTT firmware is now deprecated and will be removed in the next point release.
+  * Housekeeping.
+
+## 1.2.2 (2024-04-15)
   * Improvement: increase the robustness of ESPHome Ratgdo autodiscovery.
   * Housekeeping.
 

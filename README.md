@@ -39,6 +39,7 @@ To get started with `homebridge-ratgdo`:
 
   * Install `homebridge-ratgdo` using the Homebridge webUI. Make sure you make `homebridge-ratgdo` a child bridge for the best performance.
   * Install the [ESPHome Ratgdo firmware](https://ratgdo.github.io/esphome-ratgdo/). You'll need to use Chrome for this as Safari doesn't support installing firmware through a USB serial port.
+  * Fully open and close the garage door one time. ESPHome Ratgdo will use this to determine how long it takes to open and close your garage door to enable precise control of the position of the garage door opener.
   * That's it. Ensure `homebridge-ratgdo` is running and it will autodiscover your Ratgdo devices and make them available in HomeKit.
 
 Deprecated instructions:
