@@ -12,6 +12,15 @@ export const PLUGIN_NAME = "homebridge-ratgdo";
 // The default port to use for our builtin MQTT broker. This is intentionally not the default MQTT port number (1883) in case a user is already running a local broker.
 export const RATGDO_API_PORT = 18830;
 
+// Interval, in seconds, to initiate mDNS discovery requests for new Ratgdo devices.
+export const RATGDO_AUTODISCOVERY_INTERVAL = 60;
+
+// Duration, in seconds, for a single heartbeat to ensure the Ratgdo doesn't autoreboot.
+export const RATGDO_HEARTBEAT_DURATION = 120;
+
+// Interval, in seconds, for heartbeat requests to ensure the Ratgdo doesn't autoreboot.
+export const RATGDO_HEARTBEAT_INTERVAL = 300;
+
 // Duration, in seconds, of a motion sensor event.
 export const RATGDO_MOTION_DURATION = 5;
 

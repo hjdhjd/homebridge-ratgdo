@@ -4,7 +4,8 @@
  */
 import { API, APIEvent, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
 import { Bonjour, Service } from "bonjour-service";
-import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_API_PORT, RATGDO_MQTT_TOPIC } from "./settings.js";
+import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_API_PORT, RATGDO_AUTODISCOVERY_INTERVAL, RATGDO_HEARTBEAT_DURATION, RATGDO_HEARTBEAT_INTERVAL,
+  RATGDO_MQTT_TOPIC } from "./settings.js";
 import { RatgdoOptions, featureOptionCategories, featureOptions, isOptionEnabled } from "./ratgdo-options.js";
 import { Server, createServer } from "node:net";
 import Aedes from "aedes";
@@ -121,7 +122,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.log.debug("Debug logging on. Expect a lot of data.");
 
     // Fire up the Ratgdo API once Homebridge has loaded all the cached accessories it knows about and called configureAccessory() on each.
-    api.on(APIEvent.DID_FINISH_LAUNCHING, this.configureRatgdo.bind(this));
+    api.on(APIEvent.DID_FINISH_LAUNCHING, () => this.configureRatgdo());
   }
 
   // This gets called when homebridge restores cached accessories at startup. We intentionally avoid doing anything significant here, and save all that logic for broker
@@ -325,26 +326,45 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
           switch(payload.message) {
 
+            case payload.message?.startsWith("connect ECONNREFUSED "):
+
+              errorMessage = "Connection to the Ratgdo controller refused";
+
+              break;
+
+            case payload.message?.startsWith("connect ETIMEDOUT "):
+
+              errorMessage = "Connection to the Ratgdo controller has timed out";
+
+              break;
+
             case "read ECONNRESET":
 
               errorMessage = "Connection to the Ratgdo controller has been reset";
 
               break;
 
-            case "unknown error.":
+            case "read ETIMEDOUT":
 
-              errorMessage = "An unknown error on the Ratgdo controller has occurred. This will happen occasionally and can generally be ignored.";
+              errorMessage = "Connection to the Ratgdo controller has timed out while listening for events";
+
+              break;
+
+            case "unknown error.":
+            case undefined:
+
+              errorMessage = "An unknown error on the Ratgdo controller has occurred. This will happen occasionally and can generally be ignored";
 
               break;
 
             default:
 
-              errorMessage = payload;
+              errorMessage = "Unrecognized error: " + util.inspect(payload, { sorted: true });
 
               break;
           }
 
-          ratgdoAccessory.log.error("Ratgdo ESPHome: %s", errorMessage);
+          ratgdoAccessory.log.error("%s.", errorMessage);
         });
 
         // Inform the user when we've successfully connected.
@@ -358,7 +378,13 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
           let event;
 
-          ratgdoAccessory.log.debug(message.data);
+          ratgdoAccessory.log.debug("State event received: ", util.inspect(message.data, { sorted: true }));
+
+          // Ratgdo occasionally sends empty status updates - we ignore them.
+          if(!message.data.length) {
+
+            return;
+          }
 
           try {
 
@@ -437,25 +463,17 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
         // opportunity to heartbeat it with a connection we periodically reopen.
         const heartbeat = (): void => {
 
-          // Connect to the Ratgdo.
-          const socket = net.createConnection({ host: address, port: 6053 }, () => {
+          // Connect to the Ratgdo, and setup our heartbeat to close after a configured duration.
+          const socket = net.createConnection({ host: address, port: 6053 }, () => setTimeout(() => {
 
-            // Close the heartbeat at regular intervals.
-            setTimeout(() => socket.destroy(), 120000);
-          });
+            socket.destroy();
+          }, RATGDO_HEARTBEAT_DURATION * 1000));
 
           // Handle heartbeat errors.
-          socket.on("error", (err) => {
-
-            ratgdoAccessory.log.debug("ESPHome API heartbeat error: %s", err.message);
-            ratgdoAccessory.log.debug(util.inspect(err, { sorted: true }));
-          });
+          socket.on("error", (err) => ratgdoAccessory.log.debug("Heartbeat error: %s.", util.inspect(err, { sorted: true })));
 
           // Perpetually restart our heartbeat when it ends.
-          socket.on("close", () => {
-
-            setTimeout(() => heartbeat(), 300000);
-          });
+          socket.on("close", () => setTimeout(() => heartbeat(), RATGDO_HEARTBEAT_INTERVAL * 1000));
         };
 
         heartbeat();
@@ -463,7 +481,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
         if(error instanceof Error) {
 
-          ratgdoAccessory.log.error("Ratgdo ESPHome: Error: %s", error.message);
+          ratgdoAccessory.log.error("Ratgdo API: Error: %s", error.message);
         }
       }
     });
@@ -472,7 +490,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     mdnsBrowser.update();
 
     // Refresh device discovery regular intervals.
-    setInterval(() => mdnsBrowser.update(), 60000);
+    setInterval(() => mdnsBrowser.update(), RATGDO_AUTODISCOVERY_INTERVAL * 1000);
   }
 
   // Configure a discovered garage door opener.

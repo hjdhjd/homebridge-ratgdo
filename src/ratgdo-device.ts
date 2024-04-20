@@ -107,6 +107,12 @@ export class RatgdoAccessory {
     this.configureLight();
     this.configureMotionSensor();
     this.configureMotionOccupancySensor();
+
+    // Warn that we're deprecating MQTT firmware releases moving forward.
+    if(this.device.type === Firmware.MQTT) {
+
+      this.log.info("Warning: Ratgdo MQTT firmware versions will not be supported in future homebridge-ratgdo releases. Please migrate to the Ratgdo ESPHome firmware.");
+    }
   }
 
   // Configure device-specific settings.
@@ -1024,7 +1030,7 @@ export class RatgdoAccessory {
   }
 
   // Utility function to transmit a command to Ratgdo.
-  private async command(topic: string, payload: string, position?: number): Promise<void> {
+  private async command(topic: string, payload = "", position?: number): Promise<void> {
 
     if(this.device.type === Firmware.MQTT) {
 
@@ -1057,12 +1063,14 @@ export class RatgdoAccessory {
           case "closed":
 
             action = "close";
+
             break;
 
           case "open":
           case "stop":
 
             action = payload;
+
             break;
 
           case "set":
@@ -1089,12 +1097,21 @@ export class RatgdoAccessory {
 
         endpoint = "light/light";
         action = (payload === "on") ? "turn_on" : "turn_off";
+
+        break;
+
+      case "refresh":
+
+        endpoint = "button/query_status";
+        action = "press";
+
         break;
 
       default:
 
         this.log.error("Unknown command received: %s - %s.", topic, payload);
         return;
+
         break;
     }
 
@@ -1106,24 +1123,43 @@ export class RatgdoAccessory {
       if(!response?.ok) {
 
         this.log.error("Unable to execute command: %s - %s.", event, payload);
+
         return;
       }
     } catch(error) {
 
       if(error instanceof FetchError) {
 
+        let errorMessage;
+
         switch(error.code) {
 
           case "ECONNRESET":
 
-            this.log.error("Connection to the Ratgdo controller has been reset.");
+            errorMessage = "Connection to the Ratgdo controller has been reset";
+
+            break;
+
+          case "EHOSTDOWN":
+
+            errorMessage = "Connection to the Ratgdo controller has been reset";
+
+            break;
+
+          case "ETIMEDOUT":
+
+            errorMessage = "Connection to the Ratgdo controller has timed out";
+
             break;
 
           default:
 
-            this.log.error("Error sending command: %s %s.", error.code, error.message);
+            errorMessage = error.code + " - " + error.message;
+
             break;
         }
+
+        this.log.error("Error sending command: %s.", errorMessage);
 
         return;
       }
@@ -1141,26 +1177,31 @@ export class RatgdoAccessory {
       case this.hap.Characteristic.CurrentDoorState.CLOSED:
 
         return "closed";
+
         break;
 
       case this.hap.Characteristic.CurrentDoorState.CLOSING:
 
         return "closing";
+
         break;
 
       case this.hap.Characteristic.CurrentDoorState.OPEN:
 
         return "open";
+
         break;
 
       case this.hap.Characteristic.CurrentDoorState.OPENING:
 
         return "opening";
+
         break;
 
       case this.hap.Characteristic.CurrentDoorState.STOPPED:
 
         return "stopped";
+
         break;
 
       default:
@@ -1180,11 +1221,13 @@ export class RatgdoAccessory {
       case this.hap.Characteristic.TargetDoorState.CLOSED:
 
         return "closed";
+
         break;
 
       case this.hap.Characteristic.TargetDoorState.OPEN:
 
         return "open";
+
         break;
 
       default:
@@ -1211,11 +1254,13 @@ export class RatgdoAccessory {
       case this.hap.Characteristic.CurrentDoorState.OPENING:
 
         return this.hap.Characteristic.CurrentDoorState.OPEN;
+
         break;
 
       case this.hap.Characteristic.CurrentDoorState.STOPPED:
 
         return this.hap.Characteristic.CurrentDoorState.STOPPED;
+
         break;
 
       case this.hap.Characteristic.CurrentDoorState.CLOSED:
@@ -1223,6 +1268,7 @@ export class RatgdoAccessory {
       default:
 
         return this.hap.Characteristic.CurrentDoorState.CLOSED;
+
         break;
     }
   }
@@ -1245,6 +1291,7 @@ export class RatgdoAccessory {
       case this.hap.Characteristic.CurrentDoorState.STOPPED:
 
         return this.hap.Characteristic.TargetDoorState.OPEN;
+
         break;
 
       case this.hap.Characteristic.CurrentDoorState.CLOSED:
@@ -1252,6 +1299,7 @@ export class RatgdoAccessory {
       default:
 
         return this.hap.Characteristic.TargetDoorState.CLOSED;
+
         break;
     }
   }
@@ -1264,6 +1312,7 @@ export class RatgdoAccessory {
       case this.hap.Characteristic.LockCurrentState.SECURED:
 
         return this.hap.Characteristic.LockTargetState.SECURED;
+
         break;
 
       case this.hap.Characteristic.LockCurrentState.UNSECURED:
@@ -1272,6 +1321,7 @@ export class RatgdoAccessory {
       default:
 
         return this.hap.Characteristic.LockTargetState.UNSECURED;
+
         break;
     }
   }
