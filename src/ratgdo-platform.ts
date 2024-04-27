@@ -155,14 +155,14 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
         return;
       }
 
+      // Node 18 requires this because it doesn't default to keeping the underlying socket alive by default. We need this to ensure that socket keepalives are enabled so
+      // that we can reconnect gracefully when connection issues occur. I'll remove this once Homebridge shifts to Node 20 as the lowest LTS version supported.
+      http.globalAgent = new http.Agent({ keepAlive: true, timeout: 5000 });
+
       try {
 
-        // Connect to the Ratgdo ESPHome events API. We ensure we tell the underlying transport layer to enable keepalives so we can reconnect gracefully when
-        // connection issues occur.
-        //
-        // @ts-expect-error Unfortunately Node typing for http.Agent incorrectly indicates that createConnection isn't a valid method when it is, so we override it here.
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-        this.espHomeEvents[mac] = new EventSource("http://" + address + "/events", { createConnection: new http.Agent({ keepAlive: true }).createConnection });
+        // Connect to the Ratgdo ESPHome events API.
+        this.espHomeEvents[mac] = new EventSource("http://" + address + "/events");
 
         // Handle errors in the events API.
         this.espHomeEvents[mac].addEventListener("error", (payload: ESError) => {
