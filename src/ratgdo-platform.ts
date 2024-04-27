@@ -7,37 +7,17 @@ import { Bonjour, Service } from "bonjour-service";
 import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_API_PORT, RATGDO_AUTODISCOVERY_INTERVAL, RATGDO_HEARTBEAT_DURATION, RATGDO_HEARTBEAT_INTERVAL,
   RATGDO_MQTT_TOPIC } from "./settings.js";
 import { RatgdoOptions, featureOptionCategories, featureOptions, isOptionEnabled } from "./ratgdo-options.js";
-import { Server, createServer } from "node:net";
-import Aedes from "aedes";
 import EventSource from "eventsource";
-import { Firmware } from "./ratgdo-types.js";
 import { RatgdoAccessory } from "./ratgdo-device.js";
 import { RatgdoMqtt } from "./ratgdo-mqtt.js";
-import { URL } from "node:url";
+import http from "node:http";
 import net from "node:net";
 import util from "node:util";
-
-interface haConfigJson {
-
-  "~": string,
-  device: {
-
-    configuration_url: string,
-    identifiers: string,
-    manufacturer: string,
-    model: string,
-    sw_version: string
-  }
-
-  name: string,
-  unique_id: string,
-}
 
 export class RatgdoPlatform implements DynamicPlatformPlugin {
 
   private readonly accessories: PlatformAccessory[];
   public readonly api: API;
-  public broker: Aedes;
   private mqttNameMac: { [index: string]: string };
   private espHomeEvents: { [index: string]: EventSource };
   private featureOptionDefaults: { [index: string]: boolean };
@@ -47,14 +27,12 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   public readonly hap: HAP;
   public readonly log: Logging;
   public readonly mqtt: RatgdoMqtt | null;
-  private server: Server;
   private unsupportedDevices: { [index: string]: boolean };
 
   constructor(log: Logging, config: PlatformConfig, api: API) {
 
     this.accessories = [];
     this.api = api;
-    this.broker = new Aedes();
     this.configOptions = [];
     this.configuredDevices = {};
     this.mqttNameMac = {};
@@ -64,21 +42,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.log = log;
     this.log.debug = this.debug.bind(this);
     this.mqtt = null;
-    this.server = createServer(this.broker.handle);
-    this.server.unref();
     this.unsupportedDevices = {};
-
-    this.server.on("error", (error) => {
-
-      this.log.error("MQTT broker error: %s", error);
-      this.server.close();
-    });
-
-    // Make sure we cleanup our server when we shutdown.
-    this.api.on(APIEvent.SHUTDOWN, () => {
-
-      this.server.close();
-    });
 
     // Build our list of default values for our feature options.
     for(const category of featureOptionCategories) {
@@ -133,130 +97,8 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.accessories.push(accessory);
   }
 
-  // Connect to the Ratgdo device types we know about.
-  private configureRatgdo(): void {
-
-    this.configureBroker();
-    this.configureEspHome();
-  }
-
-  // Configure and start our MQTT broker.
-  private configureBroker(): void {
-
-    // Lockdown any attempts to send commands. We reserve those privileges for ourselves.
-    this.broker.authorizePublish = (client, packet, callback): void => {
-
-      // Match any strings that end in a command.
-      const commandRegex = new RegExp("/command/[^/]+/?$", "gi");
-
-      return callback(commandRegex.test(packet.topic) ? new Error("Command topics are reserved.") : null);
-    };
-
-    // Capture any publish events to our MQTT broker for processing.
-    this.broker.on("publish", (packet): void => {
-
-      // Capture [homeassistant]/cover/GarageDoor/config device discovery events.
-      const discoveryRegex = new RegExp("^[^/]+/cover/[^/]+/config$", "gi");
-
-      // Capture door events in the form of:
-      //
-      //   [garage door name]/status/availability => offline, online.
-      //   [garage door name]/status/door => closed, closing, open, opening, stopped, syncing.
-      //   [garage door name]/status/light => off, on, unknown.
-      //   [garage door name]/status/lock => locked, unknown, unlocked.
-      //   [garage door name]/status/motion => detected.
-      //   [garage door name]/status/obstruction => clear, obstructed, unknown.
-      const statusRegex = new RegExp("^([^/]+)/status/(availability|door|light|lock|motion|obstruction)$", "gi");
-
-      const payload = packet.payload.toString();
-
-      // Let's see if we have a new garage door opener.
-      if(discoveryRegex.test(packet.topic)) {
-
-        const deviceInfo = JSON.parse(payload) as haConfigJson;
-        const mac = deviceInfo.unique_id.split("_")[1].toUpperCase();
-
-        // Map the device name to the MAC address for future reference.
-        this.mqttNameMac[deviceInfo["~"]] = mac;
-
-        this.configureGdo(new URL(deviceInfo.device.configuration_url)?.hostname ?? "unknown", mac, deviceInfo["~"], deviceInfo.device.sw_version, Firmware.MQTT);
-        return;
-      }
-
-      // Communicate garage door-related state changes.
-      const topicMatch = statusRegex.exec(packet.topic);
-
-      if(topicMatch) {
-
-        const mac = this.mqttNameMac[topicMatch[1]];
-
-        if(!mac) {
-
-          this.log.error("No garage door has been configured in HomeKit for %s.", topicMatch[1]);
-          return;
-        }
-
-        const garageDoor = this.configuredDevices[this.hap.uuid.generate(mac)];
-
-        // If we can't find the garage door opener, we're done.
-        if(!garageDoor) {
-
-          return;
-        }
-
-        this.log.debug("Status update detected: %s (%s): %s - %s", topicMatch[1], this.mqttNameMac[topicMatch[1]], topicMatch[2], payload);
-
-        // Update our state, based on the update we've received.
-        garageDoor.updateState(topicMatch[2], payload);
-        return;
-      }
-
-      // Filter out system-level MQTT messages.
-      if(/^\$SYS\/.*$/.test(packet.topic)) {
-
-        return;
-      }
-
-      // Filter out HomeAssistant-specific MQTT messages.
-      if(/^homeassistant\/.*\/config$/.test(packet.topic)) {
-
-        return;
-      }
-
-      // Filter out heartbeat messages.
-      if(/^\$SYS\/.*\/heartbeat$/.test(packet.topic)) {
-
-        return;
-      }
-
-      // Log unknown / unhandled messages.
-      this.log.debug("Topic: " + packet.topic + " | Message: " + packet.payload.toString());
-    });
-
-    // Start the broker so we can receive connections from Ratgdo MQTT clients.
-    try {
-
-      this.server.listen(this.config.port, () => {
-
-        this.log.info("Ratgdo MQTT broker started and listening on port %s.", this.config.port);
-      });
-    } catch(error) {
-
-      if(error instanceof Error) {
-
-        switch(error.message) {
-
-          default:
-
-            this.log.error("Ratgdo MQTT broker: Error: %s.", error.message);
-            break;
-        }
-      }
-    }
-  }
-
   // Configure and connect to Ratgdo ESPHome clients.
-  private configureEspHome(): void {
+  private configureRatgdo(): void {
 
     // Define the EventSource error message type.
     interface ESError {
@@ -305,8 +147,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       const mac = (service.txt as Record<string, string>).mac.toUpperCase().replace(/(.{2})(?=.)/g, "$1:");
 
       // Configure the device.
-      const ratgdoAccessory = this.configureGdo(address, mac, (service.txt as Record<string, string>).friendly_name, (service.txt as Record<string, string>).version,
-        Firmware.ESPHOME);
+      const ratgdoAccessory = this.configureGdo(address, mac, (service.txt as Record<string, string>).friendly_name, (service.txt as Record<string, string>).version);
 
       // If we've already configured this one, we're done.
       if(!ratgdoAccessory) {
@@ -316,8 +157,12 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
       try {
 
-        // Connect to the Ratgdo ESPHome events API.
-        this.espHomeEvents[mac] = new EventSource("http://" + address + "/events");
+        // Connect to the Ratgdo ESPHome events API. We ensure we tell the underlying transport layer to enable keepalives so we can reconnect gracefully when
+        // connection issues occur.
+        //
+        // @ts-expect-error Unfortunately Node typing for http.Agent incorrectly indicates that createConnection isn't a valid method when it is, so we override it here.
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        this.espHomeEvents[mac] = new EventSource("http://" + address + "/events", { createConnection: new http.Agent({ keepAlive: true }).createConnection });
 
         // Handle errors in the events API.
         this.espHomeEvents[mac].addEventListener("error", (payload: ESError) => {
@@ -481,7 +326,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
         if(error instanceof Error) {
 
-          ratgdoAccessory.log.error("Ratgdo API: Error: %s", error.message);
+          ratgdoAccessory.log.error("Ratgdo API error: %s", error.message);
         }
       }
     });
@@ -494,7 +339,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   }
 
   // Configure a discovered garage door opener.
-  private configureGdo(address: string, mac: string, name: string, firmwareVersion: string, type: Firmware): RatgdoAccessory | null {
+  private configureGdo(address: string, mac: string, name: string, firmwareVersion: string): RatgdoAccessory | null {
 
     // Generate this device's unique identifier.
     const uuid = this.hap.uuid.generate(mac);
@@ -508,8 +353,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       address: address,
       firmwareVersion: firmwareVersion,
       mac: mac.replace(/:/g, ""),
-      name: name,
-      type: type
+      name: name
     };
 
     // Check to see if the user has disabled the device.
@@ -538,7 +382,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     }
 
     // Inform the user.
-    this.log.info("Discovered: %s (address: %s mac: %s firmware: v%s).", device.name, device.address, device.mac, device.firmwareVersion);
+    this.log.info("Discovered: %s (address: %s mac: %s ESPHome firmware: v%s).", device.name, device.address, device.mac, device.firmwareVersion);
 
     // It's a new device - let's add it to HomeKit.
     if(!accessory) {

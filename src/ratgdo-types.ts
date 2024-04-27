@@ -3,20 +3,13 @@
  * ratgdo-types.ts: Interface and type definitions for Ratgdo.
  */
 
-export enum Firmware {
-
-  ESPHOME = 1,
-  MQTT
-}
-
 // Ratgdo device settings.
 export interface RatgdoDevice {
 
   address: string,
   firmwareVersion: string,
   mac: string,
-  name: string,
-  type: Firmware
+  name: string
 }
 
 // Define Ratgdo logging conventions.

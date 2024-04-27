@@ -4,8 +4,8 @@
  */
 import { API, CharacteristicValue, HAP, PlatformAccessory, Service } from "homebridge";
 import { FetchError, fetch } from "@adobe/fetch";
-import { Firmware, RatgdoDevice, RatgdoLogging, RatgdoReservedNames } from "./ratgdo-types.js";
 import { RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION } from "./settings.js";
+import { RatgdoDevice, RatgdoLogging, RatgdoReservedNames } from "./ratgdo-types.js";
 import { RatgdoOptions, getOptionFloat, getOptionNumber, getOptionValue, isOptionEnabled } from "./ratgdo-options.js";
 import { RatgdoPlatform } from "./ratgdo-platform.js";
 import util from "node:util";
@@ -22,8 +22,7 @@ interface RatgdoHints {
   motionOccupancySensor: boolean,
   motionSensor: boolean,
   readOnly: boolean,
-  showBatteryInfo: boolean,
-  syncName: boolean
+  showBatteryInfo: boolean
 }
 
 // Ratgdo status information.
@@ -107,12 +106,6 @@ export class RatgdoAccessory {
     this.configureLight();
     this.configureMotionSensor();
     this.configureMotionOccupancySensor();
-
-    // Warn that we're deprecating MQTT firmware releases moving forward.
-    if(this.device.type === Firmware.MQTT) {
-
-      this.log.info("Warning: Ratgdo MQTT firmware versions will not be supported in future homebridge-ratgdo releases. Please migrate to the Ratgdo ESPHome firmware.");
-    }
   }
 
   // Configure device-specific settings.
@@ -127,29 +120,10 @@ export class RatgdoAccessory {
     this.hints.motionOccupancyDuration = this.getFeatureNumber("Motion.OccupancySensor.Duration") ?? RATGDO_OCCUPANCY_DURATION;
     this.hints.motionSensor = this.hasFeature("Motion");
     this.hints.readOnly = this.hasFeature("Opener.ReadOnly");
-    this.hints.syncName = this.hasFeature("Device.SyncName");
-
-    if(this.hints.automationDimmer && (this.device.type !== Firmware.ESPHOME)) {
-
-      this.hints.automationDimmer = false;
-      this.log.info("Automation dimmer support is only available on Ratgdo devices running on ESPHome firmware versions.");
-    }
 
     if(this.hints.readOnly) {
 
       this.log.info("Garage door opener is read-only. The opener will not respond to open and close requests from HomeKit.");
-    }
-
-    if(this.hints.syncName) {
-
-      if(this.device.type !== Firmware.MQTT) {
-
-        this.hints.syncName = false;
-        this.log.info("Syncing names is only available on Ratgdo devices running on MQTT firmware versions.");
-      } else {
-
-        this.log.info("Syncing Ratgdo device name to HomeKit.");
-      }
     }
 
     return true;
@@ -203,15 +177,12 @@ export class RatgdoAccessory {
 
           command = this.hap.Characteristic.TargetDoorState.OPEN;
 
-          // Parse the position information, if set.
-          if(this.device.type === Firmware.ESPHOME) {
+          // Parse the position information.
+          position = parseFloat(action[1]);
 
-            position = parseFloat(action[1]);
+          if(isNaN(position) || (position < 0) || (position > 100)) {
 
-            if(isNaN(position) || (position < 0) || (position > 100)) {
-
-              position = undefined;
-            }
+            position = undefined;
           }
 
           break;
@@ -306,41 +277,6 @@ export class RatgdoAccessory {
     // Configure the lock garage door lock current and target state characteristics.
     garageDoorService.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.status.lock);
     garageDoorService.updateCharacteristic(this.hap.Characteristic.LockTargetState, this.lockTargetStateBias(this.status.lock));
-
-    // Update our configured name, if requested.
-    if(this.hints.syncName) {
-
-      this.setServiceName(garageDoorService, this.device.name);
-
-      if(this.hints.automationSwitch) {
-
-        this.setServiceName(this.accessory.getServiceById(this.hap.Service.Switch, RatgdoReservedNames.SWITCH_OPENER_AUTOMATION),
-          this.device.name + " Automation Switch");
-      }
-
-      if(this.hints.doorOpenOccupancySensor) {
-
-        this.setServiceName(this.accessory.getServiceById(this.hap.Service.OccupancySensor, RatgdoReservedNames.OCCUPANCY_SENSOR_DOOR_OPEN), this.device.name + " Open");
-      }
-
-      if(this.hints.light) {
-
-        this.setServiceName(this.accessory.getService(this.hap.Service.Lightbulb), this.device.name);
-      }
-
-      if(this.hints.motionSensor) {
-
-        this.setServiceName(this.accessory.getService(this.hap.Service.MotionSensor), this.device.name);
-      }
-
-      if(this.hints.motionOccupancySensor) {
-
-        this.setServiceName(this.accessory.getServiceById(this.hap.Service.OccupancySensor, RatgdoReservedNames.OCCUPANCY_SENSOR_MOTION), this.device.name);
-      }
-
-      // Finally, update the accessory name.
-      this.accessoryName = this.device.name;
-    }
 
     garageDoorService.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => this.status.availability);
     garageDoorService.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
@@ -777,8 +713,7 @@ export class RatgdoAccessory {
         motionService?.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
 
         // Inform the user:
-        this.log.info("Device %s (%s v%s).", this.status.availability ? "connected" : "disconnected", this.device.type === Firmware.MQTT ? "MQTT" : "ESPHome",
-          this.device.firmwareVersion);
+        this.log.info("Ratgdo %s.", this.status.availability ? "connected" : "disconnected");
         break;
 
       case "door":
@@ -1032,22 +967,6 @@ export class RatgdoAccessory {
   // Utility function to transmit a command to Ratgdo.
   private async command(topic: string, payload = "", position?: number): Promise<void> {
 
-    if(this.device.type === Firmware.MQTT) {
-
-      this.platform.broker.publish({ cmd: "publish", dup: false, payload: payload, qos: 2, retain: false, topic: this.device.name + "/command/" + topic },
-        (error?: Error) => {
-
-          if(error) {
-
-            this.log.error("Publish error:");
-            this.log.error(util.inspect(error), { colors: true, depth: null, sorted: true });
-          }
-        }
-      );
-
-      return;
-    }
-
     // Now we handle ESPHome firmware commands.
     let endpoint;
     let action;
@@ -1159,12 +1078,12 @@ export class RatgdoAccessory {
             break;
         }
 
-        this.log.error("Error sending command: %s.", errorMessage);
+        this.log.error("Ratgdo API error sending command: %s.", errorMessage);
 
         return;
       }
 
-      this.log.error("Error sending command: %s", error);
+      this.log.error("Ratgdo API unknown error sending command: %s", error);
     }
   }
 

@@ -31,8 +31,7 @@ export const featureOptions: { [index: string]: FeatureOption[] } = {
   // Device options.
   "Device": [
 
-    { default: true, description: "Make this device available in HomeKit.", name: "" },
-    { default: false, description: "Synchronize the Ratgdo name of this device with HomeKit. Synchronization is one-way only, syncing the device name from Ratgdo to HomeKit. This option is only available on Ratgdo devices running MQTT firmware versions.", name: "SyncName" }
+    { default: true, description: "Make this device available in HomeKit.", name: "" }
   ],
 
   // Light options.
