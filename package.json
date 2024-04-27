@@ -45,6 +45,7 @@
     "aedes": "^0.51.0",
     "bonjour-service": "^1.2.1",
     "eventsource": "^2.0.2",
-    "mqtt": "^5.5.3"
+    "mqtt": "^5.5.3",
+    "semver": "^7.6.0"
   }
 }

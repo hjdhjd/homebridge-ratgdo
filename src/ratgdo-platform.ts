@@ -14,7 +14,10 @@ import { Firmware } from "./ratgdo-types.js";
 import { RatgdoAccessory } from "./ratgdo-device.js";
 import { RatgdoMqtt } from "./ratgdo-mqtt.js";
 import { URL } from "node:url";
+import http from "node:http";
+import https from "node:https";
 import net from "node:net";
+import semver from "semver";
 import util from "node:util";
 
 interface haConfigJson {
@@ -275,6 +278,13 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       position?: number,
       state: string,
       value?: string
+    }
+
+    // EventSource streams need http to use sockets with keepAlive enabled (as they do in Node v19+)
+    if (semver.major(process.versions.node) < 19) {
+      // This  mirrors the configuration added to http(s) in Node v19, allowing sockets to recover from disconnects
+      http.globalAgent = new http.Agent({ keepAlive: true, scheduling: "lifo", timeout: 5000 });
+      https.globalAgent = new https.Agent({ keepAlive: true, scheduling: "lifo", timeout: 5000 });
     }
 
     // Instantiate our mDNS stack.
