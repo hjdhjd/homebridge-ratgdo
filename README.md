@@ -42,20 +42,6 @@ To get started with `homebridge-ratgdo`:
   * Fully open and close the garage door one time. ESPHome Ratgdo will use this to determine how long it takes to open and close your garage door to enable precise control of the position of the garage door opener.
   * That's it. Ensure `homebridge-ratgdo` is running and it will autodiscover your Ratgdo devices and make them available in HomeKit.
 
-Deprecated instructions:
-  * Install the [MQTT Ratgdo firmware](https://paulwieland.github.io/ratgdo/flash.html). You'll need to use Chrome for this as Safari doesn't support installing firmware through a USB serial port.
-  * [Carefully](#known-caveats) edit the MQTT server and port on your Ratgdo device to the IP address of your Homebridge server, and port 18830 (unless you've changed the default port in `homebridge-ratgdo`).
-  * **Please note, MQTT Ratgdo firmware support in `homebridge-ratgdo` is now considered deprecated and will be removed in an upcoming release. I encourage everyone to upgrade to the [ESPHome Ratgdo firmware](https://ratgdo.github.io/esphome-ratgdo/) as soon as they can.
-
-## Known Caveats
-Ratgdo is a terrific solution that solves a problem for many stranded former myQ users and others. There are some quirks and caveats to note, however. As of MQTT Ratgdo firmware v2.57:
-
-  * Misconfiguring your MQTT server IP or port number in any way **will** lock up / brick the Ratgdo. The only fix for this I've discovered is to reflash the Ratgdo and don't misconfigure it the next time around.
-  * Ratgdo currently has no useful way to query it's state over MQTT. That means that on startup, the state of the garage door opener in Homebridge / HomeKit will be unknowable. Given that challenge, `homebridge-ratgdo` will assume the garage door opener is closed on startup. Once an action is taken, the state of the garage door opener will be accurately reflected in Homebridge / HomeKit. There is technically a *query* command available through the MQTT interface to Ratgdo, but all that currently does is to set the Ratgdo state information to an unknown state, awaiting the next state update from the garage door opener, rather than actually publish the current state, which is really what we need.
-  * In some wiring configurations, Ratgdo reads information from the garage door opener either incorrectly or inconsistently. I would advise closely checking and confirming the wiring you're using to ensure it's correct and the physical wiring used is good. If it is, I'd suggest filing a support request on the [Ratgdo support page](https://github.com/PaulWieland/ratgdo/issues).
-
-I hope these issues can be addressed in future Ratgdo releases.
-
 ## Plugin Development Dashboard
 This is mostly of interest to the true developer nerds amongst us.
 

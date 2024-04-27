@@ -44,7 +44,6 @@ Feature options provide a rich mechanism for tailoring your `homebridge-ratgdo` 
 | Option                                           | Description
 |--------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 | `Device`                                         | Make this device available in HomeKit. **(default: enabled)**.
-| `Device.SyncName`                                | Synchronize the Ratgdo name of this device with HomeKit. Synchronization is one-way only, syncing the device name from Ratgdo to HomeKit. This option is only available on Ratgdo devices running MQTT firmware versions. **(default: disabled)**.
 
 #### <A NAME="opener"></A>Opener feature options.
 
