@@ -2,6 +2,9 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 2.0.1 (2024-04-27)
+  * Fix: Address a Node 18-specific regression with respect to event connectivity.
+
 ## 2.0.0 (2024-04-27)
   * Breaking change: Ratgdo MQTT firmware support has been removed. If you need support for it, please stick to 1.2.3. All development moving forward is going to focus on the Ratgdo ESPHome firmware.
   * Fix: address edge cases to ensure connectivity robustness when network interruptions occur.
