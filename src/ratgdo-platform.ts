@@ -128,11 +128,8 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       mdns.destroy();
     });
 
-    // ESPHome device discovery.
-    const mdnsBrowser = mdns.find({type: "esphomelib"});
-
-    // Add an ESPHome device.
-    mdnsBrowser.on("up", (service: Service) => {
+    // Process the discovery of an ESPHome device.
+    const discoverDevice = (service: Service): void => {
 
       // We're only interested in Ratgdo devices with valid IP addresses. Otherwise, we're done.
       if(((service.txt as Record<string, string>).project_name !== "ratgdo.esphome") || !service.addresses) {
@@ -329,10 +326,10 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
           ratgdoAccessory.log.error("Ratgdo API error: %s", error.message);
         }
       }
-    });
+    };
 
-    // Refresh device detection, just in case we missed it in setting up the listener.
-    mdnsBrowser.update();
+    // Start ESPHome device discovery.
+    const mdnsBrowser = mdns.find({type: "esphomelib"}, discoverDevice.bind(this));
 
     // Refresh device discovery regular intervals.
     setInterval(() => mdnsBrowser.update(), RATGDO_AUTODISCOVERY_INTERVAL * 1000);
