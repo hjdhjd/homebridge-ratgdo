@@ -101,11 +101,11 @@ export class RatgdoAccessory {
     this.configureInfo();
     this.configureGarageDoor();
     this.configureMqtt();
-    this.configureAutomationDimmer();
-    this.configureAutomationSwitch();
+    this.configureAutomationDoorPositionDimmer();
+    this.configureAutomationDoorSwitch();
     this.configureDoorOpenOccupancySensor();
     this.configureLight();
-    this.configureLockoutSwitch();
+    this.configureAutomationLockoutSwitch();
     this.configureMotionSensor();
     this.configureMotionOccupancySensor();
   }
@@ -278,6 +278,19 @@ export class RatgdoAccessory {
     garageDoorService.getCharacteristic(this.hap.Characteristic.ObstructionDetected).onGet(() => this.status.obstruction === true);
 
     // Configure the lock garage door lock current and target state characteristics.
+    garageDoorService.getCharacteristic(this.hap.Characteristic.LockTargetState).onSet(async (value: CharacteristicValue) => {
+
+      if(!(await this.command("lock", (value === this.hap.Characteristic.LockTargetState.SECURED) ? "lock" : "unlock"))) {
+
+        // Something went wrong. Let's make sure we revert the lock to it's prior state.
+        setTimeout(() => {
+
+          garageDoorService?.updateCharacteristic(this.hap.Characteristic.LockTargetState, this.lockTargetStateBias(this.status.lock));
+          garageDoorService?.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.status.lock);
+        }, 50);
+      }
+    });
+
     garageDoorService.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.status.lock);
     garageDoorService.updateCharacteristic(this.hap.Characteristic.LockTargetState, this.lockTargetStateBias(this.status.lock));
 
@@ -386,7 +399,7 @@ export class RatgdoAccessory {
   }
 
   // Configure a dimmer to automate open and close events in HomeKit beyond what HomeKit might allow for a garage opener service that gets treated as a secure service.
-  private configureAutomationDimmer(): boolean {
+  private configureAutomationDoorPositionDimmer(): boolean {
 
     // Find the dimmer service, if it exists.
     let dimmerService = this.accessory.getServiceById(this.hap.Service.Lightbulb, RatgdoReservedNames.DIMMER_OPENER_AUTOMATION);
@@ -397,7 +410,7 @@ export class RatgdoAccessory {
       if(dimmerService) {
 
         this.accessory.removeService(dimmerService);
-        this.log.info("Disabling automation dimmer.");
+        this.log.info("Disabling automation door position dimmer.");
       }
 
       return false;
@@ -406,16 +419,14 @@ export class RatgdoAccessory {
     // Add the dimmer to the opener, if needed.
     if(!dimmerService) {
 
-      dimmerService = new this.hap.Service.Lightbulb(this.name + " Automation Dimmer", RatgdoReservedNames.DIMMER_OPENER_AUTOMATION);
+      dimmerService = new this.hap.Service.Lightbulb(this.name + " Automation Door Position", RatgdoReservedNames.DIMMER_OPENER_AUTOMATION);
 
       if(!dimmerService) {
 
-        this.log.error("Unable to add automation dimmer.");
+        this.log.error("Unable to add automation door position dimmer.");
         return false;
       }
 
-      dimmerService.displayName = this.name + " Automation Dimmer";
-      dimmerService.updateCharacteristic(this.hap.Characteristic.Name, this.name + " Automation Dimmer");
       this.accessory.addService(dimmerService);
     }
 
@@ -436,7 +447,7 @@ export class RatgdoAccessory {
       }
 
       // Inform the user.
-      this.log.info("Automation dimmer: closing.");
+      this.log.info("Automation door position dimmer: closing.");
 
       // Send the command.
       if(!this.setDoorState(this.hap.Characteristic.TargetDoorState.CLOSED)) {
@@ -458,23 +469,25 @@ export class RatgdoAccessory {
     // Adjust the door position of the opener by adjusting brightness of the light.
     dimmerService.getCharacteristic(this.hap.Characteristic.Brightness)?.onSet((value: CharacteristicValue) => {
 
-      this.log.info("Automation dimmer: moving opener to %s%.", (value as number).toFixed(0));
+      this.log.info("Automation door position dimmer: moving opener to %s%.", (value as number).toFixed(0));
 
       this.setDoorState((value as number) > 0 ?
         this.hap.Characteristic.TargetDoorState.OPEN : this.hap.Characteristic.TargetDoorState.CLOSED, value as number);
     });
 
     // Initialize the switch.
+    dimmerService.displayName = this.name + " Automation Door Position";
+    dimmerService.updateCharacteristic(this.hap.Characteristic.Name, this.name + " Automation Door Position");
     dimmerService.updateCharacteristic(this.hap.Characteristic.On, this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED);
     dimmerService.updateCharacteristic(this.hap.Characteristic.Brightness, this.status.doorPosition);
 
-    this.log.info("Enabling automation dimmer.");
+    this.log.info("Enabling automation door position dimmer.");
 
     return true;
   }
 
   // Configure a switch to automate open and close events in HomeKit beyond what HomeKit might allow for a garage opener service that gets treated as a secure service.
-  private configureAutomationSwitch(): boolean {
+  private configureAutomationDoorSwitch(): boolean {
 
     // Find the switch service, if it exists.
     let switchService = this.accessory.getServiceById(this.hap.Service.Switch, RatgdoReservedNames.SWITCH_OPENER_AUTOMATION);
@@ -485,7 +498,7 @@ export class RatgdoAccessory {
       if(switchService) {
 
         this.accessory.removeService(switchService);
-        this.log.info("Disabling automation switch.");
+        this.log.info("Disabling automation door opener switch.");
       }
 
       return false;
@@ -494,16 +507,15 @@ export class RatgdoAccessory {
     // Add the switch to the opener, if needed.
     if(!switchService) {
 
-      switchService = new this.hap.Service.Switch(this.name + " Automation Switch", RatgdoReservedNames.SWITCH_OPENER_AUTOMATION);
+      switchService = new this.hap.Service.Switch(this.name + " Automation Opener", RatgdoReservedNames.SWITCH_OPENER_AUTOMATION);
 
       if(!switchService) {
 
-        this.log.error("Unable to add automation switch.");
+        this.log.error("Unable to add automation door opener switch.");
         return false;
       }
 
       switchService.addOptionalCharacteristic(this.hap.Characteristic.ConfiguredName);
-      this.setServiceName(switchService, this.name + " Automation Switch");
       this.accessory.addService(switchService);
     }
 
@@ -518,7 +530,7 @@ export class RatgdoAccessory {
     switchService.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => {
 
       // Inform the user.
-      this.log.info("Automation switch: %s.", value ? "open" : "close" );
+      this.log.info("Automation door opener switch: %s.", value ? "open" : "close" );
 
       // Send the command.
       if(!this.setDoorState(value ? this.hap.Characteristic.TargetDoorState.OPEN : this.hap.Characteristic.TargetDoorState.CLOSED)) {
@@ -532,15 +544,17 @@ export class RatgdoAccessory {
     });
 
     // Initialize the switch.
+    switchService.updateCharacteristic(this.hap.Characteristic.Name, this.name + " Automation Opener");
+    this.setServiceName(switchService, this.name + " Automation Opener");
     switchService.updateCharacteristic(this.hap.Characteristic.On, this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED);
 
-    this.log.info("Enabling automation switch.");
+    this.log.info("Enabling automation door opener switch.");
 
     return true;
   }
 
   // Configure a switch to control the ability to lockout all wireless remotes for the garage door opener, if the feature exists.
-  private configureLockoutSwitch(): boolean {
+  private configureAutomationLockoutSwitch(): boolean {
 
     // Find the switch service, if it exists.
     let switchService = this.accessory.getServiceById(this.hap.Service.Switch, RatgdoReservedNames.SWITCH_LOCKOUT);
@@ -551,7 +565,7 @@ export class RatgdoAccessory {
       if(switchService) {
 
         this.accessory.removeService(switchService);
-        this.log.info("Disabling wireless remote lockout switch.");
+        this.log.info("Disabling automation wireless remote lockout switch.");
       }
 
       return false;
@@ -560,16 +574,15 @@ export class RatgdoAccessory {
     // Add the switch to the opener, if needed.
     if(!switchService) {
 
-      switchService = new this.hap.Service.Switch(this.name + " Lockout Switch", RatgdoReservedNames.SWITCH_LOCKOUT);
+      switchService = new this.hap.Service.Switch(this.name + " Lockout", RatgdoReservedNames.SWITCH_LOCKOUT);
 
       if(!switchService) {
 
-        this.log.error("Unable to add lockout switch.");
+        this.log.error("Unable to add automation wireless remote lockout switch.");
         return false;
       }
 
       switchService.addOptionalCharacteristic(this.hap.Characteristic.ConfiguredName);
-      this.setServiceName(switchService, this.name + " Lockout Switch");
       this.accessory.addService(switchService);
     }
 
@@ -584,7 +597,7 @@ export class RatgdoAccessory {
     switchService.getCharacteristic(this.hap.Characteristic.On)?.onSet(async (value: CharacteristicValue) => {
 
       // Inform the user.
-      this.log.info("Wireless remote lockout switch: remotes are %s.", value ? "locked out" : "permitted" );
+      this.log.info("Automation wireless remote lockout switch: remotes are %s.", value ? "locked out" : "permitted" );
 
       // Send the command.
       if(!(await this.command("lock", value ? "lock" : "unlock"))) {
@@ -598,9 +611,11 @@ export class RatgdoAccessory {
     });
 
     // Initialize the switch.
+    switchService.updateCharacteristic(this.hap.Characteristic.Name, this.name + " Lockout");
+    this.setServiceName(switchService, this.name + " Lockout");
     switchService.updateCharacteristic(this.hap.Characteristic.On, this.status.lock === this.hap.Characteristic.LockCurrentState.SECURED);
 
-    this.log.info("Enabling wireless remote lockout switch.");
+    this.log.info("Enabling automation wireless remote lockout switch.");
 
     return true;
   }
