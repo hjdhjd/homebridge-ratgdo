@@ -2,6 +2,9 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 2.1.0 (2024-04-27)
+  * New feature: you can enable a switch to control the state of the wireless remote lockout capabilities of your garage door opener, if they exist.
+
 ## 2.0.1 (2024-04-27)
   * Fix: Address a Node 18-specific regression with respect to event connectivity.
 
