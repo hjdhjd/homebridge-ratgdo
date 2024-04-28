@@ -51,7 +51,7 @@ To get started with `homebridge-ratgdo`:
   * [Changelog](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/docs/Changelog.md): changes and release history of this plugin.
 
 * Additional Topics
-  * [Feature Options](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/docs/FeatureOptions.md): options to allow you further tailor to your needs, particularly in the areas of automation.
+  * [Feature Options](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/docs/FeatureOptions.md): options to allow you further tailor to your needs, particularly for those who want to have enhanced automation support.
   * [MQTT](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/docs/MQTT.md): how to configure MQTT support.
 
 ## Plugin Development Dashboard
