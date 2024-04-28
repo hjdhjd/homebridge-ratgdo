@@ -35,13 +35,24 @@ In the interest of the community seeking a solution outside of myQ, I've develop
   * Automation switch and dimmer support, allowing you to set the garage door to any position.
   * A rich webUI for configuration.
 
-## Getting Started
+## Installation
+### Getting Started
 To get started with `homebridge-ratgdo`:
 
   * Install `homebridge-ratgdo` using the Homebridge webUI. Make sure you make `homebridge-ratgdo` a child bridge for the best performance.
   * Install the [ESPHome Ratgdo firmware](https://ratgdo.github.io/esphome-ratgdo/). You'll need to use Chrome for this as Safari doesn't support installing firmware through a USB serial port.
   * Fully open and close the garage door one time. ESPHome Ratgdo will use this to determine how long it takes to open and close your garage door to enable precise control of the position of the garage door opener.
   * That's it. Ensure `homebridge-ratgdo` is running and it will autodiscover your Ratgdo devices and make them available in HomeKit.
+
+## Documentation
+* Getting Started
+  * [Installation](#installation): installing this plugin, including system requirements.
+  * [Plugin Configuration](#getting-started): how to quickly get up and running.
+  * [Changelog](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/docs/Changelog.md): changes and release history of this plugin, starting with v3.0.
+
+* Additional Topics
+  * [Feature Options](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/docs/FeatureOptions.md): granular options to allow you to set the camera quality individually, show or hide specific cameras, controllers, and more.
+  * [MQTT](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/docs/MQTT.md): how to configure MQTT support.
 
 ## Plugin Development Dashboard
 This is mostly of interest to the true developer nerds amongst us.

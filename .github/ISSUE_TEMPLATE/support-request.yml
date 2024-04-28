@@ -1,0 +1,89 @@
+name: Support Request
+description: Report a bug or request help. Please read the HBR documentation before creating a support request.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ### Before opening a support request, please ensure you have read the [documentation](https://github.com/hjdhjd/homebridge-ratgdo#documentation). Questions and topics already addressed in the documentation, or in prior issue reports, will be closed without a response.
+
+  - type: input
+    id: hbrversion
+    attributes:
+      label: Homebridge Ratgdo
+      description: Which version of Homebridge Ratgdo (HBR) are you running on?
+      placeholder: e.g. v2.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: homebridgeos
+    attributes:
+      label: Homebridge Platform and OS
+      description: What hardware and operating system are you running Homebridge on?
+      placeholder: e.g. macOS Sonoma
+    validations:
+      required: true
+
+  - type: input
+    id: homebridge
+    attributes:
+      label: Homebridge Version
+      description: Which version of Homebridge are you running on?
+      placeholder: e.g. v1.7.0
+    validations:
+      required: true
+
+  - type: input
+    id: node
+    attributes:
+      label: Node Version
+      description: Which version of Node are you running on?
+      placeholder: e.g. v18.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: ratgdo
+    attributes:
+      label: Ratgdo ESPHome Firmware Version
+      description: Which version of the Ratgdo ESPHome firmware is your Ratgdo running on?
+      placeholder: e.g. v2024.3.2
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: Describe the problem
+      description: Please describe the issue you're encountering, and ensure you include steps to reproduce.
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Homebridge HBR JSON configuration
+      description: Please copy and paste your Homebridge HBR JSON configuration. This will be automatically formatted into code, so no need for backticks.
+      placeholder: Paste your HBR configuration from Homebridge (gear icon in the Homebridge webUI next to HBR, then select JSON config). Copy and paste it here.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Please copy and paste any relevant Homebridge HBR log output. This will be automatically formatted into code, so no need for backticks.
+      placeholder: Please paste the relevant log entries here.
+      render: shell
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: acknowledgment
+    attributes:
+      label: Acknowledgment that you are only running non-beta firmware releases from Apple, ESPHome, or Ratgdo
+      description: By submitting this issue, you are acknowledging that you are only using the official Ratgdo ESPHome firmware releases and that you are **not** running beta firmwares (or operating systems) from Apple, ESPHome, or Ratgdo. **All issues relating to beta firmwares or operating systems will be closed without comment.**
+      options:
+        - label: I acknowledge that I am not running any beta firmwares or operating systems from Apple, ESPHome, or Ratgdo.
+          required: true
