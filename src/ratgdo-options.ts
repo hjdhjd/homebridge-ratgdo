@@ -55,7 +55,8 @@ export const featureOptions: { [index: string]: FeatureOption[] } = {
     { default: false, description: "Add a dimmer accessory to control the opener. This can be useful in automation scenarios where you want to set the door to a specific percentage. This option is only available on Ratgdo devices running ESPHome firmware versions.", name: "Dimmer" },
     { default: false, description: "Add a switch accessory to control the opener. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling garage door openers.", name: "Switch" },
     { default: false, description: "Add an occupancy sensor accessory using the open state of the opener to determine occupancy. This can be useful in automation scenarios where you want to trigger an action based on the opener being open for an extended period of time.", name: "OccupancySensor" },
-    { default: false, defaultValue: RATGDO_OCCUPANCY_DURATION, description: "Duration, in seconds, to wait once the opener has reached the open state before indicating occupancy.", group: "OccupancySensor", name: "OccupancySensor.Duration" }
+    { default: false, defaultValue: RATGDO_OCCUPANCY_DURATION, description: "Duration, in seconds, to wait once the opener has reached the open state before indicating occupancy.", group: "OccupancySensor", name: "OccupancySensor.Duration" },
+    { default: false, description: "Add a switch accessory to control the wireless remote lockout feature (if present) on your opener. ", name: "Switch.RemoteLockout" }
   ]
 };
 /* eslint-enable @stylistic/max-len */

@@ -18,6 +18,7 @@ interface RatgdoHints {
   doorOpenOccupancyDuration: number,
   doorOpenOccupancySensor: boolean,
   light: boolean,
+  lockoutSwitch: boolean,
   motionOccupancyDuration: number,
   motionOccupancySensor: boolean,
   motionSensor: boolean,
@@ -104,6 +105,7 @@ export class RatgdoAccessory {
     this.configureAutomationSwitch();
     this.configureDoorOpenOccupancySensor();
     this.configureLight();
+    this.configureLockoutSwitch();
     this.configureMotionSensor();
     this.configureMotionOccupancySensor();
   }
@@ -116,6 +118,7 @@ export class RatgdoAccessory {
     this.hints.doorOpenOccupancySensor = this.hasFeature("Opener.OccupancySensor");
     this.hints.doorOpenOccupancyDuration = this.getFeatureNumber("Opener.OccupancySensor.Duration") ?? RATGDO_OCCUPANCY_DURATION;
     this.hints.light = this.hasFeature("Light");
+    this.hints.lockoutSwitch = this.hasFeature("Opener.Switch.RemoteLockout");
     this.hints.motionOccupancySensor = this.hasFeature("Motion.OccupancySensor");
     this.hints.motionOccupancyDuration = this.getFeatureNumber("Motion.OccupancySensor.Duration") ?? RATGDO_OCCUPANCY_DURATION;
     this.hints.motionSensor = this.hasFeature("Motion");
@@ -536,6 +539,72 @@ export class RatgdoAccessory {
     return true;
   }
 
+  // Configure a switch to control the ability to lockout all wireless remotes for the garage door opener, if the feature exists.
+  private configureLockoutSwitch(): boolean {
+
+    // Find the switch service, if it exists.
+    let switchService = this.accessory.getServiceById(this.hap.Service.Switch, RatgdoReservedNames.SWITCH_LOCKOUT);
+
+    // The switch is disabled by default and primarily exists for automation purposes.
+    if(!this.hints.lockoutSwitch) {
+
+      if(switchService) {
+
+        this.accessory.removeService(switchService);
+        this.log.info("Disabling wireless remote lockout switch.");
+      }
+
+      return false;
+    }
+
+    // Add the switch to the opener, if needed.
+    if(!switchService) {
+
+      switchService = new this.hap.Service.Switch(this.name + " Lockout Switch", RatgdoReservedNames.SWITCH_LOCKOUT);
+
+      if(!switchService) {
+
+        this.log.error("Unable to add lockout switch.");
+        return false;
+      }
+
+      switchService.addOptionalCharacteristic(this.hap.Characteristic.ConfiguredName);
+      this.setServiceName(switchService, this.name + " Lockout Switch");
+      this.accessory.addService(switchService);
+    }
+
+    // Return the current state of the opener.
+    switchService.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => {
+
+      // We're on if we are in any state other than locked.
+      return this.status.lock === this.hap.Characteristic.LockCurrentState.SECURED;
+    });
+
+    // Open or close the opener.
+    switchService.getCharacteristic(this.hap.Characteristic.On)?.onSet(async (value: CharacteristicValue) => {
+
+      // Inform the user.
+      this.log.info("Wireless remote lockout switch: remotes are %s.", value ? "locked out" : "permitted" );
+
+      // Send the command.
+      if(!(await this.command("lock", value ? "lock" : "unlock"))) {
+
+        // Something went wrong. Let's make sure we revert the switch to it's prior state.
+        setTimeout(() => {
+
+          switchService?.updateCharacteristic(this.hap.Characteristic.On, !value);
+        }, 50);
+      }
+    });
+
+    // Initialize the switch.
+    switchService.updateCharacteristic(this.hap.Characteristic.On, this.status.lock === this.hap.Characteristic.LockCurrentState.SECURED);
+
+    this.log.info("Enabling wireless remote lockout switch.");
+
+    return true;
+  }
+
   // Configure the door open occupancy sensor for HomeKit.
   private configureDoorOpenOccupancySensor(): boolean {
 
@@ -696,6 +765,7 @@ export class RatgdoAccessory {
     const doorOccupancyService = this.accessory.getServiceById(this.hap.Service.OccupancySensor, RatgdoReservedNames.OCCUPANCY_SENSOR_DOOR_OPEN);
     const garageDoorService = this.accessory.getService(this.hap.Service.GarageDoorOpener);
     const lightBulbService = this.accessory.getService(this.hap.Service.Lightbulb);
+    const lockoutService = this.accessory.getServiceById(this.hap.Service.Switch, RatgdoReservedNames.SWITCH_LOCKOUT);
     const motionOccupancyService = this.accessory.getServiceById(this.hap.Service.OccupancySensor, RatgdoReservedNames.OCCUPANCY_SENSOR_MOTION);
     const motionService = this.accessory.getService(this.hap.Service.MotionSensor);
     const switchService = this.accessory.getServiceById(this.hap.Service.Switch, RatgdoReservedNames.SWITCH_OPENER_AUTOMATION);
@@ -853,9 +923,10 @@ export class RatgdoAccessory {
         garageDoorService?.updateCharacteristic(this.hap.Characteristic.LockTargetState, payload === "locked" ?
           this.hap.Characteristic.LockTargetState.SECURED : this.hap.Characteristic.LockTargetState.UNSECURED);
         garageDoorService?.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.status.lock);
+        lockoutService?.updateCharacteristic(this.hap.Characteristic.On, this.status.lock === this.hap.Characteristic.LockCurrentState.SECURED);
 
         // Inform the user:
-        this.log.info("%s.", camelCase(payload));
+        this.log.info("Wireless remotes are %s.", payload === "locked" ? "locked out" : "permitted");
 
         // Publish to MQTT, if the user has configured it.
         this.platform.mqtt?.publish(this, "lock", this.status.lock.toString());
@@ -965,7 +1036,7 @@ export class RatgdoAccessory {
   }
 
   // Utility function to transmit a command to Ratgdo.
-  private async command(topic: string, payload = "", position?: number): Promise<void> {
+  private async command(topic: string, payload = "", position?: number): Promise<boolean> {
 
     // Now we handle ESPHome firmware commands.
     let endpoint;
@@ -997,16 +1068,20 @@ export class RatgdoAccessory {
             if(position === undefined) {
 
               this.log.error("Invalid door set command received: no position specified.");
-              return;
+
+              return false;
             }
 
             action = "set?position=" + (position / 100).toString();
+
             break;
 
           default:
 
             this.log.error("Unknown door command received: %s.", payload);
-            return;
+
+            return false;
+
             break;
         }
 
@@ -1019,6 +1094,12 @@ export class RatgdoAccessory {
 
         break;
 
+      case "lock":
+
+        endpoint = "lock/lock_remotes";
+        action = (payload === "lock") ? "lock" : "unlock";
+        break;
+
       case "refresh":
 
         endpoint = "button/query_status";
@@ -1029,7 +1110,7 @@ export class RatgdoAccessory {
       default:
 
         this.log.error("Unknown command received: %s - %s.", topic, payload);
-        return;
+        return false;
 
         break;
     }
@@ -1043,7 +1124,7 @@ export class RatgdoAccessory {
 
         this.log.error("Unable to execute command: %s - %s.", event, payload);
 
-        return;
+        return false;
       }
     } catch(error) {
 
@@ -1080,11 +1161,15 @@ export class RatgdoAccessory {
 
         this.log.error("Ratgdo API error sending command: %s.", errorMessage);
 
-        return;
+        return false;
       }
 
       this.log.error("Ratgdo API unknown error sending command: %s", error);
+
+      return false;
     }
+
+    return true;
   }
 
   // Utility function to translate HomeKit's current door state values into human-readable form.

@@ -32,5 +32,6 @@ export enum RatgdoReservedNames {
   OCCUPANCY_SENSOR_MOTION = "OccupancySensor.Motion",
 
   // Manage our switch types.
+  SWITCH_LOCKOUT = "Switch.Lockout",
   SWITCH_OPENER_AUTOMATION = "Switch.Opener.Automation"
 }
