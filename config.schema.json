@@ -52,36 +52,11 @@
           "description": "Enter only one option per entry. See the plugin documentation for the complete list of available options or use the feature options webUI tab above.",
           "placeholder": "e.g. Disable.Device"
         }
-      },
-
-      "port": {
-        "title": "MQTT Broker Port",
-        "type": "number",
-        "placeholder": "e.g. 18830",
-        "minimum": 1024,
-        "maximum": 65535,
-        "required": false,
-        "description": "Set the port to use for the builtin MQTT broker. Ensure you set the Ratgdo hardware control board to use the same MQTT server port. Default: 18830"
       }
     }
   },
 
   "layout": [
-    {
-      "type": "section",
-      "title": "Ratgdo Settings (MQTT Firmware)",
-      "expandable": true,
-      "expanded": false,
-      "items": [
-        {
-          "description": "Ensure your Ratgdo hardware control board is configured to use the IP address of your Homebridge server for the MQTT server IP",
-          "items": [
-            "port"
-          ]
-        }
-      ]
-    },
-
     {
       "type": "section",
       "title": "Plugin Feature Options",

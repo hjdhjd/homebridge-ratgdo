@@ -4,7 +4,7 @@
  */
 import { API, APIEvent, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
 import { Bonjour, Service } from "bonjour-service";
-import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_API_PORT, RATGDO_AUTODISCOVERY_INTERVAL, RATGDO_HEARTBEAT_DURATION, RATGDO_HEARTBEAT_INTERVAL,
+import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_AUTODISCOVERY_INTERVAL, RATGDO_HEARTBEAT_DURATION, RATGDO_HEARTBEAT_INTERVAL,
   RATGDO_MQTT_TOPIC } from "./settings.js";
 import { RatgdoOptions, featureOptionCategories, featureOptions, isOptionEnabled } from "./ratgdo-options.js";
 import EventSource from "eventsource";
@@ -18,7 +18,6 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
   private readonly accessories: PlatformAccessory[];
   public readonly api: API;
-  private mqttNameMac: { [index: string]: string };
   private espHomeEvents: { [index: string]: EventSource };
   private featureOptionDefaults: { [index: string]: boolean };
   public config!: RatgdoOptions;
@@ -27,7 +26,6 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   public readonly hap: HAP;
   public readonly log: Logging;
   public readonly mqtt: RatgdoMqtt | null;
-  private unsupportedDevices: { [index: string]: boolean };
 
   constructor(log: Logging, config: PlatformConfig, api: API) {
 
@@ -35,14 +33,12 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.api = api;
     this.configOptions = [];
     this.configuredDevices = {};
-    this.mqttNameMac = {};
     this.espHomeEvents = {};
     this.featureOptionDefaults = {};
     this.hap = api.hap;
     this.log = log;
     this.log.debug = this.debug.bind(this);
     this.mqtt = null;
-    this.unsupportedDevices = {};
 
     // Build our list of default values for our feature options.
     for(const category of featureOptionCategories) {
@@ -64,8 +60,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       debug: config.debug === true,
       mqttTopic: (config.mqttTopic as string) ?? RATGDO_MQTT_TOPIC,
       mqttUrl: config.mqttUrl as string,
-      options: config.options as string[],
-      port: "port" in config ? parseInt(config.port as string) : RATGDO_API_PORT
+      options: config.options as string[]
     };
 
     // If we have feature options, put them into their own array, upper-cased for future reference.

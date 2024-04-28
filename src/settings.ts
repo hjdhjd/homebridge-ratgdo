@@ -9,9 +9,6 @@ export const PLATFORM_NAME = "Ratgdo";
 // The name of our plugin.
 export const PLUGIN_NAME = "homebridge-ratgdo";
 
-// The default port to use for our builtin MQTT broker. This is intentionally not the default MQTT port number (1883) in case a user is already running a local broker.
-export const RATGDO_API_PORT = 18830;
-
 // Interval, in seconds, to initiate mDNS discovery requests for new Ratgdo devices.
 export const RATGDO_AUTODISCOVERY_INTERVAL = 60;
 

@@ -11,8 +11,7 @@ export interface RatgdoOptions {
   debug: boolean,
   mqttTopic: string,
   mqttUrl: string,
-  options: string[],
-  port: number
+  options: string[]
 }
 
 // Feature option categories.
