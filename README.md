@@ -48,10 +48,10 @@ To get started with `homebridge-ratgdo`:
 * Getting Started
   * [Installation](#installation): installing this plugin, including system requirements.
   * [Plugin Configuration](#getting-started): how to quickly get up and running.
-  * [Changelog](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/docs/Changelog.md): changes and release history of this plugin, starting with v3.0.
+  * [Changelog](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/docs/Changelog.md): changes and release history of this plugin.
 
 * Additional Topics
-  * [Feature Options](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/docs/FeatureOptions.md): granular options to allow you to set the camera quality individually, show or hide specific cameras, controllers, and more.
+  * [Feature Options](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/docs/FeatureOptions.md): options to allow you further tailor to your needs, particularly in the areas of automation.
   * [MQTT](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/docs/MQTT.md): how to configure MQTT support.
 
 ## Plugin Development Dashboard
