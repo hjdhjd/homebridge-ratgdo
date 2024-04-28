@@ -30,6 +30,7 @@ In the interest of the community seeking a solution outside of myQ, I've develop
   * Control of the light attached to the garage door opener, when available.
   * Obstruction detection.
   * Occupancy sensor support.
+  * Ability to lock and unlock the garage door opener through the ability to lockout wireless remotes.
   * Read-only garage door opener support.
   * Automation switch and dimmer support, allowing you to set the garage door to any position.
   * A rich webUI for configuration.
