@@ -19,7 +19,7 @@
 ## Why use this plugin for Ratgdo support in HomeKit?
 In a nutshell, the aim of this plugin for things to *just work* with minimal required configuration by users. The goal is to provide as close to a streamlined experience as you would expect from a first-party or native HomeKit solution. For the adventurous, those additional granular options are, of course, available to support more esoteric use cases or other unique needs.
 
-What does *just work* mean in practice? It means that this plugin will discover all your Ratgdo devices without the need for additional configuration beyond telling the Ratgdo device about `homebridge-ratgdo`.
+What does *just work* mean in practice? It means that this plugin will discover all your Ratgdo devices that are running the Ratgdo ESPHome firmware without the need for additional configuration.
 
 **I rely on this plugin every day and actively maintain and support it.**
 
@@ -39,10 +39,20 @@ In the interest of the community seeking a solution outside of myQ, I've develop
 ### Getting Started
 To get started with `homebridge-ratgdo`:
 
-  * Install `homebridge-ratgdo` using the Homebridge webUI. Make sure you make `homebridge-ratgdo` a child bridge for the best performance.
+  * Install `homebridge-ratgdo` using the Homebridge webUI. Make sure you make `homebridge-ratgdo` a child bridge for the best experience.
   * Install the [ESPHome Ratgdo firmware](https://ratgdo.github.io/esphome-ratgdo/). You'll need to use Chrome for this as Safari doesn't support installing firmware through a USB serial port.
   * Fully open and close the garage door one time. ESPHome Ratgdo will use this to determine how long it takes to open and close your garage door to enable precise control of the position of the garage door opener.
   * That's it. Ensure `homebridge-ratgdo` is running and it will autodiscover your Ratgdo devices and make them available in HomeKit.
+
+> [!TIP]
+> If you would like to tailor your experience a bit further, you can choose to use the [hombridge-ratgdo ESPHome YAML configuration file](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/homebridge-ratgdo.yaml) and use it to create a more customized Ratgdo ESPHome firmware. Using this firmware allows you to do the following things for those using Ratgdo hardware revision 2.5 or beyond:
+>
+>   * The ability to customize the name (and friendly name) of the Ratgdo device. Though cosmetic, it can be helpful when you have multiple Ratgdo devices.
+>   * Use SNTP to set the time on the Ratgdo device. Not strictly necessary, but good hygeine.
+>   * Allows you to configure the timezone either yourself or automatically. The timezone will be autoconfigured using the World Time API geoIP by default.
+>   * Set the interval to check for updates from the Ratgdo repository to every 6 hours instead of the Ratgdo default of every second.
+>
+> **Using this YAML is completely optional and largely for cosmetic purposes. There are no functional differences between using this custom YAML configuration and the default Ratgdp ESPHome one.**
 
 ## Documentation
 * Getting Started
