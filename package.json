@@ -1,7 +1,7 @@
 {
   "name": "homebridge-ratgdo",
   "displayName": "Homebridge Ratgdo",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "description": "HomeKit integration for LiftMaster and Chamberlain garage door openers, without requiring myQ.",
   "license": "ISC",
   "repository": {
@@ -18,7 +18,7 @@
   },
   "main": "dist/index.js",
   "scripts": {
-    "lint": "eslint src/**.ts",
+    "lint": "eslint \"src/**.ts\"",
     "watch": "npm run build && npm link && nodemon",
     "build": "rimraf ./dist && tsc",
     "prepublishOnly": "npm run lint && npm run build"
@@ -27,23 +27,22 @@
     "homebridge-plugin"
   ],
   "devDependencies": {
-    "@stylistic/eslint-plugin": "^1.7.2",
+    "@stylistic/eslint-plugin": "^1.8.0",
     "@types/eventsource": "^1.1.15",
-    "@types/node": "^20.12.7",
-    "@typescript-eslint/eslint-plugin": "^7.7.1",
-    "@typescript-eslint/parser": "^7.7.1",
+    "@types/node": "^20.12.8",
     "eslint": "^8.5.7",
     "homebridge": "^1.8.1",
     "nodemon": "^3.1.0",
     "rimraf": "^5.0.5",
     "ts-node": "^10.9.2",
-    "typescript": "^5.4.5"
+    "typescript": "^5.4.5",
+    "typescript-eslint": "^7.8.0"
   },
   "dependencies": {
     "@adobe/fetch": "^4.1.2",
     "@homebridge/plugin-ui-utils": "^1.0.3",
     "bonjour-service": "^1.2.1",
     "eventsource": "^2.0.2",
-    "mqtt": "^5.5.4"
+    "mqtt": "^5.5.5"
   }
 }

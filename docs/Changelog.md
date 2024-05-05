@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 2.1.2 (2024-05-05)
+  * Documentation updates and an optional [homebridge-ratgdo ESPHome YAML](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/homebridge-ratgdo.yaml) for those that want some minor enhanced cosmetic / quality of life enhancements.
+  * Housekeeping.
+
 ## 2.1.1 (2024-04-28)
   * Minor bugfixes and enhancements.
   * Housekeeping.
