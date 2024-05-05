@@ -84,8 +84,8 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     api.on(APIEvent.DID_FINISH_LAUNCHING, () => this.configureRatgdo());
   }
 
-  // This gets called when homebridge restores cached accessories at startup. We intentionally avoid doing anything significant here, and save all that logic for broker
-  // configuration and startup.
+  // This gets called when homebridge restores cached accessories at startup. We intentionally avoid doing anything significant here, and save all that logic for device
+  // discovery.
   public configureAccessory(accessory: PlatformAccessory): void {
 
     // Add this to the accessory array so we can track it.
@@ -94,6 +94,22 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
   // Configure and connect to Ratgdo ESPHome clients.
   private configureRatgdo(): void {
+
+    // Instantiate our mDNS stack.
+    const mdns = new Bonjour();
+
+    // Make sure we cleanup our mDNS client on shutdown.
+    this.api.on(APIEvent.SHUTDOWN, () => mdns.destroy());
+
+    // Start ESPHome device discovery.
+    const mdnsBrowser = mdns.find({type: "esphomelib"}, this.discoverRatgdoDevice.bind(this));
+
+    // Refresh device discovery regular intervals.
+    setInterval(() => mdnsBrowser.update(), RATGDO_AUTODISCOVERY_INTERVAL * 1000);
+  }
+
+  // Ratgdo ESPHome device discovery.
+  private discoverRatgdoDevice(service: Service): void {
 
     // Define the EventSource error message type.
     interface ESError {
@@ -114,220 +130,202 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       value?: string
     }
 
-    // Instantiate our mDNS stack.
-    const mdns = new Bonjour();
+    // We're only interested in Ratgdo devices with valid IP addresses. Otherwise, we're done.
+    if(((service.txt as Record<string, string>).project_name !== "ratgdo.esphome") || !service.addresses) {
 
-    // Make sure we cleanup our mDNS client on shutdown.
-    this.api.on(APIEvent.SHUTDOWN, () => {
+      return;
+    }
 
-      mdns.destroy();
-    });
+    // We grab the first address provided for the ESPHome device.
+    const address = service.addresses[0];
 
-    // Process the discovery of an ESPHome device.
-    const discoverDevice = (service: Service): void => {
+    // Grab the MAC address. We uppercase it and put it in the familiar colon notation first.
+    const mac = (service.txt as Record<string, string>).mac.toUpperCase().replace(/(.{2})(?=.)/g, "$1:");
 
-      // We're only interested in Ratgdo devices with valid IP addresses. Otherwise, we're done.
-      if(((service.txt as Record<string, string>).project_name !== "ratgdo.esphome") || !service.addresses) {
+    // Configure the device.
+    const ratgdoAccessory = this.configureGdo(address, mac, (service.txt as Record<string, string>).friendly_name, (service.txt as Record<string, string>).version);
 
-        return;
-      }
+    // If we've already configured this one, we're done.
+    if(!ratgdoAccessory) {
 
-      // We grab the first address provided for the ESPHome device.
-      const address = service.addresses[0];
+      return;
+    }
 
-      // Grab the MAC address. We uppercase it and put it in the familiar colon notation first.
-      const mac = (service.txt as Record<string, string>).mac.toUpperCase().replace(/(.{2})(?=.)/g, "$1:");
+    // Node 18 requires this because it doesn't default to keeping the underlying socket alive by default. We need this to ensure that socket keepalives are enabled so
+    // that we can reconnect gracefully when connection issues occur. I'll remove this once Homebridge shifts to Node 20 as the lowest LTS version supported.
+    http.globalAgent = new http.Agent({ keepAlive: true, timeout: 5000 });
 
-      // Configure the device.
-      const ratgdoAccessory = this.configureGdo(address, mac, (service.txt as Record<string, string>).friendly_name, (service.txt as Record<string, string>).version);
+    try {
 
-      // If we've already configured this one, we're done.
-      if(!ratgdoAccessory) {
+      // Connect to the Ratgdo ESPHome events API.
+      this.espHomeEvents[mac] = new EventSource("http://" + address + "/events");
 
-        return;
-      }
+      // Handle errors in the events API.
+      this.espHomeEvents[mac].addEventListener("error", (payload: ESError) => {
 
-      // Node 18 requires this because it doesn't default to keeping the underlying socket alive by default. We need this to ensure that socket keepalives are enabled so
-      // that we can reconnect gracefully when connection issues occur. I'll remove this once Homebridge shifts to Node 20 as the lowest LTS version supported.
-      http.globalAgent = new http.Agent({ keepAlive: true, timeout: 5000 });
+        let errorMessage;
 
-      try {
+        switch(payload.message) {
 
-        // Connect to the Ratgdo ESPHome events API.
-        this.espHomeEvents[mac] = new EventSource("http://" + address + "/events");
+          case payload.message?.startsWith("connect ECONNREFUSED "):
 
-        // Handle errors in the events API.
-        this.espHomeEvents[mac].addEventListener("error", (payload: ESError) => {
+            errorMessage = "Connection to the Ratgdo controller refused";
 
-          let errorMessage;
+            break;
 
-          switch(payload.message) {
+          case payload.message?.startsWith("connect ETIMEDOUT "):
 
-            case payload.message?.startsWith("connect ECONNREFUSED "):
+            errorMessage = "Connection to the Ratgdo controller has timed out";
 
-              errorMessage = "Connection to the Ratgdo controller refused";
+            break;
 
-              break;
+          case "read ECONNRESET":
 
-            case payload.message?.startsWith("connect ETIMEDOUT "):
+            errorMessage = "Connection to the Ratgdo controller has been reset";
 
-              errorMessage = "Connection to the Ratgdo controller has timed out";
+            break;
 
-              break;
+          case "read ETIMEDOUT":
 
-            case "read ECONNRESET":
+            errorMessage = "Connection to the Ratgdo controller has timed out while listening for events";
 
-              errorMessage = "Connection to the Ratgdo controller has been reset";
+            break;
 
-              break;
+          case "unknown error.":
+          case undefined:
 
-            case "read ETIMEDOUT":
+            errorMessage = "An unknown error on the Ratgdo controller has occurred. This will happen occasionally and can generally be ignored";
 
-              errorMessage = "Connection to the Ratgdo controller has timed out while listening for events";
+            break;
 
-              break;
+          default:
 
-            case "unknown error.":
-            case undefined:
+            errorMessage = "Unrecognized error: " + util.inspect(payload, { sorted: true });
 
-              errorMessage = "An unknown error on the Ratgdo controller has occurred. This will happen occasionally and can generally be ignored";
-
-              break;
-
-            default:
-
-              errorMessage = "Unrecognized error: " + util.inspect(payload, { sorted: true });
-
-              break;
-          }
-
-          ratgdoAccessory.log.error("%s.", errorMessage);
-        });
-
-        // Inform the user when we've successfully connected.
-        this.espHomeEvents[mac].addEventListener("open", () => {
-
-          ratgdoAccessory.updateState("availability", "online");
-        });
-
-        // Capture state updates from the controller.
-        this.espHomeEvents[mac].addEventListener("state", (message: MessageEvent<string>) => {
-
-          let event;
-
-          ratgdoAccessory.log.debug("State event received: ", util.inspect(message.data, { sorted: true }));
-
-          // Ratgdo occasionally sends empty status updates - we ignore them.
-          if(!message.data.length) {
-
-            return;
-          }
-
-          try {
-
-            event = JSON.parse(message.data) as ESMessage;
-          } catch(error) {
-
-            ratgdoAccessory.log.error("Unable to parse state message: \"%s\". Invalid JSON.", message.data);
-            return;
-          }
-
-          let state;
-
-          switch(event.id) {
-
-            case "binary_sensor-motion":
-
-              ratgdoAccessory.updateState("motion", (event.state === "OFF") ? "clear" : "detected");
-              break;
-
-            case "binary_sensor-obstruction":
-
-              ratgdoAccessory.updateState("obstruction", (event.state === "OFF") ? "clear" : "obstructed");
-              break;
-
-            case "cover-door":
-
-              switch(event.current_operation) {
-
-                case "CLOSING":
-                case "OPENING":
-
-                  state = event.current_operation.toLowerCase();
-
-                  break;
-
-                case "IDLE":
-
-                  // We're stopped, rather than open, if the door is in a position greater than 0.
-                  state = ((event.state === "OPEN") && (event.position !== undefined) && (event.position > 0) && (event.position < 1)) ? "stopped" :
-                    event.state.toLowerCase();
-
-                  break;
-
-                default:
-
-                  ratgdoAccessory.log.error("Unknown door operation detected: %s.", event.current_operation);
-                  return;
-
-                  break;
-              }
-
-              ratgdoAccessory.updateState("door", state, (event.position !== undefined) ? event.position * 100 : undefined);
-
-              break;
-
-            case "light-light":
-
-              ratgdoAccessory.updateState("light", event.state === "OFF" ? "off" : "on");
-
-              break;
-
-            case "lock-lock_remotes":
-
-              ratgdoAccessory.updateState("lock", event.state === "LOCKED" ? "locked" : "unlocked");
-
-              break;
-
-            default:
-
-              break;
-          }
-        });
-
-        // Heartbeat the Ratgdo controller at regular intervals. We need to do this because the ESPHome firmware for Ratgdo has a failsafe that will autoreboot the
-        // Ratgdo every 15 minutes if it doesn't receive a native API connection. Fortunately, the failsafe only looks for an open connection to the API, allowing us the
-        // opportunity to heartbeat it with a connection we periodically reopen.
-        const heartbeat = (): void => {
-
-          // Connect to the Ratgdo, and setup our heartbeat to close after a configured duration.
-          const socket = net.createConnection({ host: address, port: 6053 }, () => setTimeout(() => {
-
-            socket.destroy();
-          }, RATGDO_HEARTBEAT_DURATION * 1000));
-
-          // Handle heartbeat errors.
-          socket.on("error", (err) => ratgdoAccessory.log.debug("Heartbeat error: %s.", util.inspect(err, { sorted: true })));
-
-          // Perpetually restart our heartbeat when it ends.
-          socket.on("close", () => setTimeout(() => heartbeat(), RATGDO_HEARTBEAT_INTERVAL * 1000));
-        };
-
-        heartbeat();
-      } catch(error) {
-
-        if(error instanceof Error) {
-
-          ratgdoAccessory.log.error("Ratgdo API error: %s", error.message);
+            break;
         }
+
+        ratgdoAccessory.log.error("%s.", errorMessage);
+      });
+
+      // Inform the user when we've successfully connected.
+      this.espHomeEvents[mac].addEventListener("open", () => {
+
+        ratgdoAccessory.updateState("availability", "online");
+      });
+
+      // Capture state updates from the controller.
+      this.espHomeEvents[mac].addEventListener("state", (message: MessageEvent<string>) => {
+
+        let event;
+
+        ratgdoAccessory.log.debug("State event received: ", util.inspect(message.data, { sorted: true }));
+
+        // Ratgdo occasionally sends empty status updates - we ignore them.
+        if(!message.data.length) {
+
+          return;
+        }
+
+        try {
+
+          event = JSON.parse(message.data) as ESMessage;
+        } catch(error) {
+
+          ratgdoAccessory.log.error("Unable to parse state message: \"%s\". Invalid JSON.", message.data);
+          return;
+        }
+
+        let state;
+
+        switch(event.id) {
+
+          case "binary_sensor-motion":
+
+            ratgdoAccessory.updateState("motion", (event.state === "OFF") ? "clear" : "detected");
+            break;
+
+          case "binary_sensor-obstruction":
+
+            ratgdoAccessory.updateState("obstruction", (event.state === "OFF") ? "clear" : "obstructed");
+            break;
+
+          case "cover-door":
+
+            switch(event.current_operation) {
+
+              case "CLOSING":
+              case "OPENING":
+
+                state = event.current_operation.toLowerCase();
+
+                break;
+
+              case "IDLE":
+
+                // We're stopped, rather than open, if the door is in a position greater than 0.
+                state = ((event.state === "OPEN") && (event.position !== undefined) && (event.position > 0) && (event.position < 1)) ? "stopped" :
+                  event.state.toLowerCase();
+
+                break;
+
+              default:
+
+                ratgdoAccessory.log.error("Unknown door operation detected: %s.", event.current_operation);
+                return;
+
+                break;
+            }
+
+            ratgdoAccessory.updateState("door", state, (event.position !== undefined) ? event.position * 100 : undefined);
+
+            break;
+
+          case "light-light":
+
+            ratgdoAccessory.updateState("light", event.state === "OFF" ? "off" : "on");
+
+            break;
+
+          case "lock-lock_remotes":
+
+            ratgdoAccessory.updateState("lock", event.state === "LOCKED" ? "locked" : "unlocked");
+
+            break;
+
+          default:
+
+            break;
+        }
+      });
+
+      // Heartbeat the Ratgdo controller at regular intervals. We need to do this because the ESPHome firmware for Ratgdo has a failsafe that will autoreboot the
+      // Ratgdo every 15 minutes if it doesn't receive a native API connection. Fortunately, the failsafe only looks for an open connection to the API, allowing us the
+      // opportunity to heartbeat it with a connection we periodically reopen.
+      const heartbeat = (): void => {
+
+        // Connect to the Ratgdo, and setup our heartbeat to close after a configured duration.
+        const socket = net.createConnection({ host: address, port: 6053 }, () => setTimeout(() => {
+
+          socket.destroy();
+        }, RATGDO_HEARTBEAT_DURATION * 1000));
+
+        // Handle heartbeat errors.
+        socket.on("error", (err) => ratgdoAccessory.log.debug("Heartbeat error: %s.", util.inspect(err, { sorted: true })));
+
+        // Perpetually restart our heartbeat when it ends.
+        socket.on("close", () => setTimeout(() => heartbeat(), RATGDO_HEARTBEAT_INTERVAL * 1000));
+      };
+
+      heartbeat();
+    } catch(error) {
+
+      if(error instanceof Error) {
+
+        ratgdoAccessory.log.error("Ratgdo API error: %s", error.message);
       }
-    };
+    }
 
-    // Start ESPHome device discovery.
-    const mdnsBrowser = mdns.find({type: "esphomelib"}, discoverDevice.bind(this));
-
-    // Refresh device discovery regular intervals.
-    setInterval(() => mdnsBrowser.update(), RATGDO_AUTODISCOVERY_INTERVAL * 1000);
   }
 
   // Configure a discovered garage door opener.
