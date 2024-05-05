@@ -1,3 +1,5 @@
+# Copyright(C) 2017-2024, HJD (https://github.com/hjdhjd). All rights reserved.
+#
 # This is a customized configuration YAML file for [homebridge-ratgdo](https://github.com/hjdhjd/homebridge-ratgdo) that deviates slightly from the
 # default YAML provided by Ratgdo ESPHome. It is specific to those with Ratgdo hardware revisions of 2.5 or greater. For those running other hardware
 # versions, you can use this as a basis for your own, but it is beyond the support I will be providing.
