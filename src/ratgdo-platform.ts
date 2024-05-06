@@ -104,6 +104,9 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     // Start ESPHome device discovery.
     const mdnsBrowser = mdns.find({type: "esphomelib"}, this.discoverRatgdoDevice.bind(this));
 
+    // Trigger an initial update of our discovery.
+    mdnsBrowser.update();
+
     // Refresh device discovery regular intervals.
     setInterval(() => mdnsBrowser.update(), RATGDO_AUTODISCOVERY_INTERVAL * 1000);
   }
