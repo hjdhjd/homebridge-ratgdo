@@ -110,4 +110,23 @@
     </li>
   </ul>
 </div>
-<script src="./ui.mjs" type="module"></script>
+<script type="module">
+
+  /* Copyright(C) 2017-2024, HJD (https://github.com/hjdhjd). All rights reserved.
+   *
+   * Plugin webUI.
+   */
+
+  "use strict;"
+
+  import { webUi } from "./lib/webUi.mjs";
+  import { webUiFeatureOptions } from "./lib/webui-featureoptions.mjs";
+
+  const pluginName = "Ratgdo"
+
+  // Keep a list of all the feature options and option groups.
+  const featureOptions = new webUiFeatureOptions({ sidebar: "Ratgdo Devices", useControllers: false });
+
+  // Instantiate the webUI.
+  new webUi({ featureOptions: featureOptions, homebridge: homebridge, name: "Ratgdo" });
+</script>

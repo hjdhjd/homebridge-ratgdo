@@ -4,12 +4,12 @@
  */
 import { API, APIEvent, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
 import { Bonjour, Service } from "bonjour-service";
+import { FeatureOptions, MqttClient } from "homebridge-plugin-utils";
 import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_AUTODISCOVERY_INTERVAL, RATGDO_HEARTBEAT_DURATION, RATGDO_HEARTBEAT_INTERVAL,
   RATGDO_MQTT_TOPIC } from "./settings.js";
-import { RatgdoOptions, featureOptionCategories, featureOptions, isOptionEnabled } from "./ratgdo-options.js";
+import { RatgdoOptions, featureOptionCategories, featureOptions } from "./ratgdo-options.js";
 import EventSource from "eventsource";
 import { RatgdoAccessory } from "./ratgdo-device.js";
-import { RatgdoMqtt } from "./ratgdo-mqtt.js";
 import http from "node:http";
 import net from "node:net";
 import util from "node:util";
@@ -18,36 +18,31 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
   private readonly accessories: PlatformAccessory[];
   public readonly api: API;
+  private discoveredDevices: { [index: string]: boolean };
   private espHomeEvents: { [index: string]: EventSource };
-  private featureOptionDefaults: { [index: string]: boolean };
-  public config!: RatgdoOptions;
+  public featureOptions: FeatureOptions;
+  public config: RatgdoOptions;
   public readonly configOptions: string[];
   public readonly configuredDevices: { [index: string]: RatgdoAccessory };
   public readonly hap: HAP;
   public readonly log: Logging;
-  public readonly mqtt: RatgdoMqtt | null;
+  public readonly mqtt: MqttClient | null;
 
   constructor(log: Logging, config: PlatformConfig, api: API) {
 
     this.accessories = [];
     this.api = api;
+    this.config = {};
     this.configOptions = [];
     this.configuredDevices = {};
+    this.discoveredDevices = {};
     this.espHomeEvents = {};
-    this.featureOptionDefaults = {};
     this.hap = api.hap;
     this.log = log;
     this.log.debug = this.debug.bind(this);
     this.mqtt = null;
 
-    // Build our list of default values for our feature options.
-    for(const category of featureOptionCategories) {
-
-      for(const options of featureOptions[category.name]) {
-
-        this.featureOptionDefaults[(category.name + (options.name.length ? "." + options.name : "")).toLowerCase()] = options.default;
-      }
-    }
+    this.featureOptions = new FeatureOptions(featureOptionCategories, featureOptions, config.options as string[]);
 
     // We can't start without being configured.
     if(!config) {
@@ -58,24 +53,15 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.config = {
 
       debug: config.debug === true,
-      mqttTopic: (config.mqttTopic as string) ?? RATGDO_MQTT_TOPIC,
+      mqttTopic: config.mqttTopic as string,
       mqttUrl: config.mqttUrl as string,
       options: config.options as string[]
     };
 
-    // If we have feature options, put them into their own array, upper-cased for future reference.
-    if(this.config.options) {
-
-      for(const featureOption of this.config.options) {
-
-        this.configOptions.push(featureOption.toLowerCase());
-      }
-    }
-
     // Initialize MQTT, if needed.
     if(this.config.mqttUrl) {
 
-      this.mqtt = new RatgdoMqtt(this);
+      this.mqtt = new MqttClient(this.config.mqttUrl, this.config.mqttTopic ?? RATGDO_MQTT_TOPIC, this.log);
     }
 
     this.log.debug("Debug logging on. Expect a lot of data.");
@@ -276,8 +262,6 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
                 ratgdoAccessory.log.error("Unknown door operation detected: %s.", event.current_operation);
                 return;
-
-                break;
             }
 
             ratgdoAccessory.updateState("door", state, (event.position !== undefined) ? event.position * 100 : undefined);
@@ -334,6 +318,12 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   // Configure a discovered garage door opener.
   private configureGdo(address: string, mac: string, name: string, firmwareVersion: string): RatgdoAccessory | null {
 
+    // If we've already discovered this device, we're done.
+    if(this.discoveredDevices[mac]) {
+
+      return null;
+    }
+
     // Generate this device's unique identifier.
     const uuid = this.hap.uuid.generate(mac);
 
@@ -349,8 +339,14 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       name: name
     };
 
+    // Inform the user that we've discovered a device.
+    this.log.info("Discovered: %s (address: %s mac: %s ESPHome firmware: v%s).", device.name, device.address, device.mac, device.firmwareVersion);
+
+    // Mark it as discovered.
+    this.discoveredDevices[mac] = true;
+
     // Check to see if the user has disabled the device.
-    if(!isOptionEnabled(this.configOptions, device, "Device", this.featureOptionDefault("Device"))) {
+    if(!this.featureOptions.test("Device", device.mac)) {
 
       // If the accessory already exists, let's remove it.
       if(accessory) {
@@ -374,9 +370,6 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       return null;
     }
 
-    // Inform the user.
-    this.log.info("Discovered: %s (address: %s mac: %s ESPHome firmware: v%s).", device.name, device.address, device.mac, device.firmwareVersion);
-
     // It's a new device - let's add it to HomeKit.
     if(!accessory) {
 
@@ -387,6 +380,9 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       this.accessories.push(accessory);
     }
 
+    // Inform the user.
+    this.log.info("Configuring: %s (address: %s mac: %s ESPHome firmware: v%s).", device.name, device.address, device.mac, device.firmwareVersion);
+
     // Add it to our list of configured devices.
     this.configuredDevices[uuid] = new RatgdoAccessory(this, accessory, device);
 
@@ -394,20 +390,6 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.api.updatePlatformAccessories([accessory]);
 
     return this.configuredDevices[uuid];
-  }
-
-  // Utility to return the default value for a feature option.
-  public featureOptionDefault(option: string): boolean {
-
-    const defaultValue = this.featureOptionDefaults[option.toLowerCase()];
-
-    // If it's unknown to us, assume it's true.
-    if(defaultValue === undefined) {
-
-      return true;
-    }
-
-    return defaultValue;
   }
 
   // Utility for debug logging.

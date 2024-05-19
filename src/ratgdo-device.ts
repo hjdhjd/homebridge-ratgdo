@@ -6,7 +6,7 @@ import { API, CharacteristicValue, HAP, PlatformAccessory, Service } from "homeb
 import { FetchError, fetch } from "@adobe/fetch";
 import { RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION } from "./settings.js";
 import { RatgdoDevice, RatgdoLogging, RatgdoReservedNames } from "./ratgdo-types.js";
-import { RatgdoOptions, getOptionFloat, getOptionNumber, getOptionValue, isOptionEnabled } from "./ratgdo-options.js";
+import { RatgdoOptions } from "./ratgdo-options.js";
 import { RatgdoPlatform } from "./ratgdo-platform.js";
 import util from "node:util";
 
@@ -116,11 +116,11 @@ export class RatgdoAccessory {
     this.hints.automationDimmer = this.hasFeature("Opener.Dimmer");
     this.hints.automationSwitch = this.hasFeature("Opener.Switch");
     this.hints.doorOpenOccupancySensor = this.hasFeature("Opener.OccupancySensor");
-    this.hints.doorOpenOccupancyDuration = this.getFeatureNumber("Opener.OccupancySensor.Duration") ?? RATGDO_OCCUPANCY_DURATION;
+    this.hints.doorOpenOccupancyDuration = this.platform.featureOptions.getInteger("Opener.OccupancySensor.Duration") ?? RATGDO_OCCUPANCY_DURATION;
     this.hints.light = this.hasFeature("Light");
     this.hints.lockoutSwitch = this.hasFeature("Opener.Switch.RemoteLockout");
     this.hints.motionOccupancySensor = this.hasFeature("Motion.OccupancySensor");
-    this.hints.motionOccupancyDuration = this.getFeatureNumber("Motion.OccupancySensor.Duration") ?? RATGDO_OCCUPANCY_DURATION;
+    this.hints.motionOccupancyDuration = this.platform.featureOptions.getInteger("Motion.OccupancySensor.Duration") ?? RATGDO_OCCUPANCY_DURATION;
     this.hints.motionSensor = this.hasFeature("Motion");
     this.hints.readOnly = this.hasFeature("Opener.ReadOnly");
 
@@ -155,14 +155,14 @@ export class RatgdoAccessory {
   private configureMqtt(): boolean {
 
     // Return our garage door state.
-    this.platform.mqtt?.subscribeGet(this, "garagedoor", "Garage Door", () => {
+    this.platform.mqtt?.subscribeGet(this.device.mac, "garagedoor", "Garage Door", () => {
 
       // Return our current status using our HomeKit current state decoder ring.
       return this.translateCurrentDoorState(this.status.door);
     });
 
     // Set our garage door state.
-    this.platform.mqtt?.subscribeSet(this, "garagedoor", "Garage Door", (value: string) => {
+    this.platform.mqtt?.subscribeSet(this.device.mac, "garagedoor", "Garage Door", (value: string) => {
 
       let command;
       let position;
@@ -194,7 +194,6 @@ export class RatgdoAccessory {
 
           this.log.error("Invalid command.");
           return;
-          break;
       }
 
       // Set our door state accordingly.
@@ -202,7 +201,7 @@ export class RatgdoAccessory {
     });
 
     // Return our obstruction state.
-    this.platform.mqtt?.subscribeGet(this, "obstruction", "Obstruction", () => {
+    this.platform.mqtt?.subscribeGet(this.device.mac, "obstruction", "Obstruction", () => {
 
       return this.status.obstruction.toString();
     });
@@ -210,7 +209,7 @@ export class RatgdoAccessory {
     // Return our door open occupancy state if configured to do so.
     if(this.hints.doorOpenOccupancySensor) {
 
-      this.platform.mqtt?.subscribeGet(this, "dooropenoccupancy", "Door Open Indicator Occupancy", () => {
+      this.platform.mqtt?.subscribeGet(this.device.mac, "dooropenoccupancy", "Door Open Indicator Occupancy", () => {
 
         return ((this.accessory.getServiceById(this.hap.Service.OccupancySensor, RatgdoReservedNames.OCCUPANCY_SENSOR_DOOR_OPEN)
           ?.getCharacteristic(this.hap.Characteristic.OccupancyDetected).value ?? "false") as boolean).toString();
@@ -220,7 +219,7 @@ export class RatgdoAccessory {
     // Return our light state if configured to do so.
     if(this.hints.light) {
 
-      this.platform.mqtt?.subscribeGet(this, "light", "Light", () => {
+      this.platform.mqtt?.subscribeGet(this.device.mac, "light", "Light", () => {
 
         return this.status.light.toString();
       });
@@ -229,7 +228,7 @@ export class RatgdoAccessory {
     // Return our motion occupancy state if configured to do so.
     if(this.hints.motionOccupancySensor) {
 
-      this.platform.mqtt?.subscribeGet(this, "occupancy", "Occupancy", () => {
+      this.platform.mqtt?.subscribeGet(this.device.mac, "occupancy", "Occupancy", () => {
 
         return ((this.accessory.getServiceById(this.hap.Service.OccupancySensor, RatgdoReservedNames.OCCUPANCY_SENSOR_MOTION)
           ?.getCharacteristic(this.hap.Characteristic.OccupancyDetected).value ?? "false") as boolean).toString();
@@ -239,7 +238,7 @@ export class RatgdoAccessory {
     // Return our motion state if configured to do so.
     if(this.hints.motionSensor) {
 
-      this.platform.mqtt?.subscribeGet(this, "motion", "Motion", () => {
+      this.platform.mqtt?.subscribeGet(this.device.mac, "motion", "Motion", () => {
 
         return this.status.motion.toString();
       });
@@ -530,7 +529,7 @@ export class RatgdoAccessory {
     switchService.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => {
 
       // Inform the user.
-      this.log.info("Automation door opener switch: %s.", value ? "open" : "close" );
+      this.log.info("Automation door opener switch: %s.", value ? "open" : "close");
 
       // Send the command.
       if(!this.setDoorState(value ? this.hap.Characteristic.TargetDoorState.OPEN : this.hap.Characteristic.TargetDoorState.CLOSED)) {
@@ -597,7 +596,7 @@ export class RatgdoAccessory {
     switchService.getCharacteristic(this.hap.Characteristic.On)?.onSet(async (value: CharacteristicValue) => {
 
       // Inform the user.
-      this.log.info("Automation wireless remote lockout switch: remotes are %s.", value ? "locked out" : "permitted" );
+      this.log.info("Automation wireless remote lockout switch: remotes are %s.", value ? "locked out" : "permitted");
 
       // Send the command.
       if(!(await this.command("lock", value ? "lock" : "unlock"))) {
@@ -846,7 +845,7 @@ export class RatgdoAccessory {
                 this.log.info("Garage door open occupancy detected.");
 
                 // Publish to MQTT, if the user has configured it.
-                this.platform.mqtt?.publish(this, "dooropenoccupancy", "true");
+                this.platform.mqtt?.publish(this.device.mac, "dooropenoccupancy", "true");
               }, this.hints.doorOpenOccupancyDuration * 1000);
             }
 
@@ -897,12 +896,12 @@ export class RatgdoAccessory {
             this.log.info("Garage door open occupancy no longer detected.");
 
             // Publish to MQTT, if the user has configured it.
-            this.platform.mqtt?.publish(this, "dooropenoccupancy", "false");
+            this.platform.mqtt?.publish(this.device.mac, "dooropenoccupancy", "false");
           }
         }
 
         // Publish to MQTT, if the user has configured it.
-        this.platform.mqtt?.publish(this, "garagedoor", payload);
+        this.platform.mqtt?.publish(this.device.mac, "garagedoor", payload);
 
         break;
 
@@ -918,7 +917,7 @@ export class RatgdoAccessory {
           this.log.info("Light %s.", payload);
 
           // Publish to MQTT, if the user has configured it.
-          this.platform.mqtt?.publish(this, "light", this.status.light.toString());
+          this.platform.mqtt?.publish(this.device.mac, "light", this.status.light.toString());
         }
 
         break;
@@ -944,7 +943,7 @@ export class RatgdoAccessory {
         this.log.info("Wireless remotes are %s.", payload === "locked" ? "locked out" : "permitted");
 
         // Publish to MQTT, if the user has configured it.
-        this.platform.mqtt?.publish(this, "lock", this.status.lock.toString());
+        this.platform.mqtt?.publish(this.device.mac, "lock", this.status.lock.toString());
 
         break;
 
@@ -971,7 +970,7 @@ export class RatgdoAccessory {
           this.log.info("Motion detected.");
 
           // Publish to MQTT, if the user has configured it.
-          this.platform.mqtt?.publish(this, "motion", this.status.motion.toString());
+          this.platform.mqtt?.publish(this.device.mac, "motion", this.status.motion.toString());
         }
 
         // Set a timer for the motion event.
@@ -981,7 +980,7 @@ export class RatgdoAccessory {
           motionService?.updateCharacteristic(this.hap.Characteristic.MotionDetected, this.status.motion);
 
           // Publish to MQTT, if the user has configured it.
-          this.platform.mqtt?.publish(this, "motion", this.status.motion.toString());
+          this.platform.mqtt?.publish(this.device.mac, "motion", this.status.motion.toString());
         }, RATGDO_MOTION_DURATION * 1000);
 
         // If we don't have occupancy sensor support configured, we're done.
@@ -1004,7 +1003,7 @@ export class RatgdoAccessory {
           motionOccupancyService?.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, true);
 
           // Publish to MQTT, if the user has configured it.
-          this.platform.mqtt?.publish(this, "occupancy", "true");
+          this.platform.mqtt?.publish(this.device.mac, "occupancy", "true");
 
           // Log the event.
           this.log.info("Occupancy detected.");
@@ -1017,7 +1016,7 @@ export class RatgdoAccessory {
           motionOccupancyService?.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, false);
 
           // Publish to MQTT, if the user has configured it.
-          this.platform.mqtt?.publish(this, "occupancy", "false");
+          this.platform.mqtt?.publish(this.device.mac, "occupancy", "false");
 
           // Log the event.
           this.log.info("Occupancy no longer detected.");
@@ -1039,7 +1038,7 @@ export class RatgdoAccessory {
           this.log.info("Obstruction %sdetected.", this.status.obstruction ? "" : "no longer ");
 
           // Publish to MQTT, if the user has configured it.
-          this.platform.mqtt?.publish(this, "obstruction", this.status.obstruction.toString());
+          this.platform.mqtt?.publish(this.device.mac, "obstruction", this.status.obstruction.toString());
         }
 
         break;
@@ -1096,8 +1095,6 @@ export class RatgdoAccessory {
             this.log.error("Unknown door command received: %s.", payload);
 
             return false;
-
-            break;
         }
 
         break;
@@ -1126,8 +1123,6 @@ export class RatgdoAccessory {
 
         this.log.error("Unknown command received: %s - %s.", topic, payload);
         return false;
-
-        break;
     }
 
     try {
@@ -1137,7 +1132,7 @@ export class RatgdoAccessory {
 
       if(!response?.ok) {
 
-        this.log.error("Unable to execute command: %s - %s.", event, payload);
+        this.log.error("Unable to execute command: %s - %s.", topic, action);
 
         return false;
       }
@@ -1197,31 +1192,21 @@ export class RatgdoAccessory {
 
         return "closed";
 
-        break;
-
       case this.hap.Characteristic.CurrentDoorState.CLOSING:
 
         return "closing";
-
-        break;
 
       case this.hap.Characteristic.CurrentDoorState.OPEN:
 
         return "open";
 
-        break;
-
       case this.hap.Characteristic.CurrentDoorState.OPENING:
 
         return "opening";
 
-        break;
-
       case this.hap.Characteristic.CurrentDoorState.STOPPED:
 
         return "stopped";
-
-        break;
 
       default:
 
@@ -1241,13 +1226,9 @@ export class RatgdoAccessory {
 
         return "closed";
 
-        break;
-
       case this.hap.Characteristic.TargetDoorState.OPEN:
 
         return "open";
-
-        break;
 
       default:
 
@@ -1274,21 +1255,15 @@ export class RatgdoAccessory {
 
         return this.hap.Characteristic.CurrentDoorState.OPEN;
 
-        break;
-
       case this.hap.Characteristic.CurrentDoorState.STOPPED:
 
         return this.hap.Characteristic.CurrentDoorState.STOPPED;
-
-        break;
 
       case this.hap.Characteristic.CurrentDoorState.CLOSED:
       case this.hap.Characteristic.CurrentDoorState.CLOSING:
       default:
 
         return this.hap.Characteristic.CurrentDoorState.CLOSED;
-
-        break;
     }
   }
 
@@ -1311,15 +1286,11 @@ export class RatgdoAccessory {
 
         return this.hap.Characteristic.TargetDoorState.OPEN;
 
-        break;
-
       case this.hap.Characteristic.CurrentDoorState.CLOSED:
       case this.hap.Characteristic.CurrentDoorState.CLOSING:
       default:
 
         return this.hap.Characteristic.TargetDoorState.CLOSED;
-
-        break;
     }
   }
 
@@ -1332,35 +1303,19 @@ export class RatgdoAccessory {
 
         return this.hap.Characteristic.LockTargetState.SECURED;
 
-        break;
-
       case this.hap.Characteristic.LockCurrentState.UNSECURED:
       case this.hap.Characteristic.LockCurrentState.JAMMED:
       case this.hap.Characteristic.LockCurrentState.UNKNOWN:
       default:
 
         return this.hap.Characteristic.LockTargetState.UNSECURED;
-
-        break;
     }
-  }
-
-  // Utility function to return a floating point configuration parameter on a device.
-  private getFeatureFloat(option: string): number | undefined {
-
-    return getOptionFloat(getOptionValue(this.platform.configOptions, this.device, option));
-  }
-
-  // Utility function to return an integer configuration parameter on a device.
-  private getFeatureNumber(option: string): number | undefined {
-
-    return getOptionNumber(getOptionValue(this.platform.configOptions, this.device, option));
   }
 
   // Utility for checking feature options on a device.
   private hasFeature(option: string): boolean {
 
-    return isOptionEnabled(this.platform.configOptions, this.device, option, this.platform.featureOptionDefault(option));
+    return this.platform.featureOptions.test(option, this.device.mac);
   }
 
   // Utility function to set the name of a service.
