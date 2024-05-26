@@ -22,7 +22,7 @@
 >   * You're on your own here. I provide no support for any of the configuration files or firmware provided here. It's here as a convenience and for you to explore and customize some cosmetic aspects of HBR. Please don't open issues regarding anything on this page - I will close them without comment. You're welcome to come to the Discord and ask questions there and I'll address them as best I can.
 >   * You should be familiar and comfortable with the command line and modifying configuration files.
 
-> [!NOTE]
+> [!TIP]
 > If you would like to tailor your experience a bit further, you can choose to use the [hombridge-ratgdo ESPHome YAML configuration file](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/homebridge-ratgdo.yaml) and use it to create a more customized Ratgdo ESPHome firmware. Using this firmware allows you to do the following things for those using Ratgdo hardware revision 2.5 or beyond:
 >
 >   * The ability to customize the name (and friendly name) of the Ratgdo device. Though cosmetic, it can be helpful when you have multiple Ratgdo devices.
@@ -32,7 +32,7 @@
 >
 > **Using this YAML is completely optional and largely for cosmetic purposes. There are no functional differences between using this custom YAML configuration and the default Ratgdo ESPHome one.**
 
-> [!TIP]
+> [!NOTE]
 > If you're struggling with the current series of ESPHome firwmares (2024.5.0 onward), I would recommend installing and sticking with the last stable firmware, 2024.4.2. There are two ways to do this:
 >
 >  * Use the ESPHome firmware I've provided here as a convenience. It is v2024.4.2 compiled with the `homebridge-ratgdo.yaml`. To install it this way:
