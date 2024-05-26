@@ -16,38 +16,13 @@
 
 `homebridge-ratgdo` is a [Homebridge](https://homebridge.io) plugin that makes Chamberlain, Liftmaster, and other garage door openers that utilize the Ratgdo hardware control board available to [Apple's](https://www.apple.com) [HomeKit](https://www.apple.com/ios/home) smart home platform. You can determine if your garage door opener by checking the [Ratgdo website](https://paulwieland.github.io/ratgdo/).
 
-## Why use this plugin for Ratgdo support in HomeKit?
-In a nutshell, the aim of this plugin for things to *just work* with minimal required configuration by users. The goal is to provide as close to a streamlined experience as you would expect from a first-party or native HomeKit solution. For the adventurous, those additional granular options are, of course, available to support more esoteric use cases or other unique needs.
-
-What does *just work* mean in practice? It means that this plugin will discover all your Ratgdo devices that are running the Ratgdo ESPHome firmware without the need for additional configuration.
-
-**I rely on this plugin every day and actively maintain and support it.**
-
-In the interest of the community seeking a solution outside of myQ, I've developed a full-featured Homebridge plugin that enables the following features:
-
-  * Control of the garage door opener. This includes, for those that have always wanted the feature, the ability to close the garage door without the requisite safety warning and delay that Chamberlain and Liftmaster garage door openers emit when being controlled remotely.
-  * A motion sensor when it's available.
-  * Control of the light attached to the garage door opener, when available.
-  * Obstruction detection.
-  * Occupancy sensor support.
-  * Ability to lock and unlock the garage door opener through the ability to lockout wireless remotes.
-  * Read-only garage door opener support.
-  * Automation switch and dimmer support, allowing you to set the garage door to any position.
-  * A rich webUI for configuration.
-
-## Installation
-### Getting Started
-To get started with `homebridge-ratgdo`:
-
-  * Install `homebridge-ratgdo` using the Homebridge webUI. Make sure you make `homebridge-ratgdo` a child bridge for the best experience.
-  * Install the [ESPHome Ratgdo firmware](https://ratgdo.github.io/esphome-ratgdo/). You'll need to use Chrome for this as Safari doesn't support installing firmware through a USB serial port.
-  * Fully open and close the garage door one time. ESPHome Ratgdo will use this to determine how long it takes to open and close your garage door to enable precise control of the position of the garage door opener.
-  * That's it. Ensure `homebridge-ratgdo` is running and it will autodiscover your Ratgdo devices and make them available in HomeKit.
+## ESPHome Firmware and Configuration
 
 > [!WARNING]
-> The current ESPHome firmware versions (2024.5.0 onward) appear to have some regressions that the ESPHome developers are working through. [I recommend installing the 2024.4.2 version of ESPHome.](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/README.md)
+>   * You're on your own here. I provide no support for any of the configuration files or firmware provided here. It's here as a convenience and for you to explore and customize some cosmetic aspects of HBR. Please don't open issues regarding anything on this page - I will close them without comment. You're welcome to come to the Discord and ask questions there and I'll address them as best I can.
+>   * You should be familiar and comfortable with the command line and modifying configuration files.
 
-> [!TIP]
+> [!NOTE]
 > If you would like to tailor your experience a bit further, you can choose to use the [hombridge-ratgdo ESPHome YAML configuration file](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/homebridge-ratgdo.yaml) and use it to create a more customized Ratgdo ESPHome firmware. Using this firmware allows you to do the following things for those using Ratgdo hardware revision 2.5 or beyond:
 >
 >   * The ability to customize the name (and friendly name) of the Ratgdo device. Though cosmetic, it can be helpful when you have multiple Ratgdo devices.
@@ -57,21 +32,21 @@ To get started with `homebridge-ratgdo`:
 >
 > **Using this YAML is completely optional and largely for cosmetic purposes. There are no functional differences between using this custom YAML configuration and the default Ratgdo ESPHome one.**
 
-## Documentation
-* Getting Started
-  * [Installation](#installation): installing this plugin, including system requirements.
-  * [Plugin Configuration](#getting-started): how to quickly get up and running.
-  * [Changelog](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/docs/Changelog.md): changes and release history of this plugin.
-
-* Additional Topics
-  * [Feature Options](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/docs/FeatureOptions.md): options to allow you further tailor to your needs, particularly for those who want to have enhanced automation support.
-  * [MQTT](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/docs/MQTT.md): how to configure MQTT support.
-
-## Plugin Development Dashboard
-This is mostly of interest to the true developer nerds amongst us.
-
-[![License](https://img.shields.io/npm/l/homebridge-ratgdo?color=%23000000&logo=open%20source%20initiative&logoColor=%23FFFFFF&style=for-the-badge)](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/LICENSE.md)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/hjdhjd/homebridge-ratgdo/ci.yml?branch=main&color=%23000000&logo=github-actions&logoColor=%23FFFFFF&style=for-the-badge)](https://github.com/hjdhjd/homebridge-ratgdo/actions?query=workflow%3A%22Continuous+Integration%22)
-[![Dependencies](https://img.shields.io/librariesio/release/npm/homebridge-ratgdo?color=%23000000&logo=dependabot&style=for-the-badge)](https://libraries.io/npm/homebridge-ratgdo)
-[![GitHub commits since latest release (by SemVer)](https://img.shields.io/github/commits-since/hjdhjd/homebridge-ratgdo/latest?color=%23000000&logo=github&sort=semver&style=for-the-badge)](https://github.com/hjdhjd/homebridge-ratgdo/commits/main)
-
+> [!TIP]
+> If you're struggling with the current series of ESPHome firwmares (2024.5.0 onward), I would recommend installing and sticking with the last stable firmware, 2024.4.2. There are two ways to do this:
+>
+>  * Use the ESPHome firmware I've provided here as a convenience. It is v2024.4.2 compiled with the `homebridge-ratgdo.yaml`. To install it this way:
+>    * If you can access the Ratgdo ESPHome webUI and can perform an OTA update, you can upload the [homebridge-ratgdo-2024.4.2.bin](https://raw.githubusercontent.com/hjdhjd/homebridge-ratgdo/main/esphome/homebridge-ratgdo-2024.4.2.bin).
+>    * If the Ratgdo ESPHome webUI is unavailable, you'll need to use the ESPHome tools to install the firmware and physical access to the Ratgdo. To do this:
+>      * Plug your Ratgdo to the machine you're working on using a USB cable.
+>      * Install the ESPHome tools if needed (e.g. on macOS `brew install esphome`).
+>      * Download both the [homebridge-ratgdo-2024.4.2.bin](https://raw.githubusercontent.com/hjdhjd/homebridge-ratgdo/main/esphome/homebridge-ratgdo-2024.4.2.bin) and the [homebridge-ratgdo.yml](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/homebridge-ratgdo.yaml) files.
+>      * Run the following command: `esphome upload --file homebridge-ratgdo-2024.4.2.bin homebridge-ratgdo.yaml`
+>  * Use the ESPHome 2024.4.2 Docker image to create your own firmware and upload it to the Ratgdo. This presumes you are familiar with Docker and how to use it.
+>    * Download the [Docker ESPHome 2024.4.2 image](https://hub.docker.com/layers/esphome/esphome/2024.4.2/images/sha256-02fa50ad0d1fe39a63204b9da53e47e5a1455861602328ad4bf8c097130f6706) and install it.
+>    * Download [homebridge-ratgdo.yml](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/homebridge-ratgdo.yaml) and customize it, if you would like.
+>      * If you can access the Ratgdo ESPHome webUI and can perform an OTA update, you can use the following command: `docker run --rm -v "${PWD}":/config -it ghcr.io/esphome/esphome:2024.4.2 run --no-logs --device 1.2.3.4 homebridge-ratgdo.yaml` replacing 1.2.3.4 with your Ratgdo's IP address.
+>      * If you cannot access your Ratgdo over your network:
+>        * Plug your Ratgdo to the machine you're working on using a USB cable.
+>        * Run the following command `docker run --rm -v "${PWD}":/config -it ghcr.io/esphome/esphome:2024.4.2 run --no-logs homebridge-ratgdo.yaml` and follow the prompts to install it to your Ratgdo.
+>    * Refer to the [Docker command reference for ESPHome](https://esphome.io/guides/faq.html?highlight=reboot#docker-reference) as needed.
