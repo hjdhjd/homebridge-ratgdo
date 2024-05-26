@@ -18,7 +18,7 @@
 
 ## ESPHome Firmware and Configuration
 
-> [!WARNING]
+> [!CAUTION]
 >   * You're on your own here. I provide no support for any of the configuration files or firmware provided here. It's here as a convenience and for you to explore and customize some cosmetic aspects of HBR. Please don't open issues regarding anything on this page - I will close them without comment. You're welcome to come to the Discord and ask questions there and I'll address them as best I can.
 >   * You should be familiar and comfortable with the command line and modifying configuration files.
 
