@@ -37,11 +37,12 @@
 >
 >  * Use the ESPHome firmware I've provided here as a convenience. It is v2024.4.2 compiled with the `homebridge-ratgdo.yaml`. To install it this way:
 >    * If you can access the Ratgdo ESPHome webUI and can perform an OTA update, you can upload the [homebridge-ratgdo-2024.4.2.bin](https://raw.githubusercontent.com/hjdhjd/homebridge-ratgdo/main/esphome/homebridge-ratgdo-2024.4.2.bin).
->    * If the Ratgdo ESPHome webUI is unavailable, you'll need to use the ESPHome tools to install the firmware and physical access to the Ratgdo. To do this:
+>    * If the Ratgdo ESPHome webUI is unavailable, you'll need to either use the [ESPHome web dashboard](https://web.esphome.io) or the ESPHome tools to install the firmware and physical access to the Ratgdo. To do this:
 >      * Plug your Ratgdo to the machine you're working on using a USB cable.
->      * Install the ESPHome tools if needed (e.g. on macOS `brew install esphome`).
+>      * Either use the [ESPHome web dashboard](https://web.esphome.io) or install the ESPHome tools if needed (e.g. on macOS `brew install esphome`).
 >      * Download both the [homebridge-ratgdo-2024.4.2.bin](https://raw.githubusercontent.com/hjdhjd/homebridge-ratgdo/main/esphome/homebridge-ratgdo-2024.4.2.bin) and the [homebridge-ratgdo.yml](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/homebridge-ratgdo.yaml) files.
->      * Run the following command: `esphome upload --file homebridge-ratgdo-2024.4.2.bin homebridge-ratgdo.yaml`
+>      * If you're using the ESPHome web dashboard, go through the steps to upload the firmware you downloaded in the previous step.
+>      * If you're using the ESPHome tools, run the following command: `esphome upload --file homebridge-ratgdo-2024.4.2.bin homebridge-ratgdo.yaml`.
 >  * Use the ESPHome 2024.4.2 Docker image to create your own firmware and upload it to the Ratgdo. This presumes you are familiar with Docker and how to use it.
 >    * Download the [Docker ESPHome 2024.4.2 image](https://hub.docker.com/layers/esphome/esphome/2024.4.2/images/sha256-02fa50ad0d1fe39a63204b9da53e47e5a1455861602328ad4bf8c097130f6706) and install it.
 >    * Download [homebridge-ratgdo.yml](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/homebridge-ratgdo.yaml) and customize it, if you would like.
