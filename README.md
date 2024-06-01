@@ -36,7 +36,6 @@ In the interest of the community seeking a solution outside of myQ, I've develop
   * A rich webUI for configuration.
 
 ## Installation
-### Getting Started
 To get started with `homebridge-ratgdo`:
 
   * Install `homebridge-ratgdo` using the Homebridge webUI. Make sure you make `homebridge-ratgdo` a child bridge for the best experience.
@@ -44,6 +43,7 @@ To get started with `homebridge-ratgdo`:
   * Fully open and close the garage door one time. ESPHome Ratgdo will use this to determine how long it takes to open and close your garage door to enable precise control of the position of the garage door opener.
   * That's it. Ensure `homebridge-ratgdo` is running and it will autodiscover your Ratgdo devices and make them available in HomeKit.
 
+<A NAME="notes"></A>
 > [!WARNING]
 > The current ESPHome firmware versions (2024.5.0 onward) appear to have some regressions that the ESPHome developers are working through. [I recommend installing the 2024.4.2 version of ESPHome.](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/README.md)
 
@@ -60,7 +60,6 @@ To get started with `homebridge-ratgdo`:
 ## Documentation
 * Getting Started
   * [Installation](#installation): installing this plugin, including system requirements.
-  * [Plugin Configuration](#getting-started): how to quickly get up and running.
   * [Changelog](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/docs/Changelog.md): changes and release history of this plugin.
 
 * Additional Topics
