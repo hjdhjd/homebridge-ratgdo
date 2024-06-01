@@ -37,12 +37,11 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.configuredDevices = {};
     this.discoveredDevices = {};
     this.espHomeEvents = {};
+    this.featureOptions = new FeatureOptions(featureOptionCategories, featureOptions, config?.options);
     this.hap = api.hap;
     this.log = log;
     this.log.debug = this.debug.bind(this);
     this.mqtt = null;
-
-    this.featureOptions = new FeatureOptions(featureOptionCategories, featureOptions, config.options as string[]);
 
     // We can't start without being configured.
     if(!config) {
@@ -152,49 +151,42 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       // Handle errors in the events API.
       this.espHomeEvents[mac].addEventListener("error", (payload: ESError) => {
 
-        let errorMessage;
+        const getErrorMessage = (payload: ESError): string => {
 
-        switch(payload.message) {
+          const { message } = payload;
+          let errorMessage = "Unrecognized error: " + util.inspect(payload, { sorted: true });
 
-          case payload.message?.startsWith("connect ECONNREFUSED "):
+          if(typeof message !== "string") {
 
-            errorMessage = "Connection to the Ratgdo controller refused";
+            return errorMessage;
+          }
 
-            break;
+          if(message.startsWith("connect ECONNREFUSED ")) {
 
-          case payload.message?.startsWith("connect ETIMEDOUT "):
+            return "Connection to the Ratgdo controller refused";
+          }
 
-            errorMessage = "Connection to the Ratgdo controller has timed out";
+          if(message.startsWith("connect ETIMEDOUT ")) {
 
-            break;
+            return "Connection to the Ratgdo controller has timed out";
+          }
 
-          case "read ECONNRESET":
+          if(message.startsWith("connect EHOSTDOWN ")) {
 
-            errorMessage = "Connection to the Ratgdo controller has been reset";
+            return "Unable to connect to the Ratgdo controller. The host appears to be down";
+          }
 
-            break;
+          const errorMessages: { [index: string]: string } = {
 
-          case "read ETIMEDOUT":
+            "read ECONNRESET": "Connection to the Ratgdo controller has been reset",
+            "read ETIMEDOUT": "Connection to the Ratgdo controller has timed out while listening for events",
+            "unknown error.": "An unknown error on the Ratgdo controller has occurred. This will happen occasionally and can generally be ignored"
+          };
 
-            errorMessage = "Connection to the Ratgdo controller has timed out while listening for events";
+          return errorMessages[message] || errorMessage;
+        };
 
-            break;
-
-          case "unknown error.":
-          case undefined:
-
-            errorMessage = "An unknown error on the Ratgdo controller has occurred. This will happen occasionally and can generally be ignored";
-
-            break;
-
-          default:
-
-            errorMessage = "Unrecognized error: " + util.inspect(payload, { sorted: true });
-
-            break;
-        }
-
-        ratgdoAccessory.log.error("%s.", errorMessage);
+        ratgdoAccessory.log.error("%s.", getErrorMessage(payload));
       });
 
       // Inform the user when we've successfully connected.
@@ -222,6 +214,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
         } catch(error) {
 
           ratgdoAccessory.log.error("Unable to parse state message: \"%s\". Invalid JSON.", message.data);
+
           return;
         }
 
@@ -232,11 +225,13 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
           case "binary_sensor-motion":
 
             ratgdoAccessory.updateState("motion", (event.state === "OFF") ? "clear" : "detected");
+
             break;
 
           case "binary_sensor-obstruction":
 
             ratgdoAccessory.updateState("obstruction", (event.state === "OFF") ? "clear" : "obstructed");
+
             break;
 
           case "cover-door":
@@ -261,6 +256,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
               default:
 
                 ratgdoAccessory.log.error("Unknown door operation detected: %s.", event.current_operation);
+
                 return;
             }
 

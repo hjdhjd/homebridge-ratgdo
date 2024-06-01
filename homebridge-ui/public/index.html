@@ -42,10 +42,10 @@
             </tr>
           </table>
         </td>
-        <td id="deviceStatsTable">
+        <td id="deviceStatsTable" class="w-75">
           <table class="table table-sm table-borderless border-bottom m-0 p-0">
             <tr id="deviceStatsHeader">
-              <th class="m-0 p-0 w-25"><B>Serial</B></th>
+              <th class="m-0 p-0 w-25"><B>MAC Address</B></th>
               <th class="m-0 p-0 w-25"><B>Firmware<B></th>
             </tr>
             <tr>
@@ -63,12 +63,14 @@
 </div>
 <div id="pageSupport" class="mt-4" style="display: none;">
   <h5>Introduction</h5>
-    <p class="px-4">I hope you enjoy <a target="_blank" href="https://github.com/hjdhjd/homebridge-ratgdo">homebridge-ratgdo</a> as much as I enjoy developing it. All my projects are labors of love. If you'd like to show your appreciation - <a target="_blank" href="https://github.com/hjdhjd/homebridge-ratgdo">star this project on Github</A> and do some good in your community, either financially or with your time: a food bank, an animal shelter (two of my passions), or whatever resonates with you that can give something back to the world around you.</p>
+    <p class="px-4">I hope you enjoy this plugin as much as I enjoy developing it. All my projects are labors of love. If you'd like to show your appreciation - <a target="_blank" href="https://github.com/hjdhjd/homebridge-ratgdo">star this project on GitHub</A> and do some good in your community, either financially or with your time: a food bank, an animal shelter (two of my passions), or whatever resonates with you that can give something back to the world around you. If you're looking for a couple of my faves: <a target="_blank" href="https://wck.org/donate">World Central Kitchen</a> and <a target="_blank" href="https://bestfriends.org/donate">Best Friends</a>.</p>
 
     <div class="px-4">
-      Other plugins by <a target="_blank" href="https://github.com/hjdhjd">HJD</a>:
+      Plugins by <a target="_blank" href="https://github.com/hjdhjd">HJD</a>:
 
       <ul dir="auto">
+        <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-hunter-hydrawise">homebridge-hunter-hydrawise: Hunter Hydrawise integration for HomeKit.</a></li>
+        <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-ratgdo">homebridge-ratgdo: Ratgdo (non-myQ Liftmaster and Chamberlain) garage door and gate opener support for HomeKit</a></li>
         <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-access">homebridge-unifi-access: HomeKit integration for the UniFi Access ecosystem</a></li>
         <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-protect">homebridge-unifi-protect: Complete HomeKit integration for the entire UniFi Protect ecosystem</a></li>
       </ul>
@@ -111,22 +113,16 @@
   </ul>
 </div>
 <script type="module">
-
   /* Copyright(C) 2017-2024, HJD (https://github.com/hjdhjd). All rights reserved.
    *
-   * Plugin webUI.
+   * Plugin webUI script loader.
    */
 
-  "use strict;"
+  "use strict";
 
-  import { webUi } from "./lib/webUi.mjs";
-  import { webUiFeatureOptions } from "./lib/webui-featureoptions.mjs";
-
-  const pluginName = "Ratgdo"
-
-  // Keep a list of all the feature options and option groups.
-  const featureOptions = new webUiFeatureOptions({ sidebar: "Ratgdo Devices", useControllers: false });
-
-  // Instantiate the webUI.
-  new webUi({ featureOptions: featureOptions, homebridge: homebridge, name: "Ratgdo" });
+  // Ensure we load the webUI dynamically so it isn't cached on each load.
+  const script = document.createElement('script');
+  script.src = "./ui.mjs?v=" + Date.now().toString();
+  script.type = "module";
+  document.body.appendChild(script);
 </script>

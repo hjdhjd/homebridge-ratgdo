@@ -2,7 +2,11 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
-## 2.2.0
+## 2.2.1 (2024-06-01)
+  * Improved: minor webUI updates.
+  * Housekeeping.
+
+## 2.2.0 (2024-05-18)
   * Minor bugfix when HBR encounters an error communicating with the Ratgdo device - thanks @ryderbike1 for the report.
   * Address webUI bug when running the plugin for the first time - thanks @jarz for the report.
   * Housekeeping.

@@ -14,13 +14,15 @@
   "type": "module",
   "engines": {
     "node": ">=18.0",
-    "homebridge": ">1.2.0"
+    "homebridge": ">=1.8.0"
   },
   "main": "dist/index.js",
   "scripts": {
-    "build": "npm run clean && tsc",
-    "build-ui": "shx mkdir -p homebridge-ui/public/lib && shx cp \"node_modules/homebridge-plugin-utils/dist/ui/**/*.@(js|mjs)\" homebridge-ui/public/lib",
-    "clean": "shx rm -rf dist homebridge-ui/public/lib && npm run build-ui",
+    "prebuild": "npm run clean && npm run build-ui",
+    "build": "tsc",
+    "build-ui": "shx mkdir -p homebridge-ui/public/lib && shx cp \"node_modules/homebridge-plugin-utils/dist/ui/**/*.@(js|mjs){,.map}\" homebridge-ui/public/lib",
+    "clean": "shx rm -rf dist homebridge-ui/public/lib",
+    "prelint": "npm run build-ui",
     "lint": "eslint eslint.config.mjs src/**.ts homebridge-ui/*.js homebridge-ui/public/**/*.mjs",
     "postpublish": "npm run clean",
     "prepublishOnly": "npm run lint && npm run build"
@@ -31,18 +33,18 @@
   "devDependencies": {
     "@stylistic/eslint-plugin": "^2.1.0",
     "@types/eventsource": "^1.1.15",
-    "@types/node": "^20.12.12",
+    "@types/node": "^20.13.0",
     "eslint": "8.57.0",
     "homebridge": "^1.8.2",
     "shx": "^0.3.4",
     "typescript": "^5.4.5",
-    "typescript-eslint": "^7.9.0"
+    "typescript-eslint": "^7.11.0"
   },
   "dependencies": {
     "@adobe/fetch": "^4.1.2",
     "@homebridge/plugin-ui-utils": "^1.0.3",
     "bonjour-service": "^1.2.1",
     "eventsource": "^2.0.2",
-    "homebridge-plugin-utils": "^1.0.0"
+    "homebridge-plugin-utils": "^1.2.0"
   }
 }

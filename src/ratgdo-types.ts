@@ -12,15 +12,6 @@ export interface RatgdoDevice {
   name: string
 }
 
-// Define Ratgdo logging conventions.
-export interface RatgdoLogging {
-
-  debug: (message: string, ...parameters: unknown[]) => void,
-  error: (message: string, ...parameters: unknown[]) => void,
-  info: (message: string, ...parameters: unknown[]) => void,
-  warn: (message: string, ...parameters: unknown[]) => void
-}
-
 // Ratgdo reserved names.
 export enum RatgdoReservedNames {
 

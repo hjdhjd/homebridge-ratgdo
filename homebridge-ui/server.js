@@ -10,6 +10,7 @@ import { HomebridgePluginUiServer } from "@homebridge/plugin-ui-utils";
 class PluginUiServer extends HomebridgePluginUiServer {
 
   constructor() {
+
     super();
 
     // Register getOptions() with the Homebridge server API.

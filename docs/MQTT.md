@@ -19,31 +19,32 @@
 ### MQTT Support
 [MQTT](https://mqtt.org) is a popular Internet of Things (IoT) messaging protocol that can be used to weave together different smart devices and orchestrate or instrument them in an infinite number of ways. In short - it lets things that might not normally be able to talk to each other communicate across ecosystems, provided they can support MQTT.
 
-`homebridge-ratgdo` will publish MQTT events if you've configured a broker in the controller-specific settings. The plugin supports a rich set of capabilities over MQTT. This includes:
+`homebridge-ratgdo` will publish MQTT events if you've configured a broker in the plugin settings. Supported MQTT capabilities include:
 
   * Garage open and close events.
   * Garage light switch events.
   * Garage motion sensor events.
   * Garage obstruction events.
 
-### How to configure and use this feature
+### Configuration
 
-This documentation assumes you know what MQTT is, what an MQTT broker does, and how to configure it. Setting up an MQTT broker is beyond the scope of this documentation. There are plenty of guides available on how to do so just a search away.
+This documentation assumes you know what MQTT is, what an MQTT broker does, and how to configure it. Setting up an MQTT broker will not be covered here. There are plenty of guides available on how to do so just a search away.
 
-You configure MQTT settings within a `controller` configuration block. The settings are:
+You can configure MQTT settings in the plugin webUI. The settings are:
 
 | Configuration Setting | Description
 |-----------------------|----------------------------------
 | **mqttUrl**           | The URL of your MQTT broker. **This must be in URL form**, e.g.: `mqtt://user:password@1.2.3.4`.
 | **mqttTopic**         | The base topic to publish to. The default is: `ratgdo`.
 
-To reemphasize the above: **mqttUrl** must be a valid URL. Just entering a hostname will result in an error. The URL can use any of these protocols: `mqtt`, `mqtts`, `tcp`, `tls`, `ws`, `wss`.
+> [!IMPORTANT]
+> **mqttUrl** must be a valid URL. Just entering a hostname will result in an error. The URL can use any of these protocols: `mqtt`, `mqtts`, `tcp`, `tls`, `ws`, `wss`.
 
 When events are published, by default, the topics look like:
 
-```sh
-ratgdo/1234567890AB/garagedoor
-```
+> ```sh
+> ratgdo/1234567890AB/garagedoor
+> ```
 
 In the above example, `1234567890AB` is the MAC address of your garage door opener. We use MAC address as an easy way to guarantee unique identifiers that won't change. `homebridge-ratgdo` provides you information about your Ratgdo devices and their respective MAC addresses in the Homebridge log on startup.
 
@@ -75,7 +76,7 @@ The topics that `homebridge-ratgdo` subscribes to are:
 | `obstruction/get`       | `true` will trigger a publish event of the current garage door opener obstruction sensor.
 | `occupancy/get`         | `true` will trigger a publish event of the current garage door opener occupancy status.
 
-### Some Fun Facts
-  * MQTT support is disabled by default. It's enabled when an MQTT broker is specified in the configuration.
-  * If connectivity to the broker is lost, it will perpetually retry to connect in one-minute intervals.
-  * If a bad URL is provided, MQTT support will not be enabled.
+> [!NOTE]
+>   * MQTT support is disabled by default. It's enabled when an MQTT broker is specified in the configuration.
+>   * If connectivity to the broker is lost, it will perpetually retry to connect in one-minute intervals.
+>   * If a bad URL is provided, MQTT support will not be enabled.

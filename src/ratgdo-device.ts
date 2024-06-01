@@ -5,7 +5,8 @@
 import { API, CharacteristicValue, HAP, PlatformAccessory, Service } from "homebridge";
 import { FetchError, fetch } from "@adobe/fetch";
 import { RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION } from "./settings.js";
-import { RatgdoDevice, RatgdoLogging, RatgdoReservedNames } from "./ratgdo-types.js";
+import { RatgdoDevice, RatgdoReservedNames } from "./ratgdo-types.js";
+import { HomebridgePluginLogging } from "homebridge-plugin-utils";
 import { RatgdoOptions } from "./ratgdo-options.js";
 import { RatgdoPlatform } from "./ratgdo-platform.js";
 import util from "node:util";
@@ -47,7 +48,7 @@ export class RatgdoAccessory {
   private doorOccupancyTimer: NodeJS.Timeout | null;
   private readonly hap: HAP;
   private readonly hints: RatgdoHints;
-  public readonly log: RatgdoLogging;
+  public readonly log: HomebridgePluginLogging;
   private motionOccupancyTimer: NodeJS.Timeout | null;
   private motionTimer: NodeJS.Timeout | null;
   private obstructionTimer: NodeJS.Timeout | null;
@@ -116,11 +117,11 @@ export class RatgdoAccessory {
     this.hints.automationDimmer = this.hasFeature("Opener.Dimmer");
     this.hints.automationSwitch = this.hasFeature("Opener.Switch");
     this.hints.doorOpenOccupancySensor = this.hasFeature("Opener.OccupancySensor");
-    this.hints.doorOpenOccupancyDuration = this.platform.featureOptions.getInteger("Opener.OccupancySensor.Duration") ?? RATGDO_OCCUPANCY_DURATION;
+    this.hints.doorOpenOccupancyDuration = this.platform.featureOptions.getInteger("Opener.OccupancySensor.Duration", this.device.mac) ?? RATGDO_OCCUPANCY_DURATION;
     this.hints.light = this.hasFeature("Light");
     this.hints.lockoutSwitch = this.hasFeature("Opener.Switch.RemoteLockout");
     this.hints.motionOccupancySensor = this.hasFeature("Motion.OccupancySensor");
-    this.hints.motionOccupancyDuration = this.platform.featureOptions.getInteger("Motion.OccupancySensor.Duration") ?? RATGDO_OCCUPANCY_DURATION;
+    this.hints.motionOccupancyDuration = this.platform.featureOptions.getInteger("Motion.OccupancySensor.Duration", this.device.mac) ?? RATGDO_OCCUPANCY_DURATION;
     this.hints.motionSensor = this.hasFeature("Motion");
     this.hints.readOnly = this.hasFeature("Opener.ReadOnly");
 
@@ -164,16 +165,16 @@ export class RatgdoAccessory {
     // Set our garage door state.
     this.platform.mqtt?.subscribeSet(this.device.mac, "garagedoor", "Garage Door", (value: string) => {
 
+      const action = value.split(" ");
       let command;
       let position;
-
-      const action = value.split(" ");
 
       switch(action[0]) {
 
         case "close":
 
           command = this.hap.Characteristic.TargetDoorState.CLOSED;
+
           break;
 
         case "open":
@@ -193,6 +194,7 @@ export class RatgdoAccessory {
         default:
 
           this.log.error("Invalid command.");
+
           return;
       }
 
@@ -328,6 +330,7 @@ export class RatgdoAccessory {
       if(!lightService) {
 
         this.log.error("Unable to add the light.");
+
         return false;
       }
 
@@ -378,6 +381,7 @@ export class RatgdoAccessory {
       if(!motionService) {
 
         this.log.error("Unable to add the motion sensor.");
+
         return false;
       }
 
@@ -423,6 +427,7 @@ export class RatgdoAccessory {
       if(!dimmerService) {
 
         this.log.error("Unable to add automation door position dimmer.");
+
         return false;
       }
 
@@ -511,6 +516,7 @@ export class RatgdoAccessory {
       if(!switchService) {
 
         this.log.error("Unable to add automation door opener switch.");
+
         return false;
       }
 
@@ -578,6 +584,7 @@ export class RatgdoAccessory {
       if(!switchService) {
 
         this.log.error("Unable to add automation wireless remote lockout switch.");
+
         return false;
       }
 
@@ -646,6 +653,7 @@ export class RatgdoAccessory {
       if(!occupancyService) {
 
         this.log.error("Unable to add door open occupancy sensor.");
+
         return false;
       }
 
@@ -696,6 +704,7 @@ export class RatgdoAccessory {
       if(!occupancyService) {
 
         this.log.error("Unable to add occupancy sensor.");
+
         return false;
       }
 
@@ -798,6 +807,7 @@ export class RatgdoAccessory {
 
         // Inform the user:
         this.log.info("Ratgdo %s.", this.status.availability ? "connected" : "disconnected");
+
         break;
 
       case "door":
@@ -866,6 +876,7 @@ export class RatgdoAccessory {
           default:
 
             this.status.door = this.hap.Characteristic.CurrentDoorState.CLOSED;
+
             break;
         }
 
@@ -1110,6 +1121,7 @@ export class RatgdoAccessory {
 
         endpoint = "lock/lock_remotes";
         action = (payload === "lock") ? "lock" : "unlock";
+
         break;
 
       case "refresh":
@@ -1122,6 +1134,7 @@ export class RatgdoAccessory {
       default:
 
         this.log.error("Unknown command received: %s - %s.", topic, payload);
+
         return false;
     }
 

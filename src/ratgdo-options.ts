@@ -17,10 +17,10 @@ export type RatgdoOptions = Partial<{
 // Feature option categories.
 export const featureOptionCategories = [
 
-  { description: "Device feature options.", name: "Device", validFor: [ "all" ] },
-  { description: "Opener feature options.", name: "Opener", validFor: [ "opener" ] },
-  { description: "Opener light feature options.", name: "Light", validFor: [ "opener" ] },
-  { description: "Opener motion feature options.", name: "Motion", validFor: [ "opener" ] }
+  { description: "Device feature options.", name: "Device" },
+  { description: "Opener feature options.", name: "Opener" },
+  { description: "Opener light feature options.", name: "Light" },
+  { description: "Opener motion feature options.", name: "Motion" }
 ];
 
 /* eslint-disable @stylistic/max-len */
