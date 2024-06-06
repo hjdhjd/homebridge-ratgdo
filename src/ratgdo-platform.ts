@@ -154,7 +154,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
         const getErrorMessage = (payload: ESError): string => {
 
           const { message } = payload;
-          let errorMessage = "Unrecognized error: " + util.inspect(payload, { sorted: true });
+          const errorMessage = "Unrecognized error: " + util.inspect(payload, { sorted: true });
 
           if(typeof message !== "string") {
 
