@@ -44,9 +44,6 @@ To get started with `homebridge-ratgdo`:
   * That's it. Ensure `homebridge-ratgdo` is running and it will autodiscover your Ratgdo devices and make them available in HomeKit.
 
 <A NAME="notes"></A>
-> [!WARNING]
-> The current ESPHome firmware versions (2024.5.0 onward) appear to have some regressions that the ESPHome developers are working through. [I recommend installing the 2024.4.2 version of ESPHome.](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/README.md)
-
 > [!TIP]
 > If you would like to tailor your experience a bit further, you can choose to use the [hombridge-ratgdo ESPHome YAML configuration file](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/homebridge-ratgdo.yaml) and use it to create a more customized Ratgdo ESPHome firmware. Using this firmware allows you to do the following things for those using Ratgdo hardware revision 2.5 or beyond:
 >

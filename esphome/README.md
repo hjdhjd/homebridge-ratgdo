@@ -33,21 +33,13 @@
 > **Using this YAML is completely optional and largely for cosmetic purposes. There are no functional differences between using this custom YAML configuration and the default Ratgdo ESPHome one.**
 
 > [!NOTE]
-> If you're struggling with the current series of ESPHome firwmares (2024.5.0 onward), I would recommend installing and sticking with the last stable firmware, 2024.4.2. There are two ways to do this:
+> There are multiple ways to install a custom Homebridge Ratgdo ESPHome firmware:
 >
->  * Use the ESPHome firmware I've provided here as a convenience. It is v2024.4.2 compiled with the `homebridge-ratgdo.yaml`. To install it this way:
->    * If you can access the Ratgdo ESPHome webUI and can perform an OTA update, you can upload the [homebridge-ratgdo-2024.4.2.bin](https://raw.githubusercontent.com/hjdhjd/homebridge-ratgdo/main/esphome/homebridge-ratgdo-2024.4.2.bin).
+>  * Use the ESPHome firmware I've provided here as a convenience. It is v2024.5.5 compiled with the `homebridge-ratgdo.yaml`. To install it this way:
+>    * If you can access the Ratgdo ESPHome webUI and can perform an OTA update, you can upload the [homebridge-ratgdo-2024.5.5.bin](https://raw.githubusercontent.com/hjdhjd/homebridge-ratgdo/main/esphome/homebridge-ratgdo-2024.5.5.bin).
 >    * If the Ratgdo ESPHome webUI is unavailable, you'll need to either use the [ESPHome web dashboard](https://web.esphome.io) or the ESPHome tools to install the firmware and physical access to the Ratgdo. To do this:
 >      * Plug your Ratgdo to the machine you're working on using a USB cable.
 >      * Either use the [ESPHome web dashboard](https://web.esphome.io) or install the ESPHome tools if needed (e.g. on macOS `brew install esphome`).
->      * Download both the [homebridge-ratgdo-2024.4.2.bin](https://raw.githubusercontent.com/hjdhjd/homebridge-ratgdo/main/esphome/homebridge-ratgdo-2024.4.2.bin) and the [homebridge-ratgdo.yml](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/homebridge-ratgdo.yaml) files.
+>      * Download both the [homebridge-ratgdo-2024.5.5.bin](https://raw.githubusercontent.com/hjdhjd/homebridge-ratgdo/main/esphome/homebridge-ratgdo-2024.5.5.bin) and the [homebridge-ratgdo.yml](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/homebridge-ratgdo.yaml) files.
 >      * If you're using the ESPHome web dashboard, go through the steps to upload the firmware you downloaded in the previous step.
->      * If you're using the ESPHome tools, run the following command: `esphome upload --file homebridge-ratgdo-2024.4.2.bin homebridge-ratgdo.yaml`.
->  * Use the ESPHome 2024.4.2 Docker image to create your own firmware and upload it to the Ratgdo. This presumes you are familiar with Docker and how to use it.
->    * Download the [Docker ESPHome 2024.4.2 image](https://hub.docker.com/layers/esphome/esphome/2024.4.2/images/sha256-02fa50ad0d1fe39a63204b9da53e47e5a1455861602328ad4bf8c097130f6706) and install it.
->    * Download [homebridge-ratgdo.yml](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/homebridge-ratgdo.yaml) and customize it, if you would like.
->      * If you can access the Ratgdo ESPHome webUI and can perform an OTA update, you can use the following command: `docker run --rm -v "${PWD}":/config -it ghcr.io/esphome/esphome:2024.4.2 run --no-logs --device 1.2.3.4 homebridge-ratgdo.yaml` replacing 1.2.3.4 with your Ratgdo's IP address.
->      * If you cannot access your Ratgdo over your network:
->        * Plug your Ratgdo to the machine you're working on using a USB cable.
->        * Run the following command `docker run --rm -v "${PWD}":/config -it ghcr.io/esphome/esphome:2024.4.2 run --no-logs homebridge-ratgdo.yaml` and follow the prompts to install it to your Ratgdo.
->    * Refer to the [Docker command reference for ESPHome](https://esphome.io/guides/faq.html?highlight=reboot#docker-reference) as needed.
+>      * If you're using the ESPHome tools, run the following command: `esphome upload --file homebridge-ratgdo-2024.5.5.bin homebridge-ratgdo.yaml`.
