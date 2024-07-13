@@ -86,14 +86,20 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     // Make sure we cleanup our mDNS client on shutdown.
     this.api.on(APIEvent.SHUTDOWN, () => mdns.destroy());
 
-    // Start ESPHome device discovery.
-    const mdnsBrowser = mdns.find({type: "esphomelib"}, this.discoverRatgdoDevice.bind(this));
+    // Define supported mDNS types
+    const mdnsTypes = ['esphomelib', 'konnected'];
 
-    // Trigger an initial update of our discovery.
-    mdnsBrowser.update();
+    // For each supported type
+    for(const mdnsType of mdnsTypes){
+      // Start ESPHome device discovery.
+      const mdnsBrowser = mdns.find({type: mdnsType}, this.discoverRatgdoDevice.bind(this));
 
-    // Refresh device discovery regular intervals.
-    setInterval(() => mdnsBrowser.update(), RATGDO_AUTODISCOVERY_INTERVAL * 1000);
+      // Trigger an initial update of our discovery.
+      mdnsBrowser.update();
+
+      // Refresh device discovery regular intervals.
+      setInterval(() => mdnsBrowser.update(), RATGDO_AUTODISCOVERY_INTERVAL * 1000);
+    }
   }
 
   // Ratgdo ESPHome device discovery.
@@ -118,9 +124,13 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       value?: string
     }
 
-    // We're only interested in Ratgdo devices with valid IP addresses. Otherwise, we're done.
-    if(((service.txt as Record<string, string>).project_name !== "ratgdo.esphome") || !service.addresses) {
+    // Support Konnected's variant on ratgdo
+    const konnectedGDO =  (service.txt as Record<string, string>).project_name.includes('konnected.garage-door');
 
+    // We're only interested in Ratgdo devices with valid IP addresses. Otherwise, we're done.
+    if(!(
+      (service.txt as Record<string, string>).project_name === "ratgdo.esphome" || konnectedGDO
+    ) || !service.addresses) {
       return;
     }
 
@@ -131,7 +141,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     const mac = (service.txt as Record<string, string>).mac.toUpperCase().replace(/(.{2})(?=.)/g, "$1:");
 
     // Configure the device.
-    const ratgdoAccessory = this.configureGdo(address, mac, (service.txt as Record<string, string>).friendly_name, (service.txt as Record<string, string>).version);
+    const ratgdoAccessory = this.configureGdo(address, mac, (service.txt as Record<string, string>).friendly_name, (service.txt as Record<string, string>).version, konnectedGDO);
 
     // If we've already configured this one, we're done.
     if(!ratgdoAccessory) {
@@ -234,6 +244,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
             break;
 
+          case "cover-garage_door":
           case "cover-door":
 
             switch(event.current_operation) {
@@ -271,6 +282,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
             break;
 
           case "lock-lock_remotes":
+          case "lock-lock":
 
             ratgdoAccessory.updateState("lock", event.state === "LOCKED" ? "locked" : "unlocked");
 
@@ -312,7 +324,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   }
 
   // Configure a discovered garage door opener.
-  private configureGdo(address: string, mac: string, name: string, firmwareVersion: string): RatgdoAccessory | null {
+  private configureGdo(address: string, mac: string, name: string, firmwareVersion: string, konnectedGDO = false): RatgdoAccessory | null {
 
     // If we've already discovered this device, we're done.
     if(this.discoveredDevices[mac]) {
@@ -380,7 +392,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.log.info("Configuring: %s (address: %s mac: %s ESPHome firmware: v%s).", device.name, device.address, device.mac, device.firmwareVersion);
 
     // Add it to our list of configured devices.
-    this.configuredDevices[uuid] = new RatgdoAccessory(this, accessory, device);
+    this.configuredDevices[uuid] = new RatgdoAccessory(this, accessory, device, konnectedGDO);
 
     // Refresh the accessory cache.
     this.api.updatePlatformAccessories([accessory]);

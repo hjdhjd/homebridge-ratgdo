@@ -54,9 +54,10 @@ export class RatgdoAccessory {
   private obstructionTimer: NodeJS.Timeout | null;
   private readonly platform: RatgdoPlatform;
   private readonly status: RatgdoStatus;
+  private readonly konnectedGDO: boolean;
 
   // The constructor initializes key variables and calls configureDevice().
-  constructor(platform: RatgdoPlatform, accessory: PlatformAccessory, device: RatgdoDevice) {
+  constructor(platform: RatgdoPlatform, accessory: PlatformAccessory, device: RatgdoDevice, konnectedGDO: boolean = false) {
 
     this.accessory = accessory;
     this.api = platform.api;
@@ -66,6 +67,7 @@ export class RatgdoAccessory {
     this.hints = {} as RatgdoHints;
     this.device = device;
     this.platform = platform;
+    this.konnectedGDO = konnectedGDO;
 
     this.log = {
 
@@ -1073,6 +1075,11 @@ export class RatgdoAccessory {
 
         endpoint = "cover/door";
 
+        if(this.konnectedGDO) {
+
+          endpoint = "cover/garage_door";
+        }
+
         switch(payload) {
 
           case "closed":
@@ -1113,6 +1120,11 @@ export class RatgdoAccessory {
       case "light":
 
         endpoint = "light/light";
+
+        if(this.konnectedGDO) {
+
+          endpoint = "light/garage_light";
+        }
         action = (payload === "on") ? "turn_on" : "turn_off";
 
         break;
@@ -1120,6 +1132,11 @@ export class RatgdoAccessory {
       case "lock":
 
         endpoint = "lock/lock_remotes";
+
+        if(this.konnectedGDO) {
+
+          endpoint = "lock/lock";
+        }
         action = (payload === "lock") ? "lock" : "unlock";
 
         break;
