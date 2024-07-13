@@ -275,6 +275,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
             break;
 
+          case "light-garage_light":
           case "light-light":
 
             ratgdoAccessory.updateState("light", event.state === "OFF" ? "off" : "on");
