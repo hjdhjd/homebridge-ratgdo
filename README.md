@@ -14,7 +14,7 @@
 </DIV>
 </SPAN>
 
-`homebridge-ratgdo` is a [Homebridge](https://homebridge.io) plugin that makes Chamberlain, Liftmaster, and other garage door openers that utilize the Ratgdo hardware control board available to [Apple's](https://www.apple.com) [HomeKit](https://www.apple.com/ios/home) smart home platform. You can determine if your garage door opener by checking the [Ratgdo website](https://paulwieland.github.io/ratgdo/).
+`homebridge-ratgdo` is a [Homebridge](https://homebridge.io) plugin that makes Chamberlain, Liftmaster, and other garage door openers that utilize the [Ratgdo hardware control board](https://paulwieland.github.io/ratgdo/) and [commercial variants](https://konnected.io/products/smart-garage-door-opener-blaq-myq-alternative) to [Apple's](https://www.apple.com) [HomeKit](https://www.apple.com/ios/home) smart home platform. You can determine if your garage door opener by checking the [Ratgdo website](https://paulwieland.github.io/ratgdo/).
 
 ## Why use this plugin for Ratgdo support in HomeKit?
 In a nutshell, the aim of this plugin for things to *just work* with minimal required configuration by users. The goal is to provide as close to a streamlined experience as you would expect from a first-party or native HomeKit solution. For the adventurous, those additional granular options are, of course, available to support more esoteric use cases or other unique needs.
@@ -33,6 +33,7 @@ In the interest of the community seeking a solution outside of myQ, I've develop
   * Ability to lock and unlock the garage door opener through the ability to lockout wireless remotes.
   * Read-only garage door opener support.
   * Automation switch and dimmer support, allowing you to set the garage door to any position.
+  * Support for Ratgdo variants like [Konnected blaQ](https://konnected.io/products/smart-garage-door-opener-blaq-myq-alternative).
   * A rich webUI for configuration.
 
 ## Installation
