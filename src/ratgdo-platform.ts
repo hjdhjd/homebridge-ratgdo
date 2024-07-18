@@ -5,8 +5,8 @@
 import { API, APIEvent, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
 import { Bonjour, Service } from "bonjour-service";
 import { FeatureOptions, MqttClient } from "homebridge-plugin-utils";
-import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_AUTODISCOVERY_INTERVAL, RATGDO_HEARTBEAT_DURATION, RATGDO_HEARTBEAT_INTERVAL,
-  RATGDO_MQTT_TOPIC } from "./settings.js";
+import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_AUTODISCOVERY_INTERVAL, RATGDO_AUTODISCOVERY_PROJECT_NAMES, RATGDO_AUTODISCOVERY_TYPES, RATGDO_HEARTBEAT_DURATION,
+  RATGDO_HEARTBEAT_INTERVAL, RATGDO_MQTT_TOPIC } from "./settings.js";
 import { RatgdoOptions, featureOptionCategories, featureOptions } from "./ratgdo-options.js";
 import EventSource from "eventsource";
 import { RatgdoAccessory } from "./ratgdo-device.js";
@@ -87,13 +87,16 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.api.on(APIEvent.SHUTDOWN, () => mdns.destroy());
 
     // Start ESPHome device discovery.
-    const mdnsBrowser = mdns.find({type: "esphomelib"}, this.discoverRatgdoDevice.bind(this));
+    for(const mdnsType of RATGDO_AUTODISCOVERY_TYPES) {
 
-    // Trigger an initial update of our discovery.
-    mdnsBrowser.update();
+      const mdnsBrowser = mdns.find({ type: mdnsType }, this.discoverRatgdoDevice.bind(this));
 
-    // Refresh device discovery regular intervals.
-    setInterval(() => mdnsBrowser.update(), RATGDO_AUTODISCOVERY_INTERVAL * 1000);
+      // Trigger an initial update of our discovery.
+      mdnsBrowser.update();
+
+      // Refresh device discovery regular intervals.
+      setInterval(() => mdnsBrowser.update(), RATGDO_AUTODISCOVERY_INTERVAL * 1000);
+    }
   }
 
   // Ratgdo ESPHome device discovery.
@@ -119,7 +122,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     }
 
     // We're only interested in Ratgdo devices with valid IP addresses. Otherwise, we're done.
-    if(((service.txt as Record<string, string>).project_name !== "ratgdo.esphome") || !service.addresses) {
+    if(!RATGDO_AUTODISCOVERY_PROJECT_NAMES.includes((service.txt as Record<string, string>).project_name) || !service.addresses) {
 
       return;
     }
@@ -131,7 +134,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     const mac = (service.txt as Record<string, string>).mac.toUpperCase().replace(/(.{2})(?=.)/g, "$1:");
 
     // Configure the device.
-    const ratgdoAccessory = this.configureGdo(address, mac, (service.txt as Record<string, string>).friendly_name, (service.txt as Record<string, string>).version);
+    const ratgdoAccessory = this.configureGdo(address, mac, service.txt);
 
     // If we've already configured this one, we're done.
     if(!ratgdoAccessory) {
@@ -235,6 +238,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
             break;
 
           case "cover-door":
+          case "cover-garage_door":
 
             switch(event.current_operation) {
 
@@ -264,6 +268,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
             break;
 
+          case "light-garage_light":
           case "light-light":
 
             ratgdoAccessory.updateState("light", event.state === "OFF" ? "off" : "on");
@@ -312,7 +317,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   }
 
   // Configure a discovered garage door opener.
-  private configureGdo(address: string, mac: string, name: string, firmwareVersion: string): RatgdoAccessory | null {
+  private configureGdo(address: string, mac: string, deviceInfo: Record<string, string>): RatgdoAccessory | null {
 
     // If we've already discovered this device, we're done.
     if(this.discoveredDevices[mac]) {
@@ -330,9 +335,10 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     const device = {
 
       address: address,
-      firmwareVersion: firmwareVersion,
+      firmwareVersion: deviceInfo.version,
       mac: mac.replace(/:/g, ""),
-      name: name
+      name: deviceInfo.friendly_name,
+      variant: deviceInfo.project_name
     };
 
     // Inform the user that we've discovered a device.

@@ -18,6 +18,7 @@ export type RatgdoOptions = Partial<{
 export const featureOptionCategories = [
 
   { description: "Device feature options.", name: "Device" },
+  { description: "Logging feature options.", name: "Log" },
   { description: "Opener feature options.", name: "Opener" },
   { description: "Opener light feature options.", name: "Light" },
   { description: "Opener motion feature options.", name: "Motion" }
@@ -37,6 +38,15 @@ export const featureOptions: { [index: string]: FeatureOptionEntry[] } = {
   "Light": [
 
     { default: true, description: "Make the light on the opener available in HomeKit.", name: "" }
+  ],
+
+  // Logging options.
+  "Log": [
+
+    { default: true, description: "Log opener events in Homebridge.", name: "Opener" },
+    { default: true, description: "Log light events in Homebridge.", name: "Light" },
+    { default: true, description: "Log motion-related events in Homebridge.", name: "Motion" },
+    { default: true, description: "Log obstruction events in Homebridge.", name: "Obstruction" }
   ],
 
   // Motion options.

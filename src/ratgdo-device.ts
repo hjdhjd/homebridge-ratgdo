@@ -5,7 +5,7 @@
 import { API, CharacteristicValue, HAP, PlatformAccessory, Service } from "homebridge";
 import { FetchError, fetch } from "@adobe/fetch";
 import { RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION } from "./settings.js";
-import { RatgdoDevice, RatgdoReservedNames } from "./ratgdo-types.js";
+import { RatgdoDevice, RatgdoReservedNames, RatgdoVariant } from "./ratgdo-types.js";
 import { HomebridgePluginLogging } from "homebridge-plugin-utils";
 import { RatgdoOptions } from "./ratgdo-options.js";
 import { RatgdoPlatform } from "./ratgdo-platform.js";
@@ -20,6 +20,10 @@ interface RatgdoHints {
   doorOpenOccupancySensor: boolean,
   light: boolean,
   lockoutSwitch: boolean,
+  logLight: boolean,
+  logMotion: boolean,
+  logObstruction: boolean,
+  logOpener: boolean,
   motionOccupancyDuration: number,
   motionOccupancySensor: boolean,
   motionSensor: boolean,
@@ -119,6 +123,10 @@ export class RatgdoAccessory {
     this.hints.doorOpenOccupancySensor = this.hasFeature("Opener.OccupancySensor");
     this.hints.doorOpenOccupancyDuration = this.platform.featureOptions.getInteger("Opener.OccupancySensor.Duration", this.device.mac) ?? RATGDO_OCCUPANCY_DURATION;
     this.hints.light = this.hasFeature("Light");
+    this.hints.logLight = this.hasFeature("Log.Light");
+    this.hints.logMotion = this.hasFeature("Log.Motion");
+    this.hints.logObstruction = this.hasFeature("Log.Obstruction");
+    this.hints.logOpener = this.hasFeature("Log.Opener");
     this.hints.lockoutSwitch = this.hasFeature("Opener.Switch.RemoteLockout");
     this.hints.motionOccupancySensor = this.hasFeature("Motion.OccupancySensor");
     this.hints.motionOccupancyDuration = this.platform.featureOptions.getInteger("Motion.OccupancySensor.Duration", this.device.mac) ?? RATGDO_OCCUPANCY_DURATION;
@@ -451,7 +459,10 @@ export class RatgdoAccessory {
       }
 
       // Inform the user.
-      this.log.info("Automation door position dimmer: closing.");
+      if(this.hints.logOpener) {
+
+        this.log.info("Automation door position dimmer: closing.");
+      }
 
       // Send the command.
       if(!this.setDoorState(this.hap.Characteristic.TargetDoorState.CLOSED)) {
@@ -473,7 +484,10 @@ export class RatgdoAccessory {
     // Adjust the door position of the opener by adjusting brightness of the light.
     dimmerService.getCharacteristic(this.hap.Characteristic.Brightness)?.onSet((value: CharacteristicValue) => {
 
-      this.log.info("Automation door position dimmer: moving opener to %s%.", (value as number).toFixed(0));
+      if(this.hints.logOpener) {
+
+        this.log.info("Automation door position dimmer: moving opener to %s%.", (value as number).toFixed(0));
+      }
 
       this.setDoorState((value as number) > 0 ?
         this.hap.Characteristic.TargetDoorState.OPEN : this.hap.Characteristic.TargetDoorState.CLOSED, value as number);
@@ -535,7 +549,10 @@ export class RatgdoAccessory {
     switchService.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => {
 
       // Inform the user.
-      this.log.info("Automation door opener switch: %s.", value ? "open" : "close");
+      if(this.hints.logOpener) {
+
+        this.log.info("Automation door opener switch: %s.", value ? "open" : "close");
+      }
 
       // Send the command.
       if(!this.setDoorState(value ? this.hap.Characteristic.TargetDoorState.OPEN : this.hap.Characteristic.TargetDoorState.CLOSED)) {
@@ -852,7 +869,11 @@ export class RatgdoAccessory {
               this.doorOccupancyTimer = setTimeout(() => {
 
                 doorOccupancyService?.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, true);
-                this.log.info("Garage door open occupancy detected.");
+
+                if(this.hints.logMotion) {
+
+                  this.log.info("Garage door open occupancy detected.");
+                }
 
                 // Publish to MQTT, if the user has configured it.
                 this.platform.mqtt?.publish(this.device.mac, "dooropenoccupancy", "true");
@@ -893,7 +914,10 @@ export class RatgdoAccessory {
         switchService?.updateCharacteristic(this.hap.Characteristic.On, this.doorTargetStateBias(this.status.door) === this.hap.Characteristic.TargetDoorState.OPEN);
 
         // Inform the user:
-        this.log.info("%s.", camelCase(payload));
+        if(this.hints.logOpener) {
+
+          this.log.info("%s.", camelCase(payload));
+        }
 
         // If we have an open occupancy sensor configured and our door state is anything other than open, clear our occupancy state.
         if(this.hints.doorOpenOccupancySensor && this.doorOccupancyTimer && (payload !== "open")) {
@@ -904,7 +928,11 @@ export class RatgdoAccessory {
           if(doorOccupancyService?.getCharacteristic(this.hap.Characteristic.OccupancyDetected).value as boolean) {
 
             doorOccupancyService?.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, false);
-            this.log.info("Garage door open occupancy no longer detected.");
+
+            if(this.hints.logMotion) {
+
+              this.log.info("Garage door open occupancy no longer detected.");
+            }
 
             // Publish to MQTT, if the user has configured it.
             this.platform.mqtt?.publish(this.device.mac, "dooropenoccupancy", "false");
@@ -925,7 +953,10 @@ export class RatgdoAccessory {
           lightBulbService?.updateCharacteristic(this.hap.Characteristic.On, this.status.light);
 
           // Inform the user:
-          this.log.info("Light %s.", payload);
+          if(this.hints.logLight) {
+
+            this.log.info("Light %s.", payload);
+          }
 
           // Publish to MQTT, if the user has configured it.
           this.platform.mqtt?.publish(this.device.mac, "light", this.status.light.toString());
@@ -978,7 +1009,10 @@ export class RatgdoAccessory {
           clearTimeout(this.motionTimer);
         } else {
 
-          this.log.info("Motion detected.");
+          if(this.hints.logMotion) {
+
+            this.log.info("Motion detected.");
+          }
 
           // Publish to MQTT, if the user has configured it.
           this.platform.mqtt?.publish(this.device.mac, "motion", this.status.motion.toString());
@@ -1017,7 +1051,10 @@ export class RatgdoAccessory {
           this.platform.mqtt?.publish(this.device.mac, "occupancy", "true");
 
           // Log the event.
-          this.log.info("Occupancy detected.");
+          if(this.hints.logMotion) {
+
+            this.log.info("Occupancy detected.");
+          }
         }
 
         // Reset our occupancy state after occupancyDuration.
@@ -1030,7 +1067,10 @@ export class RatgdoAccessory {
           this.platform.mqtt?.publish(this.device.mac, "occupancy", "false");
 
           // Log the event.
-          this.log.info("Occupancy no longer detected.");
+          if(this.hints.logMotion) {
+
+            this.log.info("Occupancy no longer detected.");
+          }
 
           // Delete the timer.
           this.motionOccupancyTimer = null;
@@ -1046,7 +1086,11 @@ export class RatgdoAccessory {
         if(this.status.obstruction !== (payload === "obstructed")) {
 
           this.status.obstruction = payload === "obstructed";
-          this.log.info("Obstruction %sdetected.", this.status.obstruction ? "" : "no longer ");
+
+          if(this.hints.logObstruction) {
+
+            this.log.info("Obstruction %sdetected.", this.status.obstruction ? "" : "no longer ");
+          }
 
           // Publish to MQTT, if the user has configured it.
           this.platform.mqtt?.publish(this.device.mac, "obstruction", this.status.obstruction.toString());
@@ -1071,7 +1115,7 @@ export class RatgdoAccessory {
 
       case "door":
 
-        endpoint = "cover/door";
+        endpoint = (this.device.variant === RatgdoVariant.KONNECTED) ? "cover/garage_door" : "cover/door";
 
         switch(payload) {
 
@@ -1112,14 +1156,14 @@ export class RatgdoAccessory {
 
       case "light":
 
-        endpoint = "light/light";
+        endpoint = (this.device.variant === RatgdoVariant.KONNECTED) ? "light/garage_light" : "light/light";
         action = (payload === "on") ? "turn_on" : "turn_off";
 
         break;
 
       case "lock":
 
-        endpoint = "lock/lock_remotes";
+        endpoint = (this.device.variant === RatgdoVariant.KONNECTED) ? "lock/lock" : "lock/lock_remotes";
         action = (payload === "lock") ? "lock" : "unlock";
 
         break;

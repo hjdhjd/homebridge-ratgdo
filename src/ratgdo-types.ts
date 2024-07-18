@@ -9,7 +9,8 @@ export interface RatgdoDevice {
   address: string,
   firmwareVersion: string,
   mac: string,
-  name: string
+  name: string,
+  variant: string
 }
 
 // Ratgdo reserved names.
@@ -25,4 +26,11 @@ export enum RatgdoReservedNames {
   // Manage our switch types.
   SWITCH_LOCKOUT = "Switch.Lockout",
   SWITCH_OPENER_AUTOMATION = "Switch.Opener.Automation"
+}
+
+// Ratgdo device variants.
+export enum RatgdoVariant {
+
+  KONNECTED = "konnected.garage-door",
+  RATGDO = "ratgdo.esphome"
 }

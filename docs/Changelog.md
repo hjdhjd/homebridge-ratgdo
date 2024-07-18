@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 2.3.0 (2024-07-18)
+  * New feature: you can selectively enable and disable the logging of various event types (light, motion, obstruction, and opener currently). Use the HBR webUI to configure to your taste.
+  * New feature: initial support for the Konnected Ratgdo variant. This is a commercially packaged version of a Ratgdo device produced by Konnected. Feedback welcome, and thanks to @KyleBower for the initial PR needed to provide support.
+  * Housekeeping.
+
 ## 2.2.2 (2024-06-06)
   * Housekeeping.
 
