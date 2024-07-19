@@ -13,6 +13,7 @@ import { RatgdoAccessory } from "./ratgdo-device.js";
 import http from "node:http";
 import net from "node:net";
 import util from "node:util";
+import { RatgdoVariant } from "./ratgdo-types.js";
 
 export class RatgdoPlatform implements DynamicPlatformPlugin {
 
@@ -335,10 +336,10 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     const device = {
 
       address: address,
-      firmwareVersion: deviceInfo.version,
+      firmwareVersion: deviceInfo.version || deviceInfo.esphome_version,
       mac: mac.replace(/:/g, ""),
       name: deviceInfo.friendly_name,
-      variant: deviceInfo.project_name
+      variant: deviceInfo.project_name.includes(RatgdoVariant.KONNECTED) ? RatgdoVariant.KONNECTED : RatgdoVariant.RATGDO
     };
 
     // Inform the user that we've discovered a device.
