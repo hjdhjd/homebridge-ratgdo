@@ -23,7 +23,7 @@
     "build-ui": "shx mkdir -p homebridge-ui/public/lib && shx cp \"node_modules/homebridge-plugin-utils/dist/ui/**/*.@(js|mjs){,.map}\" homebridge-ui/public/lib",
     "clean": "shx rm -rf dist homebridge-ui/public/lib",
     "prelint": "npm run build-ui",
-    "lint": "eslint eslint.config.mjs src/**.ts homebridge-ui/*.js homebridge-ui/public/**/*.mjs",
+    "lint": "eslint --max-warnings=${ESLINT_MAX_WARNINGS:-1} eslint.config.mjs src/**.ts homebridge-ui/*.js homebridge-ui/public/**/*.mjs",
     "postpublish": "npm run clean",
     "prepublishOnly": "npm run lint && npm run build"
   },

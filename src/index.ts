@@ -6,7 +6,7 @@ import { PLATFORM_NAME, PLUGIN_NAME } from "./settings.js";
 import { API } from "homebridge";
 import { RatgdoPlatform } from "./ratgdo-platform.js";
 
-// Register our platform with homebridge.
+// Register our platform with Homebridge.
 export default (api: API): void => {
 
   api.registerPlatform(PLUGIN_NAME, PLATFORM_NAME, RatgdoPlatform);

@@ -39,11 +39,12 @@ jobs:
           node-version: ${{ matrix.node-version }}
 
       - name: Build and install the package with a clean slate.
+        env:
+          CI: true
+          ESLINT_MAX_WARNINGS: 0
         run: |
           npm ci
           npm run prepublishOnly
-        env:
-          CI: true
 
   # Publish the release to the NPM registry.
   publish-npm:
