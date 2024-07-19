@@ -14,7 +14,7 @@ export const PLUGIN_NAME = "homebridge-ratgdo";
 export const RATGDO_AUTODISCOVERY_INTERVAL = 60;
 
 // mDNS TXT record project name associated with a Ratgdo device.
-export const RATGDO_AUTODISCOVERY_PROJECT_NAMES: string[] = [ RatgdoVariant.KONNECTED, RatgdoVariant.RATGDO ];
+export const RATGDO_AUTODISCOVERY_PROJECT_NAMES: string[] = [ `${RatgdoVariant.KONNECTED}-gdov1-s`, `${RatgdoVariant.KONNECTED}-gdov2-q`, `${RatgdoVariant.KONNECTED}-gdov2-s`, RatgdoVariant.RATGDO ];
 
 // mDNS service types associated with a Ratgdo device.
 export const RATGDO_AUTODISCOVERY_TYPES = [ "esphomelib", "konnected" ];
