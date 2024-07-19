@@ -41,7 +41,7 @@ jobs:
       - name: Build and install the package with a clean slate.
         run: |
           npm ci
-          npm run build --if-present
+          npm run prepublishOnly
         env:
           CI: true
 
