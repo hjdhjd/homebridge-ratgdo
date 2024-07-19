@@ -31,6 +31,6 @@ export enum RatgdoReservedNames {
 // Ratgdo device variants.
 export enum RatgdoVariant {
 
-  KONNECTED = "konnected.garage-door",
+  KONNECTED = "konnected.garage-door-gdov2-q",
   RATGDO = "ratgdo.esphome"
 }

@@ -10,7 +10,6 @@ import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_AUTODISCOVERY_INTERVAL, RATGDO_AUTOD
 import { RatgdoOptions, featureOptionCategories, featureOptions } from "./ratgdo-options.js";
 import EventSource from "eventsource";
 import { RatgdoAccessory } from "./ratgdo-device.js";
-import { RatgdoVariant } from "./ratgdo-types.js";
 import http from "node:http";
 import net from "node:net";
 import util from "node:util";
@@ -339,7 +338,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       firmwareVersion: deviceInfo.version ?? deviceInfo.esphome_version,
       mac: mac.replace(/:/g, ""),
       name: deviceInfo.friendly_name,
-      variant: deviceInfo.project_name.includes(RatgdoVariant.KONNECTED) ? RatgdoVariant.KONNECTED : RatgdoVariant.RATGDO
+      variant: deviceInfo.project_name
     };
 
     // Inform the user that we've discovered a device.
