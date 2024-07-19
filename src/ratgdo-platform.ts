@@ -10,10 +10,10 @@ import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_AUTODISCOVERY_INTERVAL, RATGDO_AUTOD
 import { RatgdoOptions, featureOptionCategories, featureOptions } from "./ratgdo-options.js";
 import EventSource from "eventsource";
 import { RatgdoAccessory } from "./ratgdo-device.js";
+import { RatgdoVariant } from "./ratgdo-types.js";
 import http from "node:http";
 import net from "node:net";
 import util from "node:util";
-import { RatgdoVariant } from "./ratgdo-types.js";
 
 export class RatgdoPlatform implements DynamicPlatformPlugin {
 
