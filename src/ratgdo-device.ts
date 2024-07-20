@@ -4,9 +4,9 @@
  */
 import { API, CharacteristicValue, HAP, PlatformAccessory, Service } from "homebridge";
 import { FetchError, fetch } from "@adobe/fetch";
+import { HomebridgePluginLogging, acquireService, validService } from "homebridge-plugin-utils";
 import { RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION } from "./settings.js";
 import { RatgdoDevice, RatgdoReservedNames, RatgdoVariant } from "./ratgdo-types.js";
-import { HomebridgePluginLogging } from "homebridge-plugin-utils";
 import { RatgdoOptions } from "./ratgdo-options.js";
 import { RatgdoPlatform } from "./ratgdo-platform.js";
 import util from "node:util";
@@ -260,54 +260,54 @@ export class RatgdoAccessory {
   // Configure the garage door service for HomeKit.
   private configureGarageDoor(): boolean {
 
-    let garageDoorService = this.accessory.getService(this.hap.Service.GarageDoorOpener);
+    // Acquire the service.
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.GarageDoorOpener, this.name);
 
-    // Add the garage door opener service to the accessory, if needed.
-    if(!garageDoorService) {
+    if(!service) {
 
-      garageDoorService = new this.hap.Service.GarageDoorOpener(this.name);
-      garageDoorService.addOptionalCharacteristic(this.hap.Characteristic.ConfiguredName);
-      this.accessory.addService(garageDoorService);
+      this.log.error("Unable to add the garage door.");
+
+      return false;
     }
 
     // Set the initial current and target door states to closed since ratgdo doesn't tell us initial state over MQTT on startup.
-    garageDoorService.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.status.door);
-    garageDoorService.updateCharacteristic(this.hap.Characteristic.TargetDoorState, this.doorTargetStateBias(this.status.door));
+    service.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.status.door);
+    service.updateCharacteristic(this.hap.Characteristic.TargetDoorState, this.doorTargetStateBias(this.status.door));
 
     // Handle HomeKit open and close events.
-    garageDoorService.getCharacteristic(this.hap.Characteristic.TargetDoorState).onSet((value: CharacteristicValue) => {
+    service.getCharacteristic(this.hap.Characteristic.TargetDoorState).onSet((value: CharacteristicValue) => {
 
       this.setDoorState(value);
     });
 
     // Inform HomeKit of our current state.
-    garageDoorService.getCharacteristic(this.hap.Characteristic.CurrentDoorState).onGet(() => this.status.door);
+    service.getCharacteristic(this.hap.Characteristic.CurrentDoorState).onGet(() => this.status.door);
 
     // Inform HomeKit of any obstructions.
-    garageDoorService.getCharacteristic(this.hap.Characteristic.ObstructionDetected).onGet(() => this.status.obstruction === true);
+    service.getCharacteristic(this.hap.Characteristic.ObstructionDetected).onGet(() => this.status.obstruction === true);
 
     // Configure the lock garage door lock current and target state characteristics.
-    garageDoorService.getCharacteristic(this.hap.Characteristic.LockTargetState).onSet(async (value: CharacteristicValue) => {
+    service.getCharacteristic(this.hap.Characteristic.LockTargetState).onSet(async (value: CharacteristicValue) => {
 
       if(!(await this.command("lock", (value === this.hap.Characteristic.LockTargetState.SECURED) ? "lock" : "unlock"))) {
 
         // Something went wrong. Let's make sure we revert the lock to it's prior state.
         setTimeout(() => {
 
-          garageDoorService?.updateCharacteristic(this.hap.Characteristic.LockTargetState, this.lockTargetStateBias(this.status.lock));
-          garageDoorService?.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.status.lock);
+          service?.updateCharacteristic(this.hap.Characteristic.LockTargetState, this.lockTargetStateBias(this.status.lock));
+          service?.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.status.lock);
         }, 50);
       }
     });
 
-    garageDoorService.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.status.lock);
-    garageDoorService.updateCharacteristic(this.hap.Characteristic.LockTargetState, this.lockTargetStateBias(this.status.lock));
+    service.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.status.lock);
+    service.updateCharacteristic(this.hap.Characteristic.LockTargetState, this.lockTargetStateBias(this.status.lock));
 
-    garageDoorService.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => this.status.availability);
-    garageDoorService.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
+    service.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => this.status.availability);
+    service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
 
     // Let HomeKit know that this is the primary service on this accessory.
-    garageDoorService.setPrimaryService(true);
+    service.setPrimaryService(true);
 
     return true;
   }
@@ -315,49 +315,39 @@ export class RatgdoAccessory {
   // Configure the light for HomeKit.
   private configureLight(): boolean {
 
-    // Find the service, if it exists.
-    let lightService = this.accessory.getService(this.hap.Service.Lightbulb);
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.Lightbulb, () => {
 
-    // Have we disabled the light?
-    if(!this.hints.light) {
+      // Have we disabled the light?
+      if(!this.hints.light) {
 
-      if(lightService) {
-
-        this.accessory.removeService(lightService);
-        this.log.info("Disabling light.");
-      }
-
-      return false;
-    }
-
-    // Add the service to the accessory, if needed.
-    if(!lightService) {
-
-      lightService = new this.hap.Service.Lightbulb(this.name);
-
-      if(!lightService) {
-
-        this.log.error("Unable to add the light.");
+        this.log.info("Disabling the light.");
 
         return false;
       }
 
-      lightService.addOptionalCharacteristic(this.hap.Characteristic.ConfiguredName);
-      lightService.updateCharacteristic(this.hap.Characteristic.Name, this.name);
-      this.setServiceName(lightService, this.name);
-      this.accessory.addService(lightService);
-      this.log.info("Enabling light.");
+      return true;
+    })) {
+
+      return false;
+    }
+
+    // Acquire the service.
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.Lightbulb, this.name, undefined, () => this.log.info("Enabling light."));
+
+    if(!service) {
+
+      this.log.error("Unable to add the light.");
+
+      return false;
     }
 
     // Initialize the light.
-    lightService.updateCharacteristic(this.hap.Characteristic.On, this.status.light);
+    service.updateCharacteristic(this.hap.Characteristic.On, this.status.light);
 
     // Turn the light on or off.
-    lightService.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.status.light);
-    lightService.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => {
-
-      void this.command("light", value === true ? "on" : "off");
-    });
+    service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.status.light);
+    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => void this.command("light", value === true ? "on" : "off"));
 
     return true;
   }
@@ -365,46 +355,37 @@ export class RatgdoAccessory {
   // Configure the motion sensor for HomeKit.
   private configureMotionSensor(): boolean {
 
-    // Find the motion sensor service, if it exists.
-    let motionService = this.accessory.getService(this.hap.Service.MotionSensor);
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.MotionSensor, () => {
 
-    // Have we disabled the motion sensor?
-    if(!this.hints.motionSensor) {
+      // Have we disabled the motion sensor?
+      if(!this.hints.motionSensor) {
 
-      if(motionService) {
-
-        this.accessory.removeService(motionService);
-        this.log.info("Disabling motion sensor.");
-      }
-
-      return false;
-    }
-
-    // We don't have a motion sensor, let's add it to the device.
-    if(!motionService) {
-
-      // We don't have it, add the motion sensor to the device.
-      motionService = new this.hap.Service.MotionSensor(this.name);
-
-      if(!motionService) {
-
-        this.log.error("Unable to add the motion sensor.");
+        this.log.info("Disabling the motion sensor.");
 
         return false;
       }
 
-      motionService.addOptionalCharacteristic(this.hap.Characteristic.ConfiguredName);
-      motionService.updateCharacteristic(this.hap.Characteristic.Name, this.name);
-      this.setServiceName(motionService, this.name);
-      this.accessory.addService(motionService);
-      this.log.info("Enabling motion sensor.");
+      return true;
+    })) {
+
+      return false;
+    }
+
+    // Acquire the service.
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.MotionSensor, this.name, undefined, () => this.log.info("Enabling motion sensor."));
+
+    if(!service) {
+
+      this.log.error("Unable to add the motion sensor.");
+
+      return false;
     }
 
     // Initialize the state of the motion sensor.
-    motionService.updateCharacteristic(this.hap.Characteristic.MotionDetected, false);
-    motionService.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
-
-    motionService.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => this.status.availability);
+    service.updateCharacteristic(this.hap.Characteristic.MotionDetected, false);
+    service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
+    service.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => this.status.availability);
 
     return true;
   }
@@ -412,45 +393,37 @@ export class RatgdoAccessory {
   // Configure a dimmer to automate open and close events in HomeKit beyond what HomeKit might allow for a garage opener service that gets treated as a secure service.
   private configureAutomationDoorPositionDimmer(): boolean {
 
-    // Find the dimmer service, if it exists.
-    let dimmerService = this.accessory.getServiceById(this.hap.Service.Lightbulb, RatgdoReservedNames.DIMMER_OPENER_AUTOMATION);
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.Lightbulb, () => {
 
-    // The switch is disabled by default and primarily exists for automation purposes.
-    if(!this.hints.automationDimmer) {
-
-      if(dimmerService) {
-
-        this.accessory.removeService(dimmerService);
-        this.log.info("Disabling automation door position dimmer.");
-      }
-
-      return false;
-    }
-
-    // Add the dimmer to the opener, if needed.
-    if(!dimmerService) {
-
-      dimmerService = new this.hap.Service.Lightbulb(this.name + " Automation Door Position", RatgdoReservedNames.DIMMER_OPENER_AUTOMATION);
-
-      if(!dimmerService) {
-
-        this.log.error("Unable to add automation door position dimmer.");
+      // The door position dimmer is disabled by default and primarily exists for automation purposes.
+      if(!this.hints.automationDimmer) {
 
         return false;
       }
 
-      this.accessory.addService(dimmerService);
+      return true;
+    }, RatgdoReservedNames.DIMMER_OPENER_AUTOMATION)) {
+
+      return false;
     }
 
-    // Return the current state of the opener.
-    dimmerService.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => {
+    // Acquire the service.
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.Lightbulb, this.name + " Automation Door Position",
+      RatgdoReservedNames.DIMMER_OPENER_AUTOMATION);
 
-      // We're on if we are in any state other than closed (specifically open or stopped).
-      return this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED;
-    });
+    if(!service) {
+
+      this.log.error("Unable to add the automation door position dimmer.");
+
+      return false;
+    }
+
+    // Return the current state of the opener. We're on if we are in any state other than closed (specifically open or stopped).
+    service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED);
 
     // Close the opener. Opening is really handled in the brightness event.
-    dimmerService.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => {
+    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => {
 
       // We really only want to act when the opener is open. Otherwise, it's handled by the brightness event.
       if(value) {
@@ -468,21 +441,15 @@ export class RatgdoAccessory {
       if(!this.setDoorState(this.hap.Characteristic.TargetDoorState.CLOSED)) {
 
         // Something went wrong. Let's make sure we revert the dimmer to it's prior state.
-        setTimeout(() => {
-
-          dimmerService?.updateCharacteristic(this.hap.Characteristic.On, !value);
-        }, 50);
+        setTimeout(() => service?.updateCharacteristic(this.hap.Characteristic.On, !value), 50);
       }
     });
 
     // Return the door position of the opener.
-    dimmerService.getCharacteristic(this.hap.Characteristic.Brightness)?.onGet(() => {
-
-      return this.status.doorPosition;
-    });
+    service.getCharacteristic(this.hap.Characteristic.Brightness)?.onGet(() => this.status.doorPosition);
 
     // Adjust the door position of the opener by adjusting brightness of the light.
-    dimmerService.getCharacteristic(this.hap.Characteristic.Brightness)?.onSet((value: CharacteristicValue) => {
+    service.getCharacteristic(this.hap.Characteristic.Brightness)?.onSet((value: CharacteristicValue) => {
 
       if(this.hints.logOpener) {
 
@@ -493,13 +460,13 @@ export class RatgdoAccessory {
         this.hap.Characteristic.TargetDoorState.OPEN : this.hap.Characteristic.TargetDoorState.CLOSED, value as number);
     });
 
-    // Initialize the switch.
-    dimmerService.displayName = this.name + " Automation Door Position";
-    dimmerService.updateCharacteristic(this.hap.Characteristic.Name, this.name + " Automation Door Position");
-    dimmerService.updateCharacteristic(this.hap.Characteristic.On, this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED);
-    dimmerService.updateCharacteristic(this.hap.Characteristic.Brightness, this.status.doorPosition);
+    // Initialize the dimmer.
+    service.updateCharacteristic(this.hap.Characteristic.On, this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED);
+    service.updateCharacteristic(this.hap.Characteristic.Brightness, this.status.doorPosition);
+    service.displayName = this.name + " Automation Door Position";
+    service.updateCharacteristic(this.hap.Characteristic.Name, this.name + " Automation Door Position");
 
-    this.log.info("Enabling automation door position dimmer.");
+    this.log.info("Enabling the automation door position dimmer.");
 
     return true;
   }
@@ -507,46 +474,36 @@ export class RatgdoAccessory {
   // Configure a switch to automate open and close events in HomeKit beyond what HomeKit might allow for a garage opener service that gets treated as a secure service.
   private configureAutomationDoorSwitch(): boolean {
 
-    // Find the switch service, if it exists.
-    let switchService = this.accessory.getServiceById(this.hap.Service.Switch, RatgdoReservedNames.SWITCH_OPENER_AUTOMATION);
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.Switch, () => {
 
-    // The switch is disabled by default and primarily exists for automation purposes.
-    if(!this.hints.automationSwitch) {
-
-      if(switchService) {
-
-        this.accessory.removeService(switchService);
-        this.log.info("Disabling automation door opener switch.");
-      }
-
-      return false;
-    }
-
-    // Add the switch to the opener, if needed.
-    if(!switchService) {
-
-      switchService = new this.hap.Service.Switch(this.name + " Automation Opener", RatgdoReservedNames.SWITCH_OPENER_AUTOMATION);
-
-      if(!switchService) {
-
-        this.log.error("Unable to add automation door opener switch.");
+      // Have we disabled the automation switch?
+      if(!this.hints.automationSwitch) {
 
         return false;
       }
 
-      switchService.addOptionalCharacteristic(this.hap.Characteristic.ConfiguredName);
-      this.accessory.addService(switchService);
+      return true;
+    }, RatgdoReservedNames.SWITCH_OPENER_AUTOMATION)) {
+
+      return false;
     }
 
-    // Return the current state of the opener.
-    switchService.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => {
+    // Acquire the service.
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.Switch, this.name + " Automation Opener", RatgdoReservedNames.SWITCH_OPENER_AUTOMATION);
 
-      // We're on if we are in any state other than closed (specifically open or stopped).
-      return this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED;
-    });
+    if(!service) {
+
+      this.log.error("Unable to add the automation door opener switch.");
+
+      return false;
+    }
+
+    // Return the current state of the opener. We're on if we are in any state other than closed (specifically open or stopped).
+    service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED);
 
     // Open or close the opener.
-    switchService.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => {
+    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => {
 
       // Inform the user.
       if(this.hints.logOpener) {
@@ -558,19 +515,16 @@ export class RatgdoAccessory {
       if(!this.setDoorState(value ? this.hap.Characteristic.TargetDoorState.OPEN : this.hap.Characteristic.TargetDoorState.CLOSED)) {
 
         // Something went wrong. Let's make sure we revert the switch to it's prior state.
-        setTimeout(() => {
-
-          switchService?.updateCharacteristic(this.hap.Characteristic.On, !value);
-        }, 50);
+        setTimeout(() => service?.updateCharacteristic(this.hap.Characteristic.On, !value), 50);
       }
     });
 
     // Initialize the switch.
-    switchService.updateCharacteristic(this.hap.Characteristic.Name, this.name + " Automation Opener");
-    this.setServiceName(switchService, this.name + " Automation Opener");
-    switchService.updateCharacteristic(this.hap.Characteristic.On, this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED);
+    service.updateCharacteristic(this.hap.Characteristic.On, this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED);
+    service.updateCharacteristic(this.hap.Characteristic.Name, this.name + " Automation Opener");
+    this.setServiceName(service, this.name + " Automation Opener");
 
-    this.log.info("Enabling automation door opener switch.");
+    this.log.info("Enabling the automation door opener switch.");
 
     return true;
   }
@@ -578,46 +532,36 @@ export class RatgdoAccessory {
   // Configure a switch to control the ability to lockout all wireless remotes for the garage door opener, if the feature exists.
   private configureAutomationLockoutSwitch(): boolean {
 
-    // Find the switch service, if it exists.
-    let switchService = this.accessory.getServiceById(this.hap.Service.Switch, RatgdoReservedNames.SWITCH_LOCKOUT);
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.Switch, () => {
 
-    // The switch is disabled by default and primarily exists for automation purposes.
-    if(!this.hints.lockoutSwitch) {
-
-      if(switchService) {
-
-        this.accessory.removeService(switchService);
-        this.log.info("Disabling automation wireless remote lockout switch.");
-      }
-
-      return false;
-    }
-
-    // Add the switch to the opener, if needed.
-    if(!switchService) {
-
-      switchService = new this.hap.Service.Switch(this.name + " Lockout", RatgdoReservedNames.SWITCH_LOCKOUT);
-
-      if(!switchService) {
-
-        this.log.error("Unable to add automation wireless remote lockout switch.");
+      // The wireless lockout switch is disabled by default and primarily exists for automation purposes.
+      if(!this.hints.lockoutSwitch) {
 
         return false;
       }
 
-      switchService.addOptionalCharacteristic(this.hap.Characteristic.ConfiguredName);
-      this.accessory.addService(switchService);
+      return true;
+    }, RatgdoReservedNames.SWITCH_LOCKOUT)) {
+
+      return false;
     }
 
-    // Return the current state of the opener.
-    switchService.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => {
+    // Acquire the service.
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.Switch, this.name + " Lockout", RatgdoReservedNames.SWITCH_LOCKOUT);
 
-      // We're on if we are in any state other than locked.
-      return this.status.lock === this.hap.Characteristic.LockCurrentState.SECURED;
-    });
+    if(!service) {
 
-    // Open or close the opener.
-    switchService.getCharacteristic(this.hap.Characteristic.On)?.onSet(async (value: CharacteristicValue) => {
+      this.log.error("Unable to add the automation wireless remote lockout switch.");
+
+      return false;
+    }
+
+    // Return the current state of the opener. We're on if we are in any state other than locked.
+    service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.status.lock === this.hap.Characteristic.LockCurrentState.SECURED);
+
+    // Lock or unlock the wireless remotes.
+    service.getCharacteristic(this.hap.Characteristic.On)?.onSet(async (value: CharacteristicValue) => {
 
       // Inform the user.
       this.log.info("Automation wireless remote lockout switch: remotes are %s.", value ? "locked out" : "permitted");
@@ -626,19 +570,16 @@ export class RatgdoAccessory {
       if(!(await this.command("lock", value ? "lock" : "unlock"))) {
 
         // Something went wrong. Let's make sure we revert the switch to it's prior state.
-        setTimeout(() => {
-
-          switchService?.updateCharacteristic(this.hap.Characteristic.On, !value);
-        }, 50);
+        setTimeout(() => service?.updateCharacteristic(this.hap.Characteristic.On, !value), 50);
       }
     });
 
     // Initialize the switch.
-    switchService.updateCharacteristic(this.hap.Characteristic.Name, this.name + " Lockout");
-    this.setServiceName(switchService, this.name + " Lockout");
-    switchService.updateCharacteristic(this.hap.Characteristic.On, this.status.lock === this.hap.Characteristic.LockCurrentState.SECURED);
+    service.updateCharacteristic(this.hap.Characteristic.Name, this.name + " Lockout");
+    this.setServiceName(service, this.name + " Lockout");
+    service.updateCharacteristic(this.hap.Characteristic.On, this.status.lock === this.hap.Characteristic.LockCurrentState.SECURED);
 
-    this.log.info("Enabling automation wireless remote lockout switch.");
+    this.log.info("Enabling the automation wireless remote lockout switch.");
 
     return true;
   }
@@ -646,49 +587,39 @@ export class RatgdoAccessory {
   // Configure the door open occupancy sensor for HomeKit.
   private configureDoorOpenOccupancySensor(): boolean {
 
-    // Find the occupancy sensor service, if it exists.
-    let occupancyService = this.accessory.getServiceById(this.hap.Service.OccupancySensor, RatgdoReservedNames.OCCUPANCY_SENSOR_DOOR_OPEN);
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.OccupancySensor, () => {
 
-    // The occupancy sensor is disabled by default and primarily exists for automation purposes.
-    if(!this.hints.doorOpenOccupancySensor) {
-
-      if(occupancyService) {
-
-        this.accessory.removeService(occupancyService);
-        this.log.info("Disabling door open indicator occupancy sensor.");
-      }
-
-      return false;
-    }
-
-    // We don't have an occupancy sensor, let's add it to the device.
-    if(!occupancyService) {
-
-      // We don't have it, add the occupancy sensor to the device.
-      occupancyService = new this.hap.Service.OccupancySensor(this.name + " Open", RatgdoReservedNames.OCCUPANCY_SENSOR_DOOR_OPEN);
-
-      if(!occupancyService) {
-
-        this.log.error("Unable to add door open occupancy sensor.");
+      // The occupancy sensor is disabled by default and primarily exists for automation purposes.
+      if(!this.hints.doorOpenOccupancySensor) {
 
         return false;
       }
 
-      occupancyService.addOptionalCharacteristic(this.hap.Characteristic.ConfiguredName);
-      this.setServiceName(occupancyService, this.name + " Open");
-      this.accessory.addService(occupancyService);
+      return true;
+    }, RatgdoReservedNames.OCCUPANCY_SENSOR_DOOR_OPEN)) {
+
+      return false;
     }
 
-    // Initialize the state of the occupancy sensor.
-    occupancyService.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, false);
-    occupancyService.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
+    // Acquire the service.
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.OccupancySensor, this.name + " Open", RatgdoReservedNames.OCCUPANCY_SENSOR_DOOR_OPEN);
 
-    occupancyService.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => {
+    if(!service) {
 
-      return this.status.availability;
-    });
+      this.log.error("Unable to add the door open occupancy sensor.");
 
-    this.log.info("Enabling door open indicator occupancy sensor. Occupancy will be triggered when the opener has been continuously open for more than %s seconds.",
+      return false;
+    }
+
+    // Initialize the occupancy sensor.
+    service.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, false);
+    service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
+    this.setServiceName(service, this.name + " Open");
+
+    service.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => this.status.availability);
+
+    this.log.info("Enabling the door open indicator occupancy sensor. Occupancy will be triggered when the opener has been continuously open for more than %s seconds.",
       this.hints.doorOpenOccupancyDuration);
 
     return true;
@@ -697,49 +628,37 @@ export class RatgdoAccessory {
   // Configure the motion occupancy sensor for HomeKit.
   private configureMotionOccupancySensor(): boolean {
 
-    // Find the occupancy sensor service, if it exists.
-    let occupancyService = this.accessory.getServiceById(this.hap.Service.OccupancySensor, RatgdoReservedNames.OCCUPANCY_SENSOR_MOTION);
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.OccupancySensor, () => {
 
-    // The occupancy sensor is disabled by default and primarily exists for automation purposes.
-    if(!this.hints.motionOccupancySensor) {
-
-      if(occupancyService) {
-
-        this.accessory.removeService(occupancyService);
-        this.log.info("Disabling occupancy sensor.");
-      }
-
-      return false;
-    }
-
-    // We don't have an occupancy sensor, let's add it to the device.
-    if(!occupancyService) {
-
-      // We don't have it, add the occupancy sensor to the device.
-      occupancyService = new this.hap.Service.OccupancySensor(this.name, RatgdoReservedNames.OCCUPANCY_SENSOR_MOTION);
-
-      if(!occupancyService) {
-
-        this.log.error("Unable to add occupancy sensor.");
+      // The occupancy sensor is disabled by default and primarily exists for automation purposes.
+      if(!this.hints.motionOccupancySensor) {
 
         return false;
       }
 
-      occupancyService.addOptionalCharacteristic(this.hap.Characteristic.ConfiguredName);
-      this.setServiceName(occupancyService, this.name);
-      this.accessory.addService(occupancyService);
+      return true;
+    }, RatgdoReservedNames.OCCUPANCY_SENSOR_MOTION)) {
+
+      return false;
     }
 
-    // Initialize the state of the occupancy sensor.
-    occupancyService.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, false);
-    occupancyService.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
+    // Acquire the service.
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.OccupancySensor, this.name, RatgdoReservedNames.OCCUPANCY_SENSOR_MOTION);
 
-    occupancyService.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => {
+    if(!service) {
 
-      return this.status.availability;
-    });
+      this.log.error("Unable to add the occupancy sensor.");
 
-    this.log.info("Enabling occupancy sensor. Occupancy event duration set to %s seconds.", this.hints.motionOccupancyDuration);
+      return false;
+    }
+
+    // Initialize the occupancy sensor.
+    service.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, false);
+    service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
+    service.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => this.status.availability);
+
+    this.log.info("Enabling the occupancy sensor. Occupancy event duration set to %s seconds.", this.hints.motionOccupancyDuration);
 
     return true;
   }
