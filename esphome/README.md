@@ -35,11 +35,11 @@
 > [!NOTE]
 > There are multiple ways to install a custom Homebridge Ratgdo ESPHome firmware:
 >
->  * Use the ESPHome firmware I've provided here as a convenience. It is v2024.5.5 compiled with the `homebridge-ratgdo.yaml`. To install it this way:
->    * If you can access the Ratgdo ESPHome webUI and can perform an OTA update, you can upload the [homebridge-ratgdo-2024.5.5.bin](https://raw.githubusercontent.com/hjdhjd/homebridge-ratgdo/main/esphome/homebridge-ratgdo-2024.5.5.bin).
+>  * Use the ESPHome firmware I've provided here as a convenience. It is v2024.6.6 compiled with the `homebridge-ratgdo.yaml`. To install it this way:
+>    * If you can access the Ratgdo ESPHome webUI and can perform an OTA update, you can upload the [homebridge-ratgdo-2024.6.6.bin](https://raw.githubusercontent.com/hjdhjd/homebridge-ratgdo/main/esphome/homebridge-ratgdo-2024.6.6.bin).
 >    * If the Ratgdo ESPHome webUI is unavailable, you'll need to either use the [ESPHome web dashboard](https://web.esphome.io) or the ESPHome tools to install the firmware and physical access to the Ratgdo. To do this:
 >      * Plug your Ratgdo to the machine you're working on using a USB cable.
 >      * Either use the [ESPHome web dashboard](https://web.esphome.io) or install the ESPHome tools if needed (e.g. on macOS `brew install esphome`).
->      * Download both the [homebridge-ratgdo-2024.5.5.bin](https://raw.githubusercontent.com/hjdhjd/homebridge-ratgdo/main/esphome/homebridge-ratgdo-2024.5.5.bin) and the [homebridge-ratgdo.yml](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/homebridge-ratgdo.yaml) files.
+>      * Download both the [homebridge-ratgdo-2024.6.6.bin](https://raw.githubusercontent.com/hjdhjd/homebridge-ratgdo/main/esphome/homebridge-ratgdo-2024.6.6.bin) and the [homebridge-ratgdo.yml](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/homebridge-ratgdo.yaml) files.
 >      * If you're using the ESPHome web dashboard, go through the steps to upload the firmware you downloaded in the previous step.
->      * If you're using the ESPHome tools, run the following command: `esphome upload --file homebridge-ratgdo-2024.5.5.bin homebridge-ratgdo.yaml`.
+>      * If you're using the ESPHome tools, run the following command: `esphome upload --file homebridge-ratgdo-2024.6.6.bin homebridge-ratgdo.yaml`.

@@ -1,5 +1,3 @@
-# Copyright(C) 2017-2024, HJD (https://github.com/hjdhjd). All rights reserved.
-#
 # This is a customized configuration YAML file for [homebridge-ratgdo](https://github.com/hjdhjd/homebridge-ratgdo) that deviates slightly from the
 # default YAML provided by Ratgdo ESPHome. It is specific to those with Ratgdo hardware revisions of 2.5 or greater. For those running other hardware
 # versions, you can use this as a basis for your own, but it is beyond the support I will be providing.
@@ -7,7 +5,7 @@
 # The changes in this configuration file include:
 #
 #   - The ability to customize the name (and friendly name) of the Ratgdo device. Though cosmetic, it can be helpful when you have multiple Ratgdo devices.
-#   - Use SNTP to set the time on the Ratgdo device. Not strictly necessary, but good hygeine.
+#   - Uses SNTP to set the time on the Ratgdo device. Not strictly necessary, but good hygeine.
 #   - Allows you to configure the timezone either yourself or automatically. The timezone will be autoconfigured using the World Time API geoIP by default.
 #   - Set the interval to check for updates from the Ratgdo repository to every 6 hours instead of the Ratgdo default of every second.
 #
@@ -20,11 +18,11 @@
 # ```
 #
 # To install the ESPHome tools on macOS (assuming you use [Homebrew](https://brew.sh):
-#
+# 
 # ```sh
 # brew install esphome
 # ```
-#
+# 
 # For other platforms, you can search online for how to install the ESPHome tools.
 ---
 substitutions:
@@ -76,17 +74,18 @@ esphome:
                   then:
                     - lambda: |-
 
-                        if(status_code != HTTP_CODE_OK) {
+                        if(response->status_code != HTTP_CODE_OK) {
 
-                          ESP_LOGE("timezone.autodetermine", "World Time API HTTP Request failed with code: %d.", status_code);
+                          ESP_LOGE("timezone.autodetermine", "World Time API HTTP Request failed with code: %d.", response->status_code);
                           return;
                         }
 
-                        parse_json(id(http_request_data).get_string(), [](JsonObject root) {
+                        parse_json(body, [](JsonObject root) -> bool {
 
                           std::string timezone = root["timezone"];
                           id(sntp_time).set_timezone(timezone.c_str());
                           ESP_LOGI("timezone.autodetermine", "Timezone set to: %s.", timezone.c_str());
+                          return true;
                         });
 
 esp8266:
@@ -115,6 +114,7 @@ time:
 http_request:
   id: http_request_data
   timeout: 15s
+  verify_ssl: false
 
 api:
   id: api_server
@@ -127,3 +127,8 @@ wifi:
   ap:
 
 logger:
+
+external_components:
+  - source: github://pr#6797
+    components: [ web_server_base ]
+
