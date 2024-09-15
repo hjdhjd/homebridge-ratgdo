@@ -22,7 +22,7 @@ export default ts.config(
 
   {
 
-    files: [ "ui/lib/**.mjs", "eslint.config.mjs" ],
+    files: [ "homebridge-ui/public/**/*.@(js|mjs)", "homebridge-ui/server.js", "eslint.config.mjs" ],
     rules: {
 
       ...hbPluginUtils.rules.js
@@ -42,7 +42,13 @@ export default ts.config(
       parserOptions: {
 
         ecmaVersion: "latest",
-        project: "./tsconfig.json"
+        project: "./tsconfig.json",
+
+        projectService: {
+
+          allowDefaultProject: [ "eslint.config.mjs", "homebridge-ui/*.@(js|mjs)", "homebridge-ui/public/*.@(js|mjs)", "homebridge-ui/public/lib/*.@(js|mjs)" ],
+          defaultProject: "./tsconfig.json"
+        }
       },
 
       sourceType: "module"
@@ -75,6 +81,19 @@ export default ts.config(
         ...hbPluginUtils.globals.ui
       }
     }
+  },
+
+  {
+
+    files: [ "homebridge-ui/server.js" ],
+
+    languageOptions: {
+
+      globals: {
+
+        console: "readonly",
+        fetch: "readonly"
+      }
+    }
   }
 );
-

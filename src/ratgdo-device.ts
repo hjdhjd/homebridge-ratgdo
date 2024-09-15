@@ -2,7 +2,7 @@
  *
  * ratgdo-device.ts: Base class for all Ratgdo devices.
  */
-import { API, CharacteristicValue, HAP, PlatformAccessory, Service } from "homebridge";
+import { API, CharacteristicValue, HAP, PlatformAccessory } from "homebridge";
 import { FetchError, fetch } from "@adobe/fetch";
 import { HomebridgePluginLogging, acquireService, validService } from "homebridge-plugin-utils";
 import { RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION } from "./settings.js";
@@ -463,8 +463,6 @@ export class RatgdoAccessory {
     // Initialize the dimmer.
     service.updateCharacteristic(this.hap.Characteristic.On, this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED);
     service.updateCharacteristic(this.hap.Characteristic.Brightness, this.status.doorPosition);
-    service.displayName = this.name + " Automation Door Position";
-    service.updateCharacteristic(this.hap.Characteristic.Name, this.name + " Automation Door Position");
 
     this.log.info("Enabling the automation door position dimmer.");
 
@@ -521,8 +519,6 @@ export class RatgdoAccessory {
 
     // Initialize the switch.
     service.updateCharacteristic(this.hap.Characteristic.On, this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED);
-    service.updateCharacteristic(this.hap.Characteristic.Name, this.name + " Automation Opener");
-    this.setServiceName(service, this.name + " Automation Opener");
 
     this.log.info("Enabling the automation door opener switch.");
 
@@ -575,8 +571,6 @@ export class RatgdoAccessory {
     });
 
     // Initialize the switch.
-    service.updateCharacteristic(this.hap.Characteristic.Name, this.name + " Lockout");
-    this.setServiceName(service, this.name + " Lockout");
     service.updateCharacteristic(this.hap.Characteristic.On, this.status.lock === this.hap.Characteristic.LockCurrentState.SECURED);
 
     this.log.info("Enabling the automation wireless remote lockout switch.");
@@ -615,7 +609,6 @@ export class RatgdoAccessory {
     // Initialize the occupancy sensor.
     service.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, false);
     service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
-    this.setServiceName(service, this.name + " Open");
 
     service.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => this.status.availability);
 
@@ -1292,18 +1285,6 @@ export class RatgdoAccessory {
   private hasFeature(option: string): boolean {
 
     return this.platform.featureOptions.test(option, this.device.mac);
-  }
-
-  // Utility function to set the name of a service.
-  private setServiceName(service: Service | undefined, name: string): void {
-
-    if(!service) {
-
-      return;
-    }
-
-    service.displayName = name;
-    service.updateCharacteristic(this.hap.Characteristic.ConfiguredName, name);
   }
 
   // Utility function to return the name of this device.
