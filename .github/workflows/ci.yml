@@ -54,6 +54,10 @@ jobs:
     # Specify the environment we're going to build in.
     runs-on: ubuntu-latest
 
+    # Ensure we have permissions to provide our provenance attestation.
+    permissions:
+       id-token: write
+
     # Execute the build and publish activities.
     steps:
     - name: Checkout the repository.
@@ -73,6 +77,6 @@ jobs:
       run: npm ci
 
     - name: Publish the package to NPM.
-      run: npm publish --access public
+      run: npm publish --access public --provenance
       env:
         NODE_AUTH_TOKEN: ${{ secrets.npm_token }}
