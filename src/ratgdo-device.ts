@@ -1291,10 +1291,29 @@ export class RatgdoAccessory {
   private get name(): string {
 
     // We use the garage door service as the natural proxy for the name.
-    const configuredName = this.accessory.getService(this.hap.Service.GarageDoorOpener)?.getCharacteristic(this.hap.Characteristic.ConfiguredName).value as string;
+    let name = this.accessory.getService(this.hap.Service.GarageDoorOpener)?.getCharacteristic(this.hap.Characteristic.ConfiguredName).value as string;
+
+    if(name.length) {
+
+      return name;
+    }
+
+    name = this.accessory.getService(this.hap.Service.GarageDoorOpener)?.getCharacteristic(this.hap.Characteristic.Name).value as string;
+
+    if(name.length) {
+
+      return name;
+    }
+
+    name = this.accessory.displayName;
+
+    if(name.length) {
+
+      return name;
+    }
 
     // If we don't have a name for the garage door service, return the device name from Ratgdo.
-    return configuredName?.length ? configuredName : this.device.name;
+    return this.device.name;
   }
 
   // Utility function to return the current accessory name of this device.
