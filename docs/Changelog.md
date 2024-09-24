@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 2.3.3 (2024-09-24)
+  * Improvement: better name resolution.
+  * Housekeeping.
+
 ## 2.3.2 (2024-09-15)
   * Housekeeping.
 
