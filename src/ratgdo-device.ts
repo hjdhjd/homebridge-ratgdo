@@ -4,7 +4,7 @@
  */
 import { API, CharacteristicValue, HAP, PlatformAccessory } from "homebridge";
 import { FetchError, fetch } from "@adobe/fetch";
-import { HomebridgePluginLogging, acquireService, validService } from "homebridge-plugin-utils";
+import { HomebridgePluginLogging, acquireService, validService, validateName } from "homebridge-plugin-utils";
 import { RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION } from "./settings.js";
 import { RatgdoDevice, RatgdoReservedNames, RatgdoVariant } from "./ratgdo-types.js";
 import { RatgdoOptions } from "./ratgdo-options.js";
@@ -1293,21 +1293,21 @@ export class RatgdoAccessory {
     // We use the garage door service as the natural proxy for the name.
     let name = this.accessory.getService(this.hap.Service.GarageDoorOpener)?.getCharacteristic(this.hap.Characteristic.ConfiguredName).value as string;
 
-    if(name.length) {
+    if(name?.length) {
 
       return name;
     }
 
     name = this.accessory.getService(this.hap.Service.GarageDoorOpener)?.getCharacteristic(this.hap.Characteristic.Name).value as string;
 
-    if(name.length) {
+    if(name?.length) {
 
       return name;
     }
 
     name = this.accessory.displayName;
 
-    if(name.length) {
+    if(name?.length) {
 
       return name;
     }
@@ -1325,11 +1325,13 @@ export class RatgdoAccessory {
   // Utility function to set the current accessory name of this device.
   private set accessoryName(name: string) {
 
+    const cleanedName = validateName(name);
+
     // Set all the internally managed names within Homebridge to the new accessory name.
-    this.accessory.displayName = name;
-    this.accessory._associatedHAPAccessory.displayName = name;
+    this.accessory.displayName = cleanedName;
+    this.accessory._associatedHAPAccessory.displayName = cleanedName;
 
     // Set all the HomeKit-visible names.
-    this.accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.Name, name);
+    this.accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.Name, cleanedName);
   }
 }

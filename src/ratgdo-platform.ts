@@ -4,7 +4,7 @@
  */
 import { API, APIEvent, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
 import { Bonjour, Service } from "bonjour-service";
-import { FeatureOptions, MqttClient } from "homebridge-plugin-utils";
+import { FeatureOptions, MqttClient, validateName } from "homebridge-plugin-utils";
 import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_AUTODISCOVERY_INTERVAL, RATGDO_AUTODISCOVERY_PROJECT_NAMES, RATGDO_AUTODISCOVERY_TYPES, RATGDO_HEARTBEAT_DURATION,
   RATGDO_HEARTBEAT_INTERVAL, RATGDO_MQTT_TOPIC } from "./settings.js";
 import { RatgdoOptions, featureOptionCategories, featureOptions } from "./ratgdo-options.js";
@@ -375,7 +375,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     // It's a new device - let's add it to HomeKit.
     if(!accessory) {
 
-      accessory = new this.api.platformAccessory(device.name, uuid);
+      accessory = new this.api.platformAccessory(validateName(device.name), uuid);
 
       // Register this accessory with Homebridge and add it to the accessory array so we can track it.
       this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);

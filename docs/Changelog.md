@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 2.4.0 (2024-09-30)
+  * Behavior change: HBR will now ensure HomeKit accessory names are compliant with [HomeKit's naming guidelines](https://developer.apple.com/design/human-interface-guidelines/homekit#Help-people-choose-useful-names). Invalid characters will be replaced with a space, and multiple spaces will be squashed.
+  * Housekeeping.
+
 ## 2.3.3 (2024-09-24)
   * Improvement: better name resolution.
   * Housekeeping.
