@@ -4,12 +4,13 @@
  */
 import { API, APIEvent, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
 import { Bonjour, Service } from "bonjour-service";
-import { FeatureOptions, MqttClient, validateName } from "homebridge-plugin-utils";
+import { FeatureOptions, MqttClient, Nullable, validateName } from "homebridge-plugin-utils";
 import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_AUTODISCOVERY_INTERVAL, RATGDO_AUTODISCOVERY_PROJECT_NAMES, RATGDO_AUTODISCOVERY_TYPES, RATGDO_HEARTBEAT_DURATION,
   RATGDO_HEARTBEAT_INTERVAL, RATGDO_MQTT_TOPIC } from "./settings.js";
 import { RatgdoOptions, featureOptionCategories, featureOptions } from "./ratgdo-options.js";
 import EventSource from "eventsource";
 import { RatgdoAccessory } from "./ratgdo-device.js";
+import { RatgdoVariant } from "./ratgdo-types.js";
 import http from "node:http";
 import net from "node:net";
 import util from "node:util";
@@ -26,7 +27,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   public readonly configuredDevices: { [index: string]: RatgdoAccessory };
   public readonly hap: HAP;
   public readonly log: Logging;
-  public readonly mqtt: MqttClient | null;
+  public readonly mqtt: Nullable<MqttClient>;
 
   constructor(log: Logging, config: PlatformConfig, api: API) {
 
@@ -122,7 +123,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     }
 
     // We're only interested in Ratgdo devices with valid IP addresses. Otherwise, we're done.
-    if(!RATGDO_AUTODISCOVERY_PROJECT_NAMES.includes((service.txt as Record<string, string>).project_name) || !service.addresses) {
+    if(!RATGDO_AUTODISCOVERY_PROJECT_NAMES.map(project => (service.txt as Record<string, string>).project_name.match(project)) || !service.addresses) {
 
       return;
     }
@@ -317,7 +318,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   }
 
   // Configure a discovered garage door opener.
-  private configureGdo(address: string, mac: string, deviceInfo: Record<string, string>): RatgdoAccessory | null {
+  private configureGdo(address: string, mac: string, deviceInfo: Record<string, string>): Nullable<RatgdoAccessory> {
 
     // If we've already discovered this device, we're done.
     if(this.discoveredDevices[mac]) {
@@ -338,11 +339,12 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       firmwareVersion: deviceInfo.version ?? deviceInfo.esphome_version,
       mac: mac.replace(/:/g, ""),
       name: deviceInfo.friendly_name,
-      variant: deviceInfo.project_name
+      variant: (deviceInfo.project_name === "ratgdo.esphome") ? RatgdoVariant.RATGDO : RatgdoVariant.KONNECTED
     };
 
     // Inform the user that we've discovered a device.
-    this.log.info("Discovered: %s (address: %s mac: %s ESPHome firmware: v%s).", device.name, device.address, device.mac, device.firmwareVersion);
+    this.log.info("Discovered: %s (address: %s mac: %s ESPHome firmware: v%s variant: %s).", device.name, device.address, device.mac, device.firmwareVersion,
+      device.variant);
 
     // Mark it as discovered.
     this.discoveredDevices[mac] = true;
@@ -383,7 +385,8 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     }
 
     // Inform the user.
-    this.log.info("Configuring: %s (address: %s mac: %s ESPHome firmware: v%s).", device.name, device.address, device.mac, device.firmwareVersion);
+    this.log.info("Configuring: %s (address: %s mac: %s ESPHome firmware: v%s variant: %s).", device.name, device.address, device.mac, device.firmwareVersion,
+      device.variant);
 
     // Add it to our list of configured devices.
     this.configuredDevices[uuid] = new RatgdoAccessory(this, accessory, device);

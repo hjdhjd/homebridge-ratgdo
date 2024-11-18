@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 2.5.0 (2024-09-30)
+  * Improvement: enhanced Konnected Ratgdo support. HBR will now recognize all Konnected Ratgdo variants, and if you enable any of the garage door opener feature options (door automation switch or dimmer) it will also enable a switch for Konnected's pre-close warning alarm that you can trigger within HBR.
+  * Housekeeping.
+
 ## 2.4.0 (2024-09-30)
   * Behavior change: HBR will now ensure HomeKit accessory names are compliant with [HomeKit's naming guidelines](https://developer.apple.com/design/human-interface-guidelines/homekit#Help-people-choose-useful-names). Invalid characters will be replaced with a space, and multiple spaces will be squashed.
   * Housekeeping.
@@ -25,7 +29,7 @@ All notable changes to this project will be documented in this file. This projec
   * Housekeeping.
 
 ## 2.2.1 (2024-06-01)
-  * Improved: minor webUI updates.
+  * Improvement: minor webUI updates.
   * Housekeeping.
 
 ## 2.2.0 (2024-05-18)

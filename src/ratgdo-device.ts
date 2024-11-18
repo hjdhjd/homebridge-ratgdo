@@ -4,7 +4,7 @@
  */
 import { API, CharacteristicValue, HAP, PlatformAccessory } from "homebridge";
 import { FetchError, fetch } from "@adobe/fetch";
-import { HomebridgePluginLogging, acquireService, validService, validateName } from "homebridge-plugin-utils";
+import { HomebridgePluginLogging, Nullable, acquireService, validService, validateName } from "homebridge-plugin-utils";
 import { RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION } from "./settings.js";
 import { RatgdoDevice, RatgdoReservedNames, RatgdoVariant } from "./ratgdo-types.js";
 import { RatgdoOptions } from "./ratgdo-options.js";
@@ -49,13 +49,13 @@ export class RatgdoAccessory {
   private readonly api: API;
   private readonly config: RatgdoOptions;
   public readonly device: RatgdoDevice;
-  private doorOccupancyTimer: NodeJS.Timeout | null;
+  private doorOccupancyTimer: Nullable<NodeJS.Timeout>;
   private readonly hap: HAP;
   private readonly hints: RatgdoHints;
   public readonly log: HomebridgePluginLogging;
-  private motionOccupancyTimer: NodeJS.Timeout | null;
-  private motionTimer: NodeJS.Timeout | null;
-  private obstructionTimer: NodeJS.Timeout | null;
+  private motionOccupancyTimer: Nullable<NodeJS.Timeout>;
+  private motionTimer: Nullable<NodeJS.Timeout>;
+  private obstructionTimer: Nullable<NodeJS.Timeout>;
   private readonly platform: RatgdoPlatform;
   private readonly status: RatgdoStatus;
 
@@ -108,6 +108,7 @@ export class RatgdoAccessory {
     this.configureMqtt();
     this.configureAutomationDoorPositionDimmer();
     this.configureAutomationDoorSwitch();
+    this.configureAutomationKonnected();
     this.configureDoorOpenOccupancySensor();
     this.configureLight();
     this.configureAutomationLockoutSwitch();
@@ -148,7 +149,8 @@ export class RatgdoAccessory {
     this.accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.Manufacturer, "github.com/hjdhjd");
 
     // Update the model information for this device.
-    this.accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.Model, "Ratgdo");
+    this.accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.Model,
+      (this.device.variant === RatgdoVariant.KONNECTED) ? "Konnected" : "Ratgdo");
 
     // Update the serial number for this device.
     this.accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.SerialNumber, this.device.mac);
@@ -302,9 +304,6 @@ export class RatgdoAccessory {
 
     service.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.status.lock);
     service.updateCharacteristic(this.hap.Characteristic.LockTargetState, this.lockTargetStateBias(this.status.lock));
-
-    service.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => this.status.availability);
-    service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
 
     // Let HomeKit know that this is the primary service on this accessory.
     service.setPrimaryService(true);
@@ -525,6 +524,60 @@ export class RatgdoAccessory {
     return true;
   }
 
+  // Configure Konnected-specific buttons for automation purposes.
+  private configureAutomationKonnected(): boolean {
+
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.Switch, () => {
+
+      // We only enable this on Konnected devices when the user has enabled automation capabilities.
+      if((this.device.variant !== RatgdoVariant.KONNECTED) || (!this.hints.automationDimmer && !this.hints.automationSwitch)) {
+
+        return false;
+      }
+
+      return true;
+    }, RatgdoReservedNames.SWITCH_KONNECTED_PCW)) {
+
+      return false;
+    }
+
+    // Acquire the service.
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.Switch, this.name + " Pre Close Warning", RatgdoReservedNames.SWITCH_KONNECTED_PCW);
+
+    if(!service) {
+
+      this.log.error("Unable to add the Konnected pre-close warning automation switch.");
+
+      return false;
+    }
+
+    // Return the current state of the switch.
+    service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => false);
+
+    // Open or close the switch.
+    service.getCharacteristic(this.hap.Characteristic.On)?.onSet(async (value: CharacteristicValue) => {
+
+      // Send the command.
+      if(!(await this.command("konnected-pcw"))) {
+
+        // Something went wrong. Let's make sure we revert the switch to it's prior state.
+        setTimeout(() => service?.updateCharacteristic(this.hap.Characteristic.On, !value), 50);
+
+        return;
+      }
+
+      // Reset the switch state after the pre-close warning is complete.
+      setTimeout(() => service?.updateCharacteristic(this.hap.Characteristic.On, !value), 5000);
+    });
+
+    // Initialize the switch.
+    service.updateCharacteristic(this.hap.Characteristic.On, false);
+
+    // Nada right now.
+    return true;
+  }
+
   // Configure a switch to control the ability to lockout all wireless remotes for the garage door opener, if the feature exists.
   private configureAutomationLockoutSwitch(): boolean {
 
@@ -729,7 +782,6 @@ export class RatgdoAccessory {
         this.status.availability = payload === "online";
 
         // Update our availability.
-        garageDoorService?.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
         doorOccupancyService?.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
         motionOccupancyService?.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
         motionService?.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
@@ -1066,6 +1118,13 @@ export class RatgdoAccessory {
 
         break;
 
+      case "konnected-pcw":
+
+        endpoint = "button/pre-close_warning";
+        action = "press";
+
+        break;
+
       case "light":
 
         endpoint = (this.device.variant === RatgdoVariant.KONNECTED) ? "light/garage_light" : "light/light";
@@ -1291,14 +1350,7 @@ export class RatgdoAccessory {
   private get name(): string {
 
     // We use the garage door service as the natural proxy for the name.
-    let name = this.accessory.getService(this.hap.Service.GarageDoorOpener)?.getCharacteristic(this.hap.Characteristic.ConfiguredName).value as string;
-
-    if(name?.length) {
-
-      return name;
-    }
-
-    name = this.accessory.getService(this.hap.Service.GarageDoorOpener)?.getCharacteristic(this.hap.Characteristic.Name).value as string;
+    let name = this.accessory.getService(this.hap.Service.GarageDoorOpener)?.getCharacteristic(this.hap.Characteristic.Name).value as string;
 
     if(name?.length) {
 

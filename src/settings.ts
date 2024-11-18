@@ -2,7 +2,6 @@
  *
  * settings.ts: Settings and constants for homebridge-ratgdo.
  */
-import { RatgdoVariant } from "./ratgdo-types.js";
 
 // The platform the plugin creates.
 export const PLATFORM_NAME = "Ratgdo";
@@ -14,10 +13,10 @@ export const PLUGIN_NAME = "homebridge-ratgdo";
 export const RATGDO_AUTODISCOVERY_INTERVAL = 60;
 
 // mDNS TXT record project name associated with a Ratgdo device.
-export const RATGDO_AUTODISCOVERY_PROJECT_NAMES: string[] = [ RatgdoVariant.KONNECTED, RatgdoVariant.RATGDO ];
+export const RATGDO_AUTODISCOVERY_PROJECT_NAMES: RegExp[] = [ /^ratgdo\.esphome$/i, /^konnected.garage-door-gdov2.*$/i ];
 
 // mDNS service types associated with a Ratgdo device.
-export const RATGDO_AUTODISCOVERY_TYPES = [ "esphomelib", "konnected" ];
+export const RATGDO_AUTODISCOVERY_TYPES = [ "esphomelib" ];
 
 // Duration, in seconds, for a single heartbeat to ensure the Ratgdo doesn't autoreboot.
 export const RATGDO_HEARTBEAT_DURATION = 120;

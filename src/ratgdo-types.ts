@@ -19,6 +19,9 @@ export enum RatgdoReservedNames {
   // Manage our dimmer types.
   DIMMER_OPENER_AUTOMATION = "Dimmer.Opener.Automation",
 
+  // Konnected-related capabilities.
+  SWITCH_KONNECTED_PCW = "Konnected.PCW",
+
   // Manage our occupancy sensor types.
   OCCUPANCY_SENSOR_DOOR_OPEN = "OccupancySensor.DoorOpen",
   OCCUPANCY_SENSOR_MOTION = "OccupancySensor.Motion",
@@ -31,6 +34,6 @@ export enum RatgdoReservedNames {
 // Ratgdo device variants.
 export enum RatgdoVariant {
 
-  KONNECTED = "konnected.garage-door-gdov2-q",
-  RATGDO = "ratgdo.esphome"
+  KONNECTED = "konnected",
+  RATGDO = "ratgdo"
 }
