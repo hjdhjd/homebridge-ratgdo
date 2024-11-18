@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
-## 2.5.0 (2024-09-30)
+## 2.5.0 (2024-11-17)
   * Improvement: enhanced Konnected Ratgdo support. HBR will now recognize all Konnected Ratgdo variants, and if you enable any of the garage door opener feature options (door automation switch or dimmer) it will also enable a switch for Konnected's pre-close warning alarm that you can trigger within HBR.
   * Housekeeping.
 
