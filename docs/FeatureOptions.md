@@ -34,15 +34,28 @@ All feature options can be set at any scope level, or at multiple scope levels. 
 Feature options provide a rich mechanism for tailoring your `homebridge-ratgdo` experience. The reference below is divided into functional category groups:
 
  * [Device](#device): Device feature options.
+ * [Log](#log): Logging feature options.
  * [Opener](#opener): Opener feature options.
  * [Light](#light): Opener light feature options.
  * [Motion](#motion): Opener motion feature options.
+ * [Disco](#disco): Ratgdo (ESP32) Disco device-specific feature options.
+ * [Konnected](#konnected): Konnected device-specific feature options.
 
 #### <A NAME="device"></A>Device feature options.
 
 | Option                                           | Description
 |--------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 | `Device`                                         | Make this device available in HomeKit. **(default: enabled)**.
+
+#### <A NAME="log"></A>Logging feature options.
+
+| Option                                           | Description
+|--------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+| `Log.Opener`                                     | Log opener events in Homebridge. **(default: enabled)**.
+| `Log.Light`                                      | Log light events in Homebridge. **(default: enabled)**.
+| `Log.Motion`                                     | Log motion-related events in Homebridge. **(default: enabled)**.
+| `Log.Obstruction`                                | Log obstruction events in Homebridge. **(default: enabled)**.
+| `Log.VehiclePresence`                            | Log vehicle presence-related events in Homebridge. This is only valid on Ratgdo (ESP32) Disco openers. **(default: enabled)**.
 
 #### <A NAME="opener"></A>Opener feature options.
 
@@ -68,3 +81,21 @@ Feature options provide a rich mechanism for tailoring your `homebridge-ratgdo` 
 | `Motion`                                         | Make the motion sensor on the opener available in HomeKit. **(default: enabled)**.
 | `Motion.OccupancySensor`                         | Add an occupancy sensor accessory using motion sensor activity to determine occupancy. **(default: disabled)**.
 | `Motion.OccupancySensor.Duration<I>.Value</I>`   | Duration, in seconds, to wait without receiving a motion event to determine when occupancy is no longer detected. **(default: 300)**.
+
+#### <A NAME="disco"></A>Ratgdo (ESP32) Disco device-specific feature options.
+
+| Option                                           | Description
+|--------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+| `Disco.Battery`                                  | Show the state of the backup battery in HomeKit. This requires ensuring the Ratgdo (ESP32) Disco is connected directly to the backup battery. **(default: disabled)**.
+| `Disco.OccupancySensor.Vehicle.Presence`         | Add an occupancy sensor accessory for vehicle presence detection. **(default: disabled)**.
+| `Disco.ContactSensor.Vehicle.Arriving`           | Add a contact sensor accessory for vehicle arrival. **(default: disabled)**.
+| `Disco.ContactSensor.Vehicle.Leaving`            | Add a contact sensor accessory for vehicle departure. **(default: disabled)**.
+| `Disco.Switch.laser`                             | Add a switch accessory to control the park assistance laser feature. **(default: disabled)**.
+| `Disco.Switch.led`                               | Add a switch accessory to control the LED setting. **(default: disabled)**.
+
+#### <A NAME="konnected"></A>Konnected device-specific feature options.
+
+| Option                                           | Description
+|--------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+| `Konnected.Switch.PCW`                           | Add a switch accessory to control the pre-close warning feature on Konnected openers. This can be useful in automation scenarios. **(default: disabled)**.
+| `Konnected.Switch.Strobe`                        | Add a switch accessory to control the strobe setting on Konnected openers. **(default: disabled)**.

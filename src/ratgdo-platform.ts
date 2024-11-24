@@ -5,8 +5,8 @@
 import { API, APIEvent, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
 import { Bonjour, Service } from "bonjour-service";
 import { FeatureOptions, MqttClient, Nullable, validateName } from "homebridge-plugin-utils";
-import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_AUTODISCOVERY_INTERVAL, RATGDO_AUTODISCOVERY_PROJECT_NAMES, RATGDO_AUTODISCOVERY_TYPES, RATGDO_HEARTBEAT_DURATION,
-  RATGDO_HEARTBEAT_INTERVAL, RATGDO_MQTT_TOPIC } from "./settings.js";
+import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_AUTODISCOVERY_INTERVAL, RATGDO_AUTODISCOVERY_PROJECT_NAMES, RATGDO_AUTODISCOVERY_TYPES, RATGDO_EVENT_API_HEARTBEAT_DURATION,
+  RATGDO_HEARTBEAT_DURATION, RATGDO_HEARTBEAT_INTERVAL, RATGDO_MQTT_TOPIC } from "./settings.js";
 import { RatgdoOptions, featureOptionCategories, featureOptions } from "./ratgdo-options.js";
 import EventSource from "eventsource";
 import { RatgdoAccessory } from "./ratgdo-device.js";
@@ -20,7 +20,8 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   private readonly accessories: PlatformAccessory[];
   public readonly api: API;
   private discoveredDevices: { [index: string]: boolean };
-  private espHomeEvents: { [index: string]: EventSource };
+  private readonly espHomeEvents: { [index: string]: EventSource };
+  private readonly pingTimers: { [index: string]: NodeJS.Timeout };
   public featureOptions: FeatureOptions;
   public config: RatgdoOptions;
   public readonly configOptions: string[];
@@ -43,6 +44,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.log = log;
     this.log.debug = this.debug.bind(this);
     this.mqtt = null;
+    this.pingTimers = {};
 
     // We can't start without being configured.
     if(!config) {
@@ -68,6 +70,19 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
     // Fire up the Ratgdo API once Homebridge has loaded all the cached accessories it knows about and called configureAccessory() on each.
     api.on(APIEvent.DID_FINISH_LAUNCHING, () => this.configureRatgdo());
+
+    // Make sure we take ourselves offline when we shutdown.
+    api.on(APIEvent.SHUTDOWN, () => {
+
+      // Close our events connection.
+      Object.values(this.espHomeEvents).map(deviceEvents => deviceEvents.close());
+
+      // Clear any open ping timers.
+      Object.values(this.pingTimers).map(timer => clearTimeout(timer));
+
+      // Inform our accessories we're going offline.
+      Object.values(this.configuredDevices).map(device => device.updateState({ id: "availability", state: "offline" }));
+    });
   }
 
   // This gets called when homebridge restores cached accessories at startup. We intentionally avoid doing anything significant here, and save all that logic for device
@@ -111,17 +126,6 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       type: string
     }
 
-    // Define the EventSource state message type.
-    interface ESMessage {
-
-      current_operation?: string,
-      id: string,
-      name: string,
-      position?: number,
-      state: string,
-      value?: string
-    }
-
     // We're only interested in Ratgdo devices with valid IP addresses. Otherwise, we're done.
     if(!RATGDO_AUTODISCOVERY_PROJECT_NAMES.map(project => (service.txt as Record<string, string>).project_name.match(project)) || !service.addresses) {
 
@@ -155,6 +159,12 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       // Handle errors in the events API.
       this.espHomeEvents[mac].addEventListener("error", (payload: ESError) => {
 
+        // The eventsource library returns unknown network errors at times. We ignore them.
+        if(typeof payload.message === "undefined") {
+
+          return;
+        }
+
         const getErrorMessage = (payload: ESError): string => {
 
           const { message } = payload;
@@ -187,7 +197,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
             "unknown error.": "An unknown error on the Ratgdo controller has occurred. This will happen occasionally and can generally be ignored"
           };
 
-          return errorMessages[message] || errorMessage;
+          return errorMessages[message] ?? errorMessage;
         };
 
         ratgdoAccessory.log.error("%s.", getErrorMessage(payload));
@@ -196,7 +206,42 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       // Inform the user when we've successfully connected.
       this.espHomeEvents[mac].addEventListener("open", () => {
 
-        ratgdoAccessory.updateState("availability", "online");
+        ratgdoAccessory.updateState({ id: "availability", state: "online" });
+      });
+
+      // Inform the user about the availability of the events API.
+      this.espHomeEvents[mac].addEventListener("ping", () => {
+
+        if(this.pingTimers[mac]) {
+
+          clearTimeout(this.pingTimers[mac]);
+          delete this.pingTimers[mac];
+        }
+
+        ratgdoAccessory.updateState({ id: "availability", state: "online" });
+
+        this.pingTimers[mac] = setTimeout(() => ratgdoAccessory.updateState({ id: "availability", state: "offline" }), RATGDO_EVENT_API_HEARTBEAT_DURATION * 1000);
+      });
+
+      // Capture log updates from the controller.
+      this.espHomeEvents[mac].addEventListener("log", (message: MessageEvent<string>) => {
+
+        ratgdoAccessory.log.debug("Log event received: %s", message);
+
+        // Ratgdo occasionally sends empty status updates - we ignore them.
+        if(!message.data.length) {
+
+          return;
+        }
+
+        // Grab the battery state, when logged.
+        const batteryState = message.data.match(/\bBattery state=(.+?)\b/);
+
+        // We've got a battery state update, inform the Ratgdo.
+        if(batteryState) {
+
+          ratgdoAccessory.updateState({ id: "battery", state: batteryState[1] });
+        }
       });
 
       // Capture state updates from the controller.
@@ -204,7 +249,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
         let event;
 
-        ratgdoAccessory.log.debug("State event received: ", util.inspect(message.data, { sorted: true }));
+        ratgdoAccessory.log.debug("State event received: %s", util.inspect(message.data, { sorted: true }));
 
         // Ratgdo occasionally sends empty status updates - we ignore them.
         if(!message.data.length) {
@@ -214,7 +259,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
         try {
 
-          event = JSON.parse(message.data) as ESMessage;
+          event = JSON.parse(message.data);
         } catch(error) {
 
           ratgdoAccessory.log.error("Unable to parse state message: \"%s\". Invalid JSON.", message.data);
@@ -222,70 +267,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
           return;
         }
 
-        let state;
-
-        switch(event.id) {
-
-          case "binary_sensor-motion":
-
-            ratgdoAccessory.updateState("motion", (event.state === "OFF") ? "clear" : "detected");
-
-            break;
-
-          case "binary_sensor-obstruction":
-
-            ratgdoAccessory.updateState("obstruction", (event.state === "OFF") ? "clear" : "obstructed");
-
-            break;
-
-          case "cover-door":
-          case "cover-garage_door":
-
-            switch(event.current_operation) {
-
-              case "CLOSING":
-              case "OPENING":
-
-                state = event.current_operation.toLowerCase();
-
-                break;
-
-              case "IDLE":
-
-                // We're stopped, rather than open, if the door is in a position greater than 0.
-                state = ((event.state === "OPEN") && (event.position !== undefined) && (event.position > 0) && (event.position < 1)) ? "stopped" :
-                  event.state.toLowerCase();
-
-                break;
-
-              default:
-
-                ratgdoAccessory.log.error("Unknown door operation detected: %s.", event.current_operation);
-
-                return;
-            }
-
-            ratgdoAccessory.updateState("door", state, (event.position !== undefined) ? event.position * 100 : undefined);
-
-            break;
-
-          case "light-garage_light":
-          case "light-light":
-
-            ratgdoAccessory.updateState("light", event.state === "OFF" ? "off" : "on");
-
-            break;
-
-          case "lock-lock_remotes":
-
-            ratgdoAccessory.updateState("lock", event.state === "LOCKED" ? "locked" : "unlocked");
-
-            break;
-
-          default:
-
-            break;
-        }
+        ratgdoAccessory.updateState(event);
       });
 
       // Heartbeat the Ratgdo controller at regular intervals. We need to do this because the ESPHome firmware for Ratgdo has a failsafe that will autoreboot the
@@ -314,7 +296,6 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
         ratgdoAccessory.log.error("Ratgdo API error: %s", error.message);
       }
     }
-
   }
 
   // Configure a discovered garage door opener.

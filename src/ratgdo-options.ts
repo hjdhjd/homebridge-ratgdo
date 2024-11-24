@@ -21,7 +21,9 @@ export const featureOptionCategories = [
   { description: "Logging feature options.", name: "Log" },
   { description: "Opener feature options.", name: "Opener" },
   { description: "Opener light feature options.", name: "Light" },
-  { description: "Opener motion feature options.", name: "Motion" }
+  { description: "Opener motion feature options.", name: "Motion" },
+  { description: "Ratgdo (ESP32) Disco device-specific feature options.", name: "Disco" },
+  { description: "Konnected device-specific feature options.", name: "Konnected" }
 ];
 
 /* eslint-disable @stylistic/max-len */
@@ -32,6 +34,24 @@ export const featureOptions: { [index: string]: FeatureOptionEntry[] } = {
   "Device": [
 
     { default: true, description: "Make this device available in HomeKit.", name: "" }
+  ],
+
+  // Ratgdo ESP32 Disco options.
+  "Disco": [
+
+    { default: false, description: "Show the state of the backup battery in HomeKit. This requires ensuring the Ratgdo (ESP32) Disco is connected directly to the backup battery.", name: "Battery" },
+    { default: false, description: "Add an occupancy sensor accessory for vehicle presence detection.", name: "OccupancySensor.Vehicle.Presence" },
+    { default: false, description: "Add a contact sensor accessory for vehicle arrival.", name: "ContactSensor.Vehicle.Arriving" },
+    { default: false, description: "Add a contact sensor accessory for vehicle departure.", name: "ContactSensor.Vehicle.Leaving" },
+    { default: false, description: "Add a switch accessory to control the park assistance laser feature.", name: "Switch.laser" },
+    { default: false, description: "Add a switch accessory to control the LED setting.", name: "Switch.led" }
+  ],
+
+  // Konnected options.
+  "Konnected": [
+
+    { default: false, description: "Add a switch accessory to control the pre-close warning feature on Konnected openers. This can be useful in automation scenarios.", name: "Switch.PCW" },
+    { default: false, description: "Add a switch accessory to control the strobe setting on Konnected openers.", name: "Switch.Strobe" }
   ],
 
   // Light options.
@@ -46,7 +66,8 @@ export const featureOptions: { [index: string]: FeatureOptionEntry[] } = {
     { default: true, description: "Log opener events in Homebridge.", name: "Opener" },
     { default: true, description: "Log light events in Homebridge.", name: "Light" },
     { default: true, description: "Log motion-related events in Homebridge.", name: "Motion" },
-    { default: true, description: "Log obstruction events in Homebridge.", name: "Obstruction" }
+    { default: true, description: "Log obstruction events in Homebridge.", name: "Obstruction" },
+    { default: true, description: "Log vehicle presence-related events in Homebridge. This is only valid on Ratgdo (ESP32) Disco openers.", name: "VehiclePresence" }
   ],
 
   // Motion options.

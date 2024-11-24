@@ -10,13 +10,16 @@ export const PLATFORM_NAME = "Ratgdo";
 export const PLUGIN_NAME = "homebridge-ratgdo";
 
 // Interval, in seconds, to initiate mDNS discovery requests for new Ratgdo devices.
-export const RATGDO_AUTODISCOVERY_INTERVAL = 60;
+export const RATGDO_AUTODISCOVERY_INTERVAL = 10;
 
 // mDNS TXT record project name associated with a Ratgdo device.
 export const RATGDO_AUTODISCOVERY_PROJECT_NAMES: RegExp[] = [ /^ratgdo\.esphome$/i, /^konnected.garage-door-gdov2.*$/i ];
 
 // mDNS service types associated with a Ratgdo device.
 export const RATGDO_AUTODISCOVERY_TYPES = [ "esphomelib" ];
+
+// Duration, in seconds, to wait for a ping event from the ESPHome eventsource API. ESPHome defaults to sending a ping every 10 seconds.
+export const RATGDO_EVENT_API_HEARTBEAT_DURATION = 10 * 2;
 
 // Duration, in seconds, for a single heartbeat to ensure the Ratgdo doesn't autoreboot.
 export const RATGDO_HEARTBEAT_DURATION = 120;

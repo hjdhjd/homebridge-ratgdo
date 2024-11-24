@@ -55,11 +55,17 @@ The topics and messages that `homebridge-ratgdo` publishes are:
 |-----------------------|----------------------------------
 | `dooropenoccupancy`   | `true` when the garage door open indicator occupancy is detected. `false` when the garage door open indicator occupancy event is reset.
 | `garagedoor`          | `closed`, `closing`, `open`, `opening`, when garage door state changes are detected.
+| `laser`               | `true` when the Ratgdo (ESP32) Disco park assistance laser is activated. `false` otherwise.
+| `led`                 | `true` when the Ratgdo (ESP32) Disco LED is activated. `false` otherwise.
 | `light`               | `true` when the light has been activated. `false` when the light has been turned off.
 | `lock`                | `true` when the garage door opener remote lock has been activated. `false` when the garage door opener remote lock has been turned off.
 | `motion`              | `true` when motion is detected. `false` when the motion event is reset.
 | `obstruction`         | `true` when an obstruction in the garage door opener is detected. `false` when the obstruction event is reset.
 | `occupancy`           | `true` when occupancy is detected. `false` when the occupancy event is reset.
+| `strobe`              | `true` when the Konnected strobe is activated. `false` otherwise.
+| `vehiclearriving`     | `true` when Ratgdo (ESP32) Disco detects a vehicle is arriving. `false` otherwise.
+| `vehicleleaving`      | `true` when Ratgdo (ESP32) Disco detects a vehicle is leaving. `false` otherwise.
+| `vehiclepresence`     | `true` when Ratgdo (ESP32) Disco detects the presence of a vehicle. `false` otherwise.
 
 Messages are published to MQTT when an action occurs on a device that triggers the respective event, or when an MQTT message is received for one of the topics `homebridge-ratgdo` subscribes to.
 

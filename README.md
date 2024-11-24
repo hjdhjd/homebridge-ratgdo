@@ -33,7 +33,7 @@ In the interest of the community seeking a solution outside of myQ, I've develop
   * Ability to lock and unlock the garage door opener through the ability to lockout wireless remotes.
   * Read-only garage door opener support.
   * Automation switch and dimmer support, allowing you to set the garage door to any position.
-  * Support for Ratgdo variants like [Konnected blaQ](https://konnected.io/products/smart-garage-door-opener-blaq-myq-alternative).
+  * Support for **all** current Ratgdo-branded devices as well as for variants like [Konnected blaQ](https://konnected.io/products/smart-garage-door-opener-blaq-myq-alternative) that use ESPHome.
   * A rich webUI for configuration.
 
 ## Installation

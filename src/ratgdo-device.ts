@@ -11,19 +11,39 @@ import { RatgdoOptions } from "./ratgdo-options.js";
 import { RatgdoPlatform } from "./ratgdo-platform.js";
 import util from "node:util";
 
+// ESPHome EventSource state messages.
+interface EspHomeEvent {
+
+  current_operation?: string,
+  id: string,
+  name?: string,
+  position?: number,
+  state: string,
+  value?: string
+}
+
 // Device-specific options and settings.
 interface RatgdoHints {
 
   automationDimmer: boolean,
   automationSwitch: boolean,
+  discoBattery: boolean,
+  discoLaserSwitch: boolean,
+  discoLedSwitch: boolean,
+  discoVehicleArriving: boolean,
+  discoVehicleLeaving: boolean,
+  discoVehiclePresence: boolean,
   doorOpenOccupancyDuration: number,
   doorOpenOccupancySensor: boolean,
+  konnectedPcwSwitch: boolean,
+  konnectedStrobeSwitch: boolean,
   light: boolean,
   lockoutSwitch: boolean,
   logLight: boolean,
   logMotion: boolean,
   logObstruction: boolean,
   logOpener: boolean,
+  logVehiclePresence: boolean,
   motionOccupancyDuration: number,
   motionOccupancySensor: boolean,
   motionSensor: boolean,
@@ -35,8 +55,15 @@ interface RatgdoHints {
 interface RatgdoStatus {
 
   availability: boolean,
+  discoLaser: boolean,
+  discoLed: boolean,
+  discoBatteryState: CharacteristicValue,
+  discoVehicleArriving: boolean,
+  discoVehicleLeaving: boolean,
+  discoVehiclePresence: boolean,
   door: CharacteristicValue,
   doorPosition: number,
+  konnectedStrobe: boolean,
   light: boolean,
   lock: CharacteristicValue,
   motion: boolean,
@@ -81,8 +108,15 @@ export class RatgdoAccessory {
 
     // Initialize our internal state.
     this.status.availability = false;
+    this.status.discoLaser = false;
+    this.status.discoLed = false;
+    this.status.discoBatteryState = false;
+    this.status.discoVehicleArriving = false;
+    this.status.discoVehicleLeaving = false;
+    this.status.discoVehiclePresence = false;
     this.status.door = this.hap.Characteristic.CurrentDoorState.CLOSED;
     this.status.doorPosition = 0;
+    this.status.konnectedStrobe = false;
     this.status.light = false;
     this.status.lock = this.hap.Characteristic.LockCurrentState.UNSECURED;
     this.status.motion = false;
@@ -108,12 +142,23 @@ export class RatgdoAccessory {
     this.configureMqtt();
     this.configureAutomationDoorPositionDimmer();
     this.configureAutomationDoorSwitch();
-    this.configureAutomationKonnected();
+    this.configureAutomationLockoutSwitch();
     this.configureDoorOpenOccupancySensor();
     this.configureLight();
-    this.configureAutomationLockoutSwitch();
     this.configureMotionSensor();
     this.configureMotionOccupancySensor();
+
+    // Configure Ratgdo (ESP32) Disco-specific features.
+    this.configureDiscoBattery();
+    this.configureDiscoLaserSwitch();
+    this.configureDiscoLedSwitch();
+    this.configureDiscoVehicleArrivingContactSensor();
+    this.configureDiscoVehicleLeavingContactSensor();
+    this.configureDiscoVehiclePresenceOccupancySensor();
+
+    // Configure Konnected-specific features.
+    this.configureKonnectedPcwSwitch();
+    this.configureKonnectedStrobeSwitch();
   }
 
   // Configure device-specific settings.
@@ -121,13 +166,22 @@ export class RatgdoAccessory {
 
     this.hints.automationDimmer = this.hasFeature("Opener.Dimmer");
     this.hints.automationSwitch = this.hasFeature("Opener.Switch");
+    this.hints.discoBattery = this.hasFeature("Disco.Battery");
+    this.hints.discoLaserSwitch = this.hasFeature("Disco.Switch.Laser");
+    this.hints.discoLedSwitch = this.hasFeature("Disco.Switch.Led");
+    this.hints.discoVehicleArriving = this.hasFeature("Disco.ContactSensor.Vehicle.Arriving");
+    this.hints.discoVehicleLeaving = this.hasFeature("Disco.ContactSensor.Vehicle.Leaving");
+    this.hints.discoVehiclePresence = this.hasFeature("Disco.OccupancySensor.Vehicle.Presence");
     this.hints.doorOpenOccupancySensor = this.hasFeature("Opener.OccupancySensor");
     this.hints.doorOpenOccupancyDuration = this.platform.featureOptions.getInteger("Opener.OccupancySensor.Duration", this.device.mac) ?? RATGDO_OCCUPANCY_DURATION;
+    this.hints.konnectedPcwSwitch = this.hasFeature("Konnected.Switch.Pcw");
+    this.hints.konnectedStrobeSwitch = this.hasFeature("Konnected.Switch.Strobe");
     this.hints.light = this.hasFeature("Light");
     this.hints.logLight = this.hasFeature("Log.Light");
     this.hints.logMotion = this.hasFeature("Log.Motion");
     this.hints.logObstruction = this.hasFeature("Log.Obstruction");
     this.hints.logOpener = this.hasFeature("Log.Opener");
+    this.hints.logVehiclePresence = this.hasFeature("Log.VehiclePresence");
     this.hints.lockoutSwitch = this.hasFeature("Opener.Switch.RemoteLockout");
     this.hints.motionOccupancySensor = this.hasFeature("Motion.OccupancySensor");
     this.hints.motionOccupancyDuration = this.platform.featureOptions.getInteger("Motion.OccupancySensor.Duration", this.device.mac) ?? RATGDO_OCCUPANCY_DURATION;
@@ -524,14 +578,254 @@ export class RatgdoAccessory {
     return true;
   }
 
-  // Configure Konnected-specific buttons for automation purposes.
-  private configureAutomationKonnected(): boolean {
+  // Configure the Ratgdo (ESP32) Disco-specific backup battery service.
+  private configureDiscoBattery(): boolean {
+
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.Battery, () => {
+
+      // We only enable this on Ratgdo devices when the user has enabled this capability.
+      if((this.device.variant !== RatgdoVariant.RATGDO) || !this.hints.discoBattery) {
+
+        return false;
+      }
+
+      return true;
+    })) {
+
+      return false;
+    }
+
+    // Acquire the service.
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.Battery, this.name);
+
+    if(!service) {
+
+      this.log.error("Unable to add the Ratgdo (ESP32) Disco backup battery status.");
+
+      return false;
+    }
+
+    // Return the current state of the charging state.
+    service.getCharacteristic(this.hap.Characteristic.ChargingState)?.onGet(() => this.status.discoBatteryState);
+
+    // Initialize the charging state.
+    service.updateCharacteristic(this.hap.Characteristic.ChargingState, this.status.discoBatteryState);
+
+    this.log.info("Enabling the Ratgdo (ESP32) Disco backup battery status.");
+
+    return true;
+  }
+
+  // Configure the Ratgdo (ESP32) Disco-specific parking assistance laser switch.
+  private configureDiscoLaserSwitch(): boolean {
 
     // Validate whether we should have this service enabled.
     if(!validService(this.accessory, this.hap.Service.Switch, () => {
 
-      // We only enable this on Konnected devices when the user has enabled automation capabilities.
-      if((this.device.variant !== RatgdoVariant.KONNECTED) || (!this.hints.automationDimmer && !this.hints.automationSwitch)) {
+      // We only enable this on Ratgdo devices when the user has enabled this capability.
+      if((this.device.variant !== RatgdoVariant.RATGDO) || !this.hints.discoLaserSwitch) {
+
+        return false;
+      }
+
+      return true;
+    }, RatgdoReservedNames.SWITCH_DISCO_LASER)) {
+
+      return false;
+    }
+
+    // Acquire the service.
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.Switch, this.name + " Laser", RatgdoReservedNames.SWITCH_DISCO_LASER);
+
+    if(!service) {
+
+      this.log.error("Unable to add the Ratgdo (ESP32) Disco laser switch.");
+
+      return false;
+    }
+
+    // Return the current state of the switch.
+    service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.status.discoLaser);
+
+    // Open or close the switch.
+    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => void this.command("disco-laser", value === true ? "on" : "off"));
+
+    // Initialize the switch.
+    service.updateCharacteristic(this.hap.Characteristic.On, this.status.discoLaser);
+
+    this.log.info("Enabling the Ratgdo (ESP32) Disco parking assistance laser switch.");
+
+    return true;
+  }
+
+  // Configure the Ratgdo (ESP32) Disco-specific LED switch.
+  private configureDiscoLedSwitch(): boolean {
+
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.Switch, () => {
+
+      // We only enable this on Ratgdo devices when the user has enabled this capability.
+      if((this.device.variant !== RatgdoVariant.RATGDO) || !this.hints.discoLedSwitch) {
+
+        return false;
+      }
+
+      return true;
+    }, RatgdoReservedNames.SWITCH_DISCO_LED)) {
+
+      return false;
+    }
+
+    // Acquire the service.
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.Switch, this.name + " LED", RatgdoReservedNames.SWITCH_DISCO_LED);
+
+    if(!service) {
+
+      this.log.error("Unable to add the Ratgdo (ESP32) Disco LED switch.");
+
+      return false;
+    }
+
+    // Return the current state of the switch.
+    service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.status.discoLed);
+
+    // Open or close the switch.
+    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => void this.command("disco-led", value === true ? "on" : "off"));
+
+    // Initialize the switch.
+    service.updateCharacteristic(this.hap.Characteristic.On, this.status.discoLed);
+
+    this.log.info("Enabling the Ratgdo (ESP32) Disco LED switch.");
+
+    return true;
+  }
+
+  // Configure the vehicle arriving contact sensor for HomeKit.
+  private configureDiscoVehicleArrivingContactSensor(): boolean {
+
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.ContactSensor, () => {
+
+      // We only enable this on Ratgdo devices when the user has enabled this capability.
+      if((this.device.variant !== RatgdoVariant.RATGDO) || !this.hints.discoVehicleArriving) {
+
+        return false;
+      }
+
+      return true;
+    }, RatgdoReservedNames.CONTACT_DISCO_VEHICLE_ARRIVING)) {
+
+      return false;
+    }
+
+    // Acquire the service.
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.ContactSensor, this.name + " Vehicle Arriving",
+      RatgdoReservedNames.CONTACT_DISCO_VEHICLE_ARRIVING);
+
+    if(!service) {
+
+      this.log.error("Unable to add the vehicle arriving contact sensor.");
+
+      return false;
+    }
+
+    // Initialize the occupancy sensor.
+    service.updateCharacteristic(this.hap.Characteristic.ContactSensorState, false);
+    service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
+    service.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => this.status.availability);
+
+    this.log.info("Enabling the Ratgdo (ESP32) Disco vehicle arriving contact sensor.");
+
+    return true;
+  }
+
+  // Configure the vehicle leaving contact sensor for HomeKit.
+  private configureDiscoVehicleLeavingContactSensor(): boolean {
+
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.ContactSensor, () => {
+
+      // We only enable this on Ratgdo devices when the user has enabled this capability.
+      if((this.device.variant !== RatgdoVariant.RATGDO) || !this.hints.discoVehicleLeaving) {
+
+        return false;
+      }
+
+      return true;
+    }, RatgdoReservedNames.CONTACT_DISCO_VEHICLE_LEAVING)) {
+
+      return false;
+    }
+
+    // Acquire the service.
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.ContactSensor, this.name + " Vehicle Leaving",
+      RatgdoReservedNames.CONTACT_DISCO_VEHICLE_LEAVING);
+
+    if(!service) {
+
+      this.log.error("Unable to add the vehicle leaving contact sensor.");
+
+      return false;
+    }
+
+    // Initialize the occupancy sensor.
+    service.updateCharacteristic(this.hap.Characteristic.ContactSensorState, false);
+    service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
+    service.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => this.status.availability);
+
+    this.log.info("Enabling the Ratgdo (ESP32) Disco vehicle leaving contact sensor.");
+
+    return true;
+  }
+
+  // Configure the vehicle presence occupancy sensor for HomeKit.
+  private configureDiscoVehiclePresenceOccupancySensor(): boolean {
+
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.OccupancySensor, () => {
+
+      // We only enable this on Ratgdo devices when the user has enabled this capability.
+      if((this.device.variant !== RatgdoVariant.RATGDO) || !this.hints.discoVehiclePresence) {
+
+        return false;
+      }
+
+      return true;
+    }, RatgdoReservedNames.OCCUPANCY_DISCO_VEHICLE_PRESENCE)) {
+
+      return false;
+    }
+
+    // Acquire the service.
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.OccupancySensor, this.name + " Vehicle Presence",
+      RatgdoReservedNames.OCCUPANCY_DISCO_VEHICLE_PRESENCE);
+
+    if(!service) {
+
+      this.log.error("Unable to add the vehicle presence occupancy sensor.");
+
+      return false;
+    }
+
+    // Initialize the occupancy sensor.
+    service.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, false);
+    service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
+    service.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => this.status.availability);
+
+    this.log.info("Enabling the Ratgdo (ESP32) Disco vehicle presence occupancy sensor.");
+
+    return true;
+  }
+
+  // Configure the Konnected-specific pre-close warning switch.
+  private configureKonnectedPcwSwitch(): boolean {
+
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.Switch, () => {
+
+      // We only enable this on Konnected devices when the user has enabled this capability.
+      if((this.device.variant !== RatgdoVariant.KONNECTED) || !this.hints.konnectedPcwSwitch) {
 
         return false;
       }
@@ -547,7 +841,7 @@ export class RatgdoAccessory {
 
     if(!service) {
 
-      this.log.error("Unable to add the Konnected pre-close warning automation switch.");
+      this.log.error("Unable to add the Konnected pre-close warning switch.");
 
       return false;
     }
@@ -558,23 +852,67 @@ export class RatgdoAccessory {
     // Open or close the switch.
     service.getCharacteristic(this.hap.Characteristic.On)?.onSet(async (value: CharacteristicValue) => {
 
+      // Default to reseting our switch state after the pre-close warning has completed playing.
+      let resetTimer = 5000;
+
       // Send the command.
       if(!(await this.command("konnected-pcw"))) {
 
-        // Something went wrong. Let's make sure we revert the switch to it's prior state.
-        setTimeout(() => service?.updateCharacteristic(this.hap.Characteristic.On, !value), 50);
-
-        return;
+        // Something went wrong. Let's make sure we revert the switch to it's prior state immediately.
+        resetTimer = 50;
       }
 
-      // Reset the switch state after the pre-close warning is complete.
-      setTimeout(() => service?.updateCharacteristic(this.hap.Characteristic.On, !value), 5000);
+      // Reset the switch state.
+      setTimeout(() => service?.updateCharacteristic(this.hap.Characteristic.On, !value), resetTimer);
     });
 
     // Initialize the switch.
     service.updateCharacteristic(this.hap.Characteristic.On, false);
 
-    // Nada right now.
+    this.log.info("Enabling the Konnected pre-close warning switch.");
+
+    return true;
+  }
+
+  // Configure the Konnected-specific strobe switch.
+  private configureKonnectedStrobeSwitch(): boolean {
+
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.Switch, () => {
+
+      // We only enable this on Konnected devices when the user has enabled this capability.
+      if((this.device.variant !== RatgdoVariant.KONNECTED) || !this.hints.konnectedStrobeSwitch) {
+
+        return false;
+      }
+
+      return true;
+    }, RatgdoReservedNames.SWITCH_KONNECTED_STROBE)) {
+
+      return false;
+    }
+
+    // Acquire the service.
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.Switch, this.name + " Strobe", RatgdoReservedNames.SWITCH_KONNECTED_STROBE);
+
+    if(!service) {
+
+      this.log.error("Unable to add the Konnected strobe switch.");
+
+      return false;
+    }
+
+    // Return the current state of the switch.
+    service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.status.konnectedStrobe);
+
+    // Open or close the switch.
+    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => void this.command("konnected-strobe", value === true ? "on" : "off"));
+
+    // Initialize the switch.
+    service.updateCharacteristic(this.hap.Characteristic.On, this.status.konnectedStrobe);
+
+    this.log.info("Enabling the Konnected strobe switch.");
+
     return true;
   }
 
@@ -763,200 +1101,77 @@ export class RatgdoAccessory {
   }
 
   // Update the state of the accessory.
-  public updateState(event: string, payload: string, position?: number): void {
+  public updateState(event: EspHomeEvent): void {
 
     const camelCase = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1);
     const dimmerService = this.accessory.getServiceById(this.hap.Service.Lightbulb, RatgdoReservedNames.DIMMER_OPENER_AUTOMATION);
+    const discoBatteryService = this.accessory.getService(this.hap.Service.Battery);
+    const discoLaserSwitchService = this.accessory.getServiceById(this.hap.Service.Switch, RatgdoReservedNames.SWITCH_DISCO_LASER);
+    const discoLedSwitchService = this.accessory.getServiceById(this.hap.Service.Switch, RatgdoReservedNames.SWITCH_DISCO_LED);
+    const discoVehicleArrivingContactService = this.accessory.getServiceById(this.hap.Service.ContactSensor, RatgdoReservedNames.CONTACT_DISCO_VEHICLE_ARRIVING);
+    const discoVehicleLeavingContactService = this.accessory.getServiceById(this.hap.Service.ContactSensor, RatgdoReservedNames.CONTACT_DISCO_VEHICLE_LEAVING);
+    const discoVehiclePresenceOccupancyService = this.accessory.getServiceById(this.hap.Service.OccupancySensor, RatgdoReservedNames.OCCUPANCY_DISCO_VEHICLE_PRESENCE);
     const doorOccupancyService = this.accessory.getServiceById(this.hap.Service.OccupancySensor, RatgdoReservedNames.OCCUPANCY_SENSOR_DOOR_OPEN);
     const garageDoorService = this.accessory.getService(this.hap.Service.GarageDoorOpener);
+    const konnectedStrobeSwitchService = this.accessory.getServiceById(this.hap.Service.Switch, RatgdoReservedNames.SWITCH_KONNECTED_STROBE);
     const lightBulbService = this.accessory.getService(this.hap.Service.Lightbulb);
     const lockoutService = this.accessory.getServiceById(this.hap.Service.Switch, RatgdoReservedNames.SWITCH_LOCKOUT);
     const motionOccupancyService = this.accessory.getServiceById(this.hap.Service.OccupancySensor, RatgdoReservedNames.OCCUPANCY_SENSOR_MOTION);
     const motionService = this.accessory.getService(this.hap.Service.MotionSensor);
     const switchService = this.accessory.getServiceById(this.hap.Service.Switch, RatgdoReservedNames.SWITCH_OPENER_AUTOMATION);
 
-    switch(event) {
+    switch(event.id) {
 
       case "availability":
 
-        this.status.availability = payload === "online";
-
         // Update our availability.
-        doorOccupancyService?.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
-        motionOccupancyService?.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
-        motionService?.updateCharacteristic(this.hap.Characteristic.StatusActive, this.status.availability);
+        discoVehicleArrivingContactService?.updateCharacteristic(this.hap.Characteristic.StatusActive, event.state === "online");
+        discoVehicleLeavingContactService?.updateCharacteristic(this.hap.Characteristic.StatusActive, event.state === "online");
+        discoVehiclePresenceOccupancyService?.updateCharacteristic(this.hap.Characteristic.StatusActive, event.state === "online");
+        doorOccupancyService?.updateCharacteristic(this.hap.Characteristic.StatusActive, event.state === "online");
+        motionOccupancyService?.updateCharacteristic(this.hap.Characteristic.StatusActive, event.state === "online");
+        motionService?.updateCharacteristic(this.hap.Characteristic.StatusActive, event.state === "online");
 
-        // Inform the user:
-        this.log.info("Ratgdo %s.", this.status.availability ? "connected" : "disconnected");
+        // Inform the user if our availability state has changed.
+        if(this.status.availability !== (event.state === "online")) {
+
+          this.status.availability = event.state === "online";
+          this.log.info("Ratgdo %s.", this.status.availability ? "connected" : "disconnected");
+        }
 
         break;
 
-      case "door":
+      case "battery":
 
-        // Update our door position automation dimmer.
-        if(position !== undefined) {
+        switch(event.state) {
 
-          this.status.doorPosition = position;
+          case "CHARGING":
 
-          dimmerService?.updateCharacteristic(this.hap.Characteristic.Brightness, this.status.doorPosition);
-          dimmerService?.updateCharacteristic(this.hap.Characteristic.On, this.status.doorPosition > 0);
-          this.log.debug("Door state: %s% open.", this.status.doorPosition.toFixed(0));
-        }
-
-        // If we're already in the state we're updating to, we're done.
-        if(this.translateCurrentDoorState(this.status.door) === payload) {
-
-          break;
-        }
-
-        switch(payload) {
-
-          case "closed":
-
-            this.status.door = this.hap.Characteristic.CurrentDoorState.CLOSED;
+            this.status.discoBatteryState = this.hap.Characteristic.ChargingState.CHARGING;
 
             break;
 
-          case "closing":
+          case "FULL":
 
-            this.status.door = this.hap.Characteristic.CurrentDoorState.CLOSING;
-
-            break;
-
-          case "open":
-
-            this.status.door = this.hap.Characteristic.CurrentDoorState.OPEN;
-
-            // Trigger our occupancy timer, if configured to do so and we don't have one yet.
-            if(this.hints.doorOpenOccupancySensor && !this.doorOccupancyTimer) {
-
-              this.doorOccupancyTimer = setTimeout(() => {
-
-                doorOccupancyService?.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, true);
-
-                if(this.hints.logMotion) {
-
-                  this.log.info("Garage door open occupancy detected.");
-                }
-
-                // Publish to MQTT, if the user has configured it.
-                this.platform.mqtt?.publish(this.device.mac, "dooropenoccupancy", "true");
-              }, this.hints.doorOpenOccupancyDuration * 1000);
-            }
-
-            break;
-
-          case "opening":
-
-            this.status.door = this.hap.Characteristic.CurrentDoorState.OPENING;
-
-            break;
-
-          case "stopped":
-
-            this.status.door = this.hap.Characteristic.CurrentDoorState.STOPPED;
+            this.status.discoBatteryState = this.hap.Characteristic.ChargingState.NOT_CHARGING;
 
             break;
 
           default:
 
-            this.status.door = this.hap.Characteristic.CurrentDoorState.CLOSED;
+            this.log.error("Unknown battery state received: %s", event.state);
 
-            break;
+            return;
         }
 
-        // We are only going to update the target state if our current state is NOT stopped. If we are stopped, we are at the target state by definition. We also want to
-        // ensure we update TargetDoorState before updating CurrentDoorState in order to work around some notification quirks HomeKit occasionally has.
-        if(this.status.door !== this.hap.Characteristic.CurrentDoorState.STOPPED) {
-
-          garageDoorService?.updateCharacteristic(this.hap.Characteristic.TargetDoorState, this.doorTargetStateBias(this.status.door));
-        }
-
-        garageDoorService?.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.status.door);
-
-        // Update our automation switch, if configured.
-        switchService?.updateCharacteristic(this.hap.Characteristic.On, this.doorTargetStateBias(this.status.door) === this.hap.Characteristic.TargetDoorState.OPEN);
-
-        // Inform the user:
-        if(this.hints.logOpener) {
-
-          this.log.info("%s.", camelCase(payload));
-        }
-
-        // If we have an open occupancy sensor configured and our door state is anything other than open, clear our occupancy state.
-        if(this.hints.doorOpenOccupancySensor && this.doorOccupancyTimer && (payload !== "open")) {
-
-          clearTimeout(this.doorOccupancyTimer);
-          this.doorOccupancyTimer = null;
-
-          if(doorOccupancyService?.getCharacteristic(this.hap.Characteristic.OccupancyDetected).value as boolean) {
-
-            doorOccupancyService?.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, false);
-
-            if(this.hints.logMotion) {
-
-              this.log.info("Garage door open occupancy no longer detected.");
-            }
-
-            // Publish to MQTT, if the user has configured it.
-            this.platform.mqtt?.publish(this.device.mac, "dooropenoccupancy", "false");
-          }
-        }
-
-        // Publish to MQTT, if the user has configured it.
-        this.platform.mqtt?.publish(this.device.mac, "garagedoor", payload);
+        discoBatteryService?.updateCharacteristic(this.hap.Characteristic.ChargingState, this.status.discoBatteryState);
 
         break;
 
-      case "light":
-
-        // Only act if we're not already at the state we're updating to.
-        if(this.status.light !== (payload === "on")) {
-
-          this.status.light = payload === "on";
-          lightBulbService?.updateCharacteristic(this.hap.Characteristic.On, this.status.light);
-
-          // Inform the user:
-          if(this.hints.logLight) {
-
-            this.log.info("Light %s.", payload);
-          }
-
-          // Publish to MQTT, if the user has configured it.
-          this.platform.mqtt?.publish(this.device.mac, "light", this.status.light.toString());
-        }
-
-        break;
-
-      case "lock":
-
-        // If we're already in the state we're updating to, we're done.
-        if(this.status.lock === (payload === "locked" ? this.hap.Characteristic.LockCurrentState.SECURED : this.hap.Characteristic.LockCurrentState.UNSECURED)) {
-
-          break;
-        }
-
-        // Determine our lock state.
-        this.status.lock = payload === "locked" ? this.hap.Characteristic.LockCurrentState.SECURED : this.hap.Characteristic.LockCurrentState.UNSECURED;
-
-        // Update our lock state.
-        garageDoorService?.updateCharacteristic(this.hap.Characteristic.LockTargetState, payload === "locked" ?
-          this.hap.Characteristic.LockTargetState.SECURED : this.hap.Characteristic.LockTargetState.UNSECURED);
-        garageDoorService?.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.status.lock);
-        lockoutService?.updateCharacteristic(this.hap.Characteristic.On, this.status.lock === this.hap.Characteristic.LockCurrentState.SECURED);
-
-        // Inform the user:
-        this.log.info("Wireless remotes are %s.", payload === "locked" ? "locked out" : "permitted");
-
-        // Publish to MQTT, if the user has configured it.
-        this.platform.mqtt?.publish(this.device.mac, "lock", this.status.lock.toString());
-
-        break;
-
-      case "motion":
+      case "binary_sensor-motion":
 
         // We only want motion detected events. We timeout the motion event on our own to allow for automations and a more holistic user experience.
-        if(payload !== "detected") {
+        if(event.state !== "ON") {
 
           break;
         }
@@ -1042,14 +1257,14 @@ export class RatgdoAccessory {
 
         break;
 
-      case "obstruction":
+      case "binary_sensor-obstruction":
 
-        garageDoorService?.updateCharacteristic(this.hap.Characteristic.ObstructionDetected, payload === "obstructed");
+        garageDoorService?.updateCharacteristic(this.hap.Characteristic.ObstructionDetected, event.state === "ON");
 
         // Only act if we're not already at the state we're updating to.
-        if(this.status.obstruction !== (payload === "obstructed")) {
+        if(this.status.obstruction !== (event.state === "ON")) {
 
-          this.status.obstruction = payload === "obstructed";
+          this.status.obstruction = event.state === "ON";
 
           if(this.hints.logObstruction) {
 
@@ -1058,6 +1273,305 @@ export class RatgdoAccessory {
 
           // Publish to MQTT, if the user has configured it.
           this.platform.mqtt?.publish(this.device.mac, "obstruction", this.status.obstruction.toString());
+        }
+
+        break;
+
+      case "binary_sensor-vehicle_arriving":
+
+        discoVehicleArrivingContactService?.updateCharacteristic(this.hap.Characteristic.ContactSensorState, event.state === "ON");
+
+        // Only act if we're not already at the state we're updating to.
+        if(this.status.discoVehicleArriving !== (event.state === "ON")) {
+
+          this.status.discoVehicleArriving = event.state === "ON";
+
+          if(this.hints.logVehiclePresence) {
+
+            this.log.info("Vehicle arriving %sdetected.", this.status.discoVehicleArriving ? "" : "no longer ");
+          }
+
+          // Publish to MQTT, if the user has configured it.
+          this.platform.mqtt?.publish(this.device.mac, "vehiclearriving", this.status.discoVehicleArriving.toString());
+        }
+
+        break;
+
+      case "binary_sensor-vehicle_detected":
+
+        discoVehiclePresenceOccupancyService?.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, event.state === "ON");
+
+        // Only act if we're not already at the state we're updating to.
+        if(this.status.discoVehiclePresence !== (event.state === "ON")) {
+
+          this.status.discoVehiclePresence = event.state === "ON";
+
+          if(this.hints.logVehiclePresence) {
+
+            this.log.info("Vehicle %sdetected.", this.status.discoVehiclePresence ? "" : "no longer ");
+          }
+
+          // Publish to MQTT, if the user has configured it.
+          this.platform.mqtt?.publish(this.device.mac, "vehiclepresence", this.status.discoVehiclePresence.toString());
+        }
+
+        break;
+
+      case "binary_sensor-vehicle_leaving":
+
+        discoVehicleLeavingContactService?.updateCharacteristic(this.hap.Characteristic.ContactSensorState, event.state === "ON");
+
+        // Only act if we're not already at the state we're updating to.
+        if(this.status.discoVehicleLeaving !== (event.state === "ON")) {
+
+          this.status.discoVehicleLeaving = event.state === "ON";
+
+          if(this.hints.logVehiclePresence) {
+
+            this.log.info("Vehicle leaving %sdetected.", this.status.discoVehicleLeaving ? "" : "no longer ");
+          }
+
+          // Publish to MQTT, if the user has configured it.
+          this.platform.mqtt?.publish(this.device.mac, "vehicleleaving", this.status.discoVehicleLeaving.toString());
+        }
+
+        break;
+
+      case "cover-door":
+      case "cover-garage_door":
+
+        // Determine what action the opener is currently executing.
+        switch(event.current_operation) {
+
+          case "CLOSING":
+          case "OPENING":
+
+            // eslint-disable-next-line camelcase
+            event.current_operation = event.current_operation.toLowerCase();
+
+            break;
+
+          case "IDLE":
+
+            // We're in a stopped rather than open state if the door is in a position greater than 0.
+            // eslint-disable-next-line camelcase
+            event.current_operation = ((event.state === "OPEN") && (event.position !== undefined) && (event.position > 0) && (event.position < 1)) ? "stopped" :
+              event.state.toLowerCase();
+
+            break;
+
+          default:
+
+            this.log.error("Unknown door operation detected: %s.", event.current_operation);
+
+            return;
+        }
+
+        // Update our door position automation dimmer.
+        if(event.position !== undefined) {
+
+          this.status.doorPosition = event.position * 100;
+
+          dimmerService?.updateCharacteristic(this.hap.Characteristic.Brightness, this.status.doorPosition);
+          dimmerService?.updateCharacteristic(this.hap.Characteristic.On, this.status.doorPosition > 0);
+          this.log.debug("Door state: %s% open.", this.status.doorPosition.toFixed(0));
+        }
+
+        // If we're already in the state we're updating to, we're done.
+        if(this.translateCurrentDoorState(this.status.door) === event.current_operation) {
+
+          break;
+        }
+
+        switch(event.current_operation) {
+
+          case "closed":
+
+            this.status.door = this.hap.Characteristic.CurrentDoorState.CLOSED;
+
+            break;
+
+          case "closing":
+
+            this.status.door = this.hap.Characteristic.CurrentDoorState.CLOSING;
+
+            break;
+
+          case "open":
+
+            this.status.door = this.hap.Characteristic.CurrentDoorState.OPEN;
+
+            // Trigger our occupancy timer, if configured to do so and we don't have one yet.
+            if(this.hints.doorOpenOccupancySensor && !this.doorOccupancyTimer) {
+
+              this.doorOccupancyTimer = setTimeout(() => {
+
+                doorOccupancyService?.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, true);
+
+                if(this.hints.logMotion) {
+
+                  this.log.info("Garage door open occupancy detected.");
+                }
+
+                // Publish to MQTT, if the user has configured it.
+                this.platform.mqtt?.publish(this.device.mac, "dooropenoccupancy", "true");
+              }, this.hints.doorOpenOccupancyDuration * 1000);
+            }
+
+            break;
+
+          case "opening":
+
+            this.status.door = this.hap.Characteristic.CurrentDoorState.OPENING;
+
+            break;
+
+          case "stopped":
+
+            this.status.door = this.hap.Characteristic.CurrentDoorState.STOPPED;
+
+            break;
+
+          default:
+
+            this.status.door = this.hap.Characteristic.CurrentDoorState.CLOSED;
+
+            break;
+        }
+
+        // We are only going to update the target state if our current state is NOT stopped. If we are stopped, we are at the target state by definition. We also want to
+        // ensure we update TargetDoorState before updating CurrentDoorState in order to work around some notification quirks HomeKit occasionally has.
+        if(this.status.door !== this.hap.Characteristic.CurrentDoorState.STOPPED) {
+
+          garageDoorService?.updateCharacteristic(this.hap.Characteristic.TargetDoorState, this.doorTargetStateBias(this.status.door));
+        }
+
+        garageDoorService?.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.status.door);
+
+        // Update our automation switch, if configured.
+        switchService?.updateCharacteristic(this.hap.Characteristic.On, this.doorTargetStateBias(this.status.door) === this.hap.Characteristic.TargetDoorState.OPEN);
+
+        // Inform the user:
+        if(this.hints.logOpener) {
+
+          this.log.info("%s.", camelCase(this.translateCurrentDoorState(this.status.door)));
+        }
+
+        // If we have an open occupancy sensor configured and our door state is anything other than open, clear our occupancy state.
+        if(this.hints.doorOpenOccupancySensor && this.doorOccupancyTimer && (this.status.door !== this.hap.Characteristic.CurrentDoorState.OPEN)) {
+
+          clearTimeout(this.doorOccupancyTimer);
+          this.doorOccupancyTimer = null;
+
+          if(doorOccupancyService?.getCharacteristic(this.hap.Characteristic.OccupancyDetected).value as boolean) {
+
+            doorOccupancyService?.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, false);
+
+            if(this.hints.logMotion) {
+
+              this.log.info("Garage door open occupancy no longer detected.");
+            }
+
+            // Publish to MQTT, if the user has configured it.
+            this.platform.mqtt?.publish(this.device.mac, "dooropenoccupancy", "false");
+          }
+        }
+
+        // Publish to MQTT, if the user has configured it.
+        this.platform.mqtt?.publish(this.device.mac, "garagedoor", this.translateCurrentDoorState(this.status.door));
+
+        break;
+
+      case "light-garage_light":
+      case "light-light":
+
+        // Only act if we're not already at the state we're updating to.
+        if(this.status.light !== (event.state === "ON")) {
+
+          this.status.light = event.state === "ON";
+          lightBulbService?.updateCharacteristic(this.hap.Characteristic.On, this.status.light);
+
+          // Inform the user:
+          if(this.hints.logLight) {
+
+            this.log.info("Light %s.", event.state.toLowerCase());
+          }
+
+          // Publish to MQTT, if the user has configured it.
+          this.platform.mqtt?.publish(this.device.mac, "light", this.status.light.toString());
+        }
+
+        break;
+
+      case "lock-lock_remotes":
+
+        // If we're already in the state we're updating to, we're done.
+        if(this.status.lock === (event.state === "LOCKED" ? this.hap.Characteristic.LockCurrentState.SECURED : this.hap.Characteristic.LockCurrentState.UNSECURED)) {
+
+          break;
+        }
+
+        // Determine our lock state.
+        this.status.lock = (event.state === "LOCKED") ? this.hap.Characteristic.LockCurrentState.SECURED : this.hap.Characteristic.LockCurrentState.UNSECURED;
+
+        // Update our lock state.
+        garageDoorService?.updateCharacteristic(this.hap.Characteristic.LockTargetState, (event.state === "LOCKED") ?
+          this.hap.Characteristic.LockTargetState.SECURED : this.hap.Characteristic.LockTargetState.UNSECURED);
+        garageDoorService?.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.status.lock);
+        lockoutService?.updateCharacteristic(this.hap.Characteristic.On, this.status.lock === this.hap.Characteristic.LockCurrentState.SECURED);
+
+        // Inform the user:
+        this.log.info("Wireless remotes are %s.", (event.state === "LOCKED") ? "locked out" : "permitted");
+
+        // Publish to MQTT, if the user has configured it.
+        this.platform.mqtt?.publish(this.device.mac, "lock", this.status.lock.toString());
+
+        break;
+
+      case "sensor-voltage":
+
+        //ratgdoAccessory.updateState("voltage", event.state);
+
+        break;
+
+      case "switch-laser":
+
+        // Only act if we're not already at the state we're updating to.
+        if(this.status.discoLaser !== (event.state === "ON")) {
+
+          this.status.discoLaser = event.state === "ON";
+          discoLaserSwitchService?.updateCharacteristic(this.hap.Characteristic.On, this.status.discoLaser);
+
+          // Publish to MQTT, if the user has configured it.
+          this.platform.mqtt?.publish(this.device.mac, "laser", this.status.discoLaser.toString());
+        }
+
+        break;
+
+      case "switch-led":
+
+        // Only act if we're not already at the state we're updating to.
+        if(this.status.discoLed !== (event.state === "ON")) {
+
+          this.status.discoLed = event.state === "ON";
+          discoLedSwitchService?.updateCharacteristic(this.hap.Characteristic.On, this.status.discoLed);
+
+          // Publish to MQTT, if the user has configured it.
+          this.platform.mqtt?.publish(this.device.mac, "led", this.status.discoLed.toString());
+        }
+
+        break;
+
+      case "switch-str_output":
+
+        // Only act if we're not already at the state we're updating to.
+        if(this.status.konnectedStrobe !== (event.state === "ON")) {
+
+          this.status.konnectedStrobe = event.state === "ON";
+          konnectedStrobeSwitchService?.updateCharacteristic(this.hap.Characteristic.On, this.status.konnectedStrobe);
+
+          // Publish to MQTT, if the user has configured it.
+          this.platform.mqtt?.publish(this.device.mac, "strobe", this.status.konnectedStrobe.toString());
         }
 
         break;
@@ -1076,6 +1590,20 @@ export class RatgdoAccessory {
     let action;
 
     switch(topic) {
+
+      case "disco-laser":
+
+        endpoint = "switch/laser";
+        action = (payload === "on") ? "turn_on" : "turn_off";
+
+        break;
+
+      case "disco-led":
+
+        endpoint = "switch/led";
+        action = (payload === "on") ? "turn_on" : "turn_off";
+
+        break;
 
       case "door":
 
@@ -1122,6 +1650,13 @@ export class RatgdoAccessory {
 
         endpoint = "button/pre-close_warning";
         action = "press";
+
+        break;
+
+      case "konnected-strobe":
+
+        endpoint = "switch/str_output";
+        action = (payload === "on") ? "turn_on" : "turn_off";
 
         break;
 
