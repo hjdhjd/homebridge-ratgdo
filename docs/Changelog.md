@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 2.6.1 (2024-12-06)
+  * Fix: address a regression in device discovery on startup.
+  * Housekeeping.
+
 ## 2.6.0 (2024-11-24)
   * Improvement: enhanced support for the new Ratgdo (ESP32) Disco version. Backup battery status, when the Ratgdo is wired to it. Vehicle presence, arrival, and departure detection are supported through occupancy and contact sensors. The parking assistance laser can be controlled as a switch, as can the on-device LED. Configure them using the HBR webUI.
   * Improvement: enhanced support for Konnected garage door openers with support for the strobe switch in addition to the pre-close warning alarm. Configure them using the HBR webUI.

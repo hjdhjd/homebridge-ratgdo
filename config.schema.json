@@ -3,8 +3,8 @@
   "pluginType": "platform",
   "singular": true,
   "customUi": true,
-  "headerDisplay": "[homebridge-ratgdo](https://github.com/hjdhjd/homebridge-ratgdo) provides HomeKit support to Chamberlain and Liftmaster garage door openers that use the Ratgdo hardware control board without using myQ.",
-  "footerDisplay": "See the [homebridge-ratgdo developer page](https://github.com/hjdhjd/homebridge-ratgdo) for detailed documentation, including [feature options](https://github.com/hjdhjd/homebridge-ratgdo#feature-options).",
+  "headerDisplay": "[homebridge-ratgdo](https://github.com/hjdhjd/homebridge-ratgdo) provides HomeKit support to Chamberlain and Liftmaster garage door openers that use Ratgdo and Konnected devices without requiring myQ.",
+  "footerDisplay": "See the [homebridge-ratgdo developer page](https://github.com/hjdhjd/homebridge-ratgdo) for detailed documentation, including [feature options](https://github.com/hjdhjd/homebridge-ratgdo/docs).",
   "schema": {
     "type": "object",
     "properties": {

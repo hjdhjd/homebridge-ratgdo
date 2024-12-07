@@ -16,10 +16,10 @@
 
 `homebridge-ratgdo` is a [Homebridge](https://homebridge.io) plugin that makes Chamberlain, Liftmaster, and other garage door openers that utilize the [Ratgdo hardware control board](https://paulwieland.github.io/ratgdo/) and [commercial variants](https://konnected.io/products/smart-garage-door-opener-blaq-myq-alternative) to [Apple's](https://www.apple.com) [HomeKit](https://www.apple.com/ios/home) smart home platform. You can determine if your garage door opener by checking the [Ratgdo website](https://paulwieland.github.io/ratgdo/).
 
-## Why use this plugin for Ratgdo support in HomeKit?
+## Why use this plugin for Ratgdo (and similar devices like Konnected) support in HomeKit?
 In a nutshell, the aim of this plugin for things to *just work* with minimal required configuration by users. The goal is to provide as close to a streamlined experience as you would expect from a first-party or native HomeKit solution. For the adventurous, those additional granular options are, of course, available to support more esoteric use cases or other unique needs.
 
-What does *just work* mean in practice? It means that this plugin will discover all your Ratgdo devices that are running the Ratgdo ESPHome firmware without the need for additional configuration.
+What does *just work* mean in practice? It means that this plugin will discover all your Ratgdo (or Konnected garage door opener) devices that are running the Ratgdo ESPHome firmware without the need for additional configuration.
 
 **I rely on this plugin every day and actively maintain and support it.**
 
@@ -40,7 +40,7 @@ In the interest of the community seeking a solution outside of myQ, I've develop
 To get started with `homebridge-ratgdo`:
 
   * Install `homebridge-ratgdo` using the Homebridge webUI. Make sure you make `homebridge-ratgdo` a child bridge for the best experience.
-  * Install the [ESPHome Ratgdo firmware](https://ratgdo.github.io/esphome-ratgdo/). You'll need to use Chrome for this as Safari doesn't support installing firmware through a USB serial port.
+  * For Ratgdo devices, install the [ESPHome Ratgdo firmware](https://ratgdo.github.io/esphome-ratgdo/). You'll need to use Chrome for this as Safari doesn't support installing firmware through a USB serial port.
   * Fully open and close the garage door one time. ESPHome Ratgdo will use this to determine how long it takes to open and close your garage door to enable precise control of the position of the garage door opener.
   * That's it. Ensure `homebridge-ratgdo` is running and it will autodiscover your Ratgdo devices and make them available in HomeKit.
 
