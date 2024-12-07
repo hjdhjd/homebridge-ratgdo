@@ -1,7 +1,7 @@
 {
   "name": "homebridge-ratgdo",
   "displayName": "Homebridge Ratgdo",
-  "version": "2.6.2",
+  "version": "2.6.3",
   "description": "HomeKit integration using Ratgdo and Konnected devices for LiftMaster and Chamberlain garage door openers, without requiring myQ.",
   "license": "ISC",
   "repository": {
@@ -51,7 +51,7 @@
     "typescript-eslint": "^8.17.0"
   },
   "dependencies": {
-    "@adobe/fetch": "^4.1.10",
+    "@adobe/fetch": "^4.1.11",
     "@homebridge/plugin-ui-utils": "^2.0.0",
     "bonjour-service": "^1.3.0",
     "eventsource": "^2.0.2",

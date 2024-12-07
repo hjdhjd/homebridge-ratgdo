@@ -2,7 +2,11 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
-## 2.6.2 (2024-12-07)
+## 2.6.3 (2024-12-07)
+  * Fix: address a regression in device discovery on startup.
+  * Housekeeping.
+
+## 2.6.2 (2024-12-06)
   * Fix: address a regression in device discovery on startup.
   * Housekeeping.
 

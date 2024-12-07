@@ -126,9 +126,9 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       type: string
     }
 
-    // We're only interested in Ratgdo devices with valid MAC and IP addresses. Otherwise, we're done.
-    if(!service.txt?.mac || !service.addresses ||
-      !RATGDO_AUTODISCOVERY_PROJECT_NAMES.map(project => (service.txt as Record<string, string>)?.project_name?.match(project))) {
+    // We're only interested in ESPHome Ratgdo devices (and compatible variants) with valid MAC and IP addresses. Otherwise, we're done.
+    if((!service.txt?.esphome_version && !service.txt?.version) || !service.txt?.mac || !service.addresses ||
+      !RATGDO_AUTODISCOVERY_PROJECT_NAMES.some(project => (service.txt as Record<string, string>)?.project_name?.match(project))) {
 
       return;
     }
@@ -320,7 +320,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       address: address,
       firmwareVersion: deviceInfo.version ?? deviceInfo.esphome_version,
       mac: mac.replace(/:/g, ""),
-      name: deviceInfo.friendly_name,
+      name: deviceInfo.friendly_name ?? "Ratgdo",
       variant: (deviceInfo.project_name === "ratgdo.esphome") ? RatgdoVariant.RATGDO : RatgdoVariant.KONNECTED
     };
 
