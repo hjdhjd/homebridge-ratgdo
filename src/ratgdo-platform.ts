@@ -126,8 +126,9 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       type: string
     }
 
-    // We're only interested in Ratgdo devices with valid IP addresses. Otherwise, we're done.
-    if(!RATGDO_AUTODISCOVERY_PROJECT_NAMES.map(project => (service.txt as Record<string, string>).project_name?.match(project)) || !service.addresses) {
+    // We're only interested in Ratgdo devices with valid MAC and IP addresses. Otherwise, we're done.
+    if(!service.txt?.mac || !service.addresses ||
+      !RATGDO_AUTODISCOVERY_PROJECT_NAMES.map(project => (service.txt as Record<string, string>)?.project_name?.match(project))) {
 
       return;
     }
