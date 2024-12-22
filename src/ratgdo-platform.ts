@@ -11,7 +11,6 @@ import { RatgdoOptions, featureOptionCategories, featureOptions } from "./ratgdo
 import EventSource from "eventsource";
 import { RatgdoAccessory } from "./ratgdo-device.js";
 import { RatgdoVariant } from "./ratgdo-types.js";
-import http from "node:http";
 import net from "node:net";
 import util from "node:util";
 
@@ -147,10 +146,6 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
       return;
     }
-
-    // Node 18 requires this because it doesn't default to keeping the underlying socket alive by default. We need this to ensure that socket keepalives are enabled so
-    // that we can reconnect gracefully when connection issues occur. I'll remove this once Homebridge shifts to Node 20 as the lowest LTS version supported.
-    http.globalAgent = new http.Agent({ keepAlive: true, timeout: 5000 });
 
     try {
 

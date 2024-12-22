@@ -1152,6 +1152,7 @@ export class RatgdoAccessory {
             break;
 
           case "FULL":
+          case "UNKNOWN":
 
             this.status.discoBatteryState = this.hap.Characteristic.ChargingState.NOT_CHARGING;
 

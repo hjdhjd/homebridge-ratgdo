@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 2.7.0 (2024-12-21)
+  * Breaking change: Since node 18 is now EOL, node 20 is now the minimum required version.
+  * Housekeeping.
+
 ## 2.6.3 (2024-12-07)
   * Fix: address a regression in device discovery on startup.
   * Housekeeping.
