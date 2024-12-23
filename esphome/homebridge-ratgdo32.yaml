@@ -1,0 +1,239 @@
+# This is a customized configuration YAML file for [homebridge-ratgdo](https://github.com/hjdhjd/homebridge-ratgdo) that deviates slightly from the
+# default YAML provided by Ratgdo32 ESPHome. It is specific to those with Ratgdo ESP32 hardware revisions of v32disco or greater. For those running other
+# hardware versions, you can use this as a basis for your own, but it is beyond the support I will be providing.
+#
+# The changes in this configuration file include:
+#
+#   - The ability to customize the name (and friendly name) of the Ratgdo device. Though cosmetic, it can be helpful when you have multiple Ratgdo devices.
+#   - Uses SNTP to set the time on the Ratgdo device. Not strictly necessary, but good hygeine.
+#   - Allows you to configure the timezone either yourself or automatically. The timezone will be autoconfigured using the World Time API geoIP by default.
+#   - Set the interval to check for updates from the Ratgdo repository to every 6 hours instead of the Ratgdo default of every second.
+#
+# You can customize the settings to your taste in the substitutions section. On macOS, you can install this configuration file using the following
+# command:
+#
+# NOTE: automatic timezone determination is currently not working in recent ESP32 ESPHome firmwares due to startup scripts not being run. You'll need to
+# set the timezone manually.
+#
+# ```sh
+# brew install esphome
+# esphome run homebridge-ratgdo32.yaml --no-logs --device 1.2.3.4
+# ```
+#
+# To install the ESPHome tools on macOS (assuming you use [Homebrew](https://brew.sh):
+# 
+# ```sh
+# brew install esphome
+# ```
+# 
+# For other platforms, you can search online for how to install the ESPHome tools.
+---
+substitutions:
+
+  # Unique name for this Ratgdo ESPHome device. Must be no more than 31 characters or 24 characters if you append the MAC address to the name below.
+  name: "homebridge-ratgdo"
+
+  # Append the MAC address suffix to the ESPHome device name. I leave this disabled because I use unique names for each Ratgdo device. You might prefer
+  # differently. If you do, it reduces the length available for the name field to 24 characters.
+  name_add_mac_suffix: "false"
+
+  # Friendly name that is used in the Ratgdo webUI.
+  friendly_name: "Homebridge Ratgdo"
+
+  # Defaults to UTC - Homebridge Ratgdo will automatically determine the timezone based on geographic IP address information.
+  # Otherwise, set it manually to your timezone to override automatic timezone detection. You can select a TZ identifier for your timezone from the list at
+  # the [Wikipedia list of timezone database names](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones).
+  #
+  # NOTE: automatic timezone determination is currently not working in recent ESP32 ESPHome firmwares due to startup scripts not being run. You'll need to
+  # set the timezone manually.
+  timezone: "UTC"
+
+  id_prefix: ratgdo32disco
+  uart_tx_pin: GPIO17
+  uart_rx_pin: GPIO21
+  input_obst_pin: GPIO4
+  status_door_pin: GPIO26
+  status_obstruction_pin: GPIO25
+  dry_contact_open_pin: GPIO13
+  dry_contact_close_pin: GPIO14
+  dry_contact_light_pin: GPIO27
+
+web_server:
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  name_add_mac_suffix: ${name_add_mac_suffix}
+  project:
+    name: ratgdo.esphome
+    version: "32disco"
+  on_boot:
+    priority: -100
+    then:
+      - logger.log: "Starting timezone stuff.........."
+      - lambda: |-
+          ESP_LOGI("timezone.current", "Current timezone: %s", id(sntp_time).get_timezone().c_str());
+      - if:
+          condition:
+            lambda: 'return id(sntp_time).get_timezone() == "UTC";'
+          then:
+            - http_request.get:
+                url: "http://worldtimeapi.org/api/ip"
+                on_response:
+                  then:
+                    - lambda: |-
+
+                        if(response->status_code != HTTP_CODE_OK) {
+
+                          ESP_LOGE("timezone.autodetermine", "World Time API HTTP Request failed with code: %d.", response->status_code);
+                          return;
+                        }
+
+                        parse_json(body, [](JsonObject root) -> bool {
+
+                          std::string timezone = root["timezone"];
+                          id(sntp_time).set_timezone(timezone.c_str());
+                          ESP_LOGI("timezone.autodetermine", "Timezone set to: %s.", timezone.c_str());
+                          return true;
+                        });
+
+esp32:
+  board: esp32dev
+
+dashboard_import:
+  package_import_url: github://ratgdo/esphome-ratgdo/v32disco.yaml@main
+
+packages:
+  remote_package:
+    url: https://github.com/ratgdo/esphome-ratgdo
+    ref: ratgdo32
+    files: [base.yaml]
+    refresh: 6h
+  # remote_package: !include
+  #   file: base.yaml
+
+# Enable time synchronization using SNTP.
+time:
+  - platform: sntp
+    id: sntp_time
+    servers:
+      - time.apple.com
+      - time.cloudflare.com
+    timezone: ${timezone}
+
+# Enable the HTTP Client to autoset timezone information using the World Time API.
+http_request:
+  id: http_request_data
+  timeout: 15s
+  verify_ssl: false
+
+api:
+  id: api_server
+
+improv_serial:
+
+wifi:
+  ap:
+
+logger:
+
+ota:
+
+binary_sensor:
+  - platform: ratgdo
+    ratgdo_id: ${id_prefix}
+    id: ${id_prefix}_vehicle_detected
+    type: vehicle_detected
+    name: "Vehicle detected"
+  - platform: ratgdo
+    ratgdo_id: ${id_prefix}
+    id: ${id_prefix}_vehicle_arriving
+    type: vehicle_arriving
+    name: "Vehicle arriving"
+  - platform: ratgdo
+    ratgdo_id: ${id_prefix}
+    id: ${id_prefix}_vehicle_leaving
+    type: vehicle_leaving
+    name: "Vehicle leaving"
+
+number:
+  - platform: ratgdo
+    id: ${id_prefix}_target_distance_measurement
+    type: target_distance_measurement
+    entity_category: config
+    ratgdo_id: ${id_prefix}
+    name: "Vehicle distance target"
+    mode: box
+    unit_of_measurement: "mm"
+  - platform: ratgdo
+    id: ${id_prefix}_closing_delay
+    type: closing_delay
+    entity_category: config
+    ratgdo_id: ${id_prefix}
+    name: "Closing Delay"
+    unit_of_measurement: "s"
+
+output:
+  - platform: ledc
+    pin: GPIO33
+    id: ${id_prefix}_ledc
+  - platform: ratgdo
+    ratgdo_id: ${id_prefix}
+    id: ${id_prefix}_beeper
+    type: beeper
+    rtttl: ${id_prefix}_rtttl
+    song: "alert:d=8,o=5,b=120:a,p,a,p,a,p,4b,p"
+
+rtttl:
+  - id: ${id_prefix}_rtttl
+    output: ${id_prefix}_ledc
+
+switch:
+  - platform: ratgdo
+    ratgdo_id: ${id_prefix}
+    id: ${id_prefix}_led
+    type: led
+    pin: GPIO2
+    name: "LED"
+    entity_category: config
+  - platform: ratgdo
+    ratgdo_id: ${id_prefix}
+    id: ${id_prefix}_laser
+    type: led
+    pin: GPIO23
+    name: "LASER"
+    entity_category: config
+
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 120s
+  - platform: ratgdo
+    id: ${id_prefix}_vehicle_distance_actual
+    type: distance
+    name: "Vehicle distance actual"
+    ratgdo_id: ${id_prefix}
+    unit_of_measurement: "mm"
+    filters:
+      - throttle: 1s
+      - filter_out: -1
+      - median:
+          window_size: 20
+          send_every: 5
+          send_first_at: 5
+  - platform: adc
+    pin: GPIO34
+    name: "Voltage"
+    attenuation: auto
+    update_interval: 60s
+    filters:
+    - calibrate_linear:
+        - 1.16 -> 5
+        - 2.783 -> 12
+    # uncomment to convert voltage scale to a % for lead acid batteries
+    #     - 2.43 -> 0   # 10.5v = 0%
+    #     - 2.98 -> 100 # 12.85 = 100%
+    # - clamp:
+    #     min_value: 0
+    #     max_value: 100
+    # unit_of_measurement: "%"

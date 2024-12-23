@@ -3,7 +3,6 @@
  * ratgdo-device.ts: Base class for all Ratgdo devices.
  */
 import { API, CharacteristicValue, HAP, PlatformAccessory } from "homebridge";
-import { FetchError, fetch } from "@adobe/fetch";
 import { HomebridgePluginLogging, Nullable, acquireService, validService, validateName } from "homebridge-plugin-utils";
 import { RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION } from "./settings.js";
 import { RatgdoDevice, RatgdoReservedNames, RatgdoVariant } from "./ratgdo-types.js";
@@ -1702,11 +1701,11 @@ export class RatgdoAccessory {
       }
     } catch(error) {
 
-      if(error instanceof FetchError) {
+      let errorMessage = "\n" + util.inspect(error, {colors: true, depth: null, sorted: true });
 
-        let errorMessage;
+      if(error instanceof TypeError) {
 
-        switch(error.code) {
+        switch((error.cause as NodeJS.ErrnoException)?.code) {
 
           case "ECONNRESET":
 
@@ -1721,6 +1720,9 @@ export class RatgdoAccessory {
             break;
 
           case "ETIMEDOUT":
+          case "UND_ERR_BODY_TIMEOUT":
+          case "UND_ERR_CONNECT_TIMEOUT":
+          case "UND_ERR_HEADERS_TIMEOUT":
 
             errorMessage = "Connection to the Ratgdo controller has timed out";
 
@@ -1728,17 +1730,14 @@ export class RatgdoAccessory {
 
           default:
 
-            errorMessage = error.code + " - " + error.message;
+            errorMessage = " " + (error.cause as NodeJS.ErrnoException)?.code + " (errno: " + (error.cause as NodeJS.ErrnoException)?.errno?.toString() + ")\n" +
+              util.inspect(error.cause, { depth: null, sorted: true });
 
             break;
         }
-
-        this.log.error("Ratgdo API error sending command: %s.", errorMessage);
-
-        return false;
       }
 
-      this.log.error("Ratgdo API unknown error sending command: %s", error);
+      this.log.error("Ratgdo API error sending command:%s", errorMessage);
 
       return false;
     }

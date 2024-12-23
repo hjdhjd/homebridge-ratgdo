@@ -99,3 +99,4 @@ Feature options provide a rich mechanism for tailoring your `homebridge-ratgdo` 
 |--------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 | `Konnected.Switch.PCW`                           | Add a switch accessory to control the pre-close warning feature on Konnected openers. This can be useful in automation scenarios. **(default: disabled)**.
 | `Konnected.Switch.Strobe`                        | Add a switch accessory to control the strobe setting on Konnected openers. **(default: disabled)**.
+
