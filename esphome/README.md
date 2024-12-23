@@ -23,7 +23,7 @@
 >   * You should be familiar and comfortable with the command line and modifying configuration files.
 
 > [!TIP]
-> If you would like to tailor your experience a bit further, you can choose to use the [hombridge-ratgdo ESPHome YAML configuration file](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/homebridge-ratgdo.yaml) and use it to create a more customized Ratgdo ESPHome firmware. Using this firmware allows you to do the following things for those using Ratgdo hardware revision 2.5 or beyond:
+> If you would like to tailor your experience a bit further, you can choose to use the [hombridge-ratgdo ESPHome YAML configuration for v2.5-based Ratgdo devices](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/homebridge-ratgdo.yaml) or the [hombridge-ratgdo ESPHome YAML configuration for ESP32 Ratgdo devices](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/homebridge-ratgdo32.yaml) and use it to create a more customized Ratgdo ESPHome firmware. Using this firmware allows you to do the following things for those using Ratgdo hardware revision 2.5 or beyond:
 >
 >   * The ability to customize the name (and friendly name) of the Ratgdo device. Though cosmetic, it can be helpful when you have multiple Ratgdo devices.
 >   * Use SNTP to set the time on the Ratgdo device. Not strictly necessary, but good hygeine.
@@ -40,6 +40,6 @@
 >    * If the Ratgdo ESPHome webUI is unavailable, you'll need to either use the [ESPHome web dashboard](https://web.esphome.io) or the ESPHome tools to install the firmware and physical access to the Ratgdo. To do this:
 >      * Plug your Ratgdo to the machine you're working on using a USB cable.
 >      * Either use the [ESPHome web dashboard](https://web.esphome.io) or install the ESPHome tools if needed (e.g. on macOS `brew install esphome`).
->      * Download both the [homebridge-ratgdo-2024.12.2.bin](https://raw.githubusercontent.com/hjdhjd/homebridge-ratgdo/main/esphome/homebridge-ratgdo-2024.12.2.bin) and the [homebridge-ratgdo.yaml](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/homebridge-ratgdo.yaml) or the [homebridge-ratgdo32.yaml](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/homebridge-ratgdo.yaml) files, depending on which Ratgdo hardware variant you have.
+>      * Download both the [homebridge-ratgdo-2024.12.2.bin](https://raw.githubusercontent.com/hjdhjd/homebridge-ratgdo/main/esphome/homebridge-ratgdo-2024.12.2.bin) and the [homebridge-ratgdo.yaml](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/homebridge-ratgdo.yaml) or the [homebridge-ratgdo32-2024.12.2.bin](https://raw.githubusercontent.com/hjdhjd/homebridge-ratgdo/main/esphome/homebridge-ratgdo32-2024.12.2.bin) and [homebridge-ratgdo32.yaml](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/homebridge-ratgdo.yaml) files, depending on which Ratgdo hardware variant you have.
 >      * If you're using the ESPHome web dashboard, go through the steps to upload the firmware you downloaded in the previous step.
 >      * If you're using the ESPHome tools, run the following command: `esphome upload --file homebridge-ratgdo-2024.12.2.bin homebridge-ratgdo.yaml` or `esphome upload --file homebridge-ratgdo32-2024.12.2.bin homebridge-ratgdo32.yaml`, depending on which Ratgdo hardware variant you have.
