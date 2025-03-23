@@ -2,6 +2,9 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 2.7.2 (2024-03-22)
+  * Housekeeping.
+
 ## 2.7.1 (2024-12-23)
   * Housekeeping and documentation updates, including a new YAML configuration for ESP32-based Ratgdo devices like Ratgdo Disco.
 
