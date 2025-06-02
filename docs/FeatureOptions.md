@@ -61,6 +61,7 @@ Feature options provide a rich mechanism for tailoring your `homebridge-ratgdo` 
 
 | Option                                           | Description
 |--------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+| `Opener.Lock`                                    | Make the wireless remote lock on the opener available in HomeKit. **(default: enabled)**.
 | `Opener.ReadOnly`                                | Make this opener read-only by ignoring open and close requests from HomeKit. **(default: disabled)**.
 | `Opener.Dimmer`                                  | Add a dimmer accessory to control the opener. This can be useful in automation scenarios where you want to set the door to a specific percentage. **(default: disabled)**.
 | `Opener.Switch`                                  | Add a switch accessory to control the opener. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling garage door openers. **(default: disabled)**.

@@ -2,12 +2,12 @@
  *
  * ratgdo-device.ts: Base class for all Ratgdo devices.
  */
-import { API, CharacteristicValue, HAP, PlatformAccessory } from "homebridge";
-import { HomebridgePluginLogging, Nullable, acquireService, validService, validateName } from "homebridge-plugin-utils";
+import type { API, CharacteristicValue, HAP, PlatformAccessory } from "homebridge";
+import { type HomebridgePluginLogging, type Nullable, acquireService, validService, validateName } from "homebridge-plugin-utils";
 import { RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION } from "./settings.js";
-import { RatgdoDevice, RatgdoReservedNames, RatgdoVariant } from "./ratgdo-types.js";
-import { RatgdoOptions } from "./ratgdo-options.js";
-import { RatgdoPlatform } from "./ratgdo-platform.js";
+import { type RatgdoDevice, RatgdoReservedNames, RatgdoVariant } from "./ratgdo-types.js";
+import type { RatgdoOptions } from "./ratgdo-options.js";
+import type { RatgdoPlatform } from "./ratgdo-platform.js";
 import util from "node:util";
 
 // ESPHome EventSource state messages.
@@ -37,6 +37,7 @@ interface RatgdoHints {
   konnectedPcwSwitch: boolean,
   konnectedStrobeSwitch: boolean,
   light: boolean,
+  lock: boolean,
   lockoutSwitch: boolean,
   logLight: boolean,
   logMotion: boolean,
@@ -176,6 +177,7 @@ export class RatgdoAccessory {
     this.hints.konnectedPcwSwitch = this.hasFeature("Konnected.Switch.Pcw");
     this.hints.konnectedStrobeSwitch = this.hasFeature("Konnected.Switch.Strobe");
     this.hints.light = this.hasFeature("Light");
+    this.hints.lock = this.hasFeature("Opener.Lock");
     this.hints.logLight = this.hasFeature("Log.Light");
     this.hints.logMotion = this.hasFeature("Log.Motion");
     this.hints.logObstruction = this.hasFeature("Log.Obstruction");
@@ -265,6 +267,12 @@ export class RatgdoAccessory {
       this.setDoorState(command, position);
     });
 
+    // Return our lock state.
+    this.platform.mqtt?.subscribeGet(this.device.mac, "lock", "Lock", () => {
+
+      return this.status.lock.toString();
+    });
+
     // Return our obstruction state.
     this.platform.mqtt?.subscribeGet(this.device.mac, "obstruction", "Obstruction", () => {
 
@@ -341,22 +349,31 @@ export class RatgdoAccessory {
     // Inform HomeKit of any obstructions.
     service.getCharacteristic(this.hap.Characteristic.ObstructionDetected).onGet(() => this.status.obstruction === true);
 
-    // Configure the lock garage door lock current and target state characteristics.
-    service.getCharacteristic(this.hap.Characteristic.LockTargetState).onSet(async (value: CharacteristicValue) => {
 
-      if(!(await this.command("lock", (value === this.hap.Characteristic.LockTargetState.SECURED) ? "lock" : "unlock"))) {
+    // Configure the lock garage door lock current and target state characteristics if the user has enabled it.
+    if(this.hints.lock) {
 
-        // Something went wrong. Let's make sure we revert the lock to it's prior state.
-        setTimeout(() => {
+      service.getCharacteristic(this.hap.Characteristic.LockTargetState).onSet(async (value: CharacteristicValue) => {
 
-          service?.updateCharacteristic(this.hap.Characteristic.LockTargetState, this.lockTargetStateBias(this.status.lock));
-          service?.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.status.lock);
-        }, 50);
-      }
-    });
+        if(!(await this.command("lock", (value === this.hap.Characteristic.LockTargetState.SECURED) ? "lock" : "unlock"))) {
 
-    service.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.status.lock);
-    service.updateCharacteristic(this.hap.Characteristic.LockTargetState, this.lockTargetStateBias(this.status.lock));
+          // Something went wrong. Let's make sure we revert the lock to it's prior state.
+          setTimeout(() => {
+
+            service?.updateCharacteristic(this.hap.Characteristic.LockTargetState, this.lockTargetStateBias(this.status.lock));
+            service?.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.status.lock);
+          }, 50);
+        }
+      });
+
+      service.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.status.lock);
+      service.updateCharacteristic(this.hap.Characteristic.LockTargetState, this.lockTargetStateBias(this.status.lock));
+    } else {
+
+      // Remove any remnants of our locks.
+      [ this.hap.Characteristic.LockCurrentState, this.hap.Characteristic.LockTargetState ]
+        .map(characteristic => service.removeCharacteristic(service.getCharacteristic(characteristic)));
+    }
 
     // Let HomeKit know that this is the primary service on this accessory.
     service.setPrimaryService(true);
@@ -368,18 +385,7 @@ export class RatgdoAccessory {
   private configureLight(): boolean {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.Lightbulb, () => {
-
-      // Have we disabled the light?
-      if(!this.hints.light) {
-
-        this.log.info("Disabling the light.");
-
-        return false;
-      }
-
-      return true;
-    })) {
+    if(!validService(this.accessory, this.hap.Service.Lightbulb, this.hints.light)) {
 
       return false;
     }
@@ -408,18 +414,7 @@ export class RatgdoAccessory {
   private configureMotionSensor(): boolean {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.MotionSensor, () => {
-
-      // Have we disabled the motion sensor?
-      if(!this.hints.motionSensor) {
-
-        this.log.info("Disabling the motion sensor.");
-
-        return false;
-      }
-
-      return true;
-    })) {
+    if(!validService(this.accessory, this.hap.Service.MotionSensor, this.hints.motionSensor)) {
 
       return false;
     }
@@ -446,16 +441,7 @@ export class RatgdoAccessory {
   private configureAutomationDoorPositionDimmer(): boolean {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.Lightbulb, () => {
-
-      // The door position dimmer is disabled by default and primarily exists for automation purposes.
-      if(!this.hints.automationDimmer) {
-
-        return false;
-      }
-
-      return true;
-    }, RatgdoReservedNames.DIMMER_OPENER_AUTOMATION)) {
+    if(!validService(this.accessory, this.hap.Service.Lightbulb, this.hints.automationDimmer, RatgdoReservedNames.DIMMER_OPENER_AUTOMATION)) {
 
       return false;
     }
@@ -525,16 +511,7 @@ export class RatgdoAccessory {
   private configureAutomationDoorSwitch(): boolean {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.Switch, () => {
-
-      // Have we disabled the automation switch?
-      if(!this.hints.automationSwitch) {
-
-        return false;
-      }
-
-      return true;
-    }, RatgdoReservedNames.SWITCH_OPENER_AUTOMATION)) {
+    if(!validService(this.accessory, this.hap.Service.Switch, this.hints.automationSwitch, RatgdoReservedNames.SWITCH_OPENER_AUTOMATION)) {
 
       return false;
     }
@@ -581,16 +558,7 @@ export class RatgdoAccessory {
   private configureDiscoBattery(): boolean {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.Battery, () => {
-
-      // We only enable this on Ratgdo devices when the user has enabled this capability.
-      if((this.device.variant !== RatgdoVariant.RATGDO) || !this.hints.discoBattery) {
-
-        return false;
-      }
-
-      return true;
-    })) {
+    if(!validService(this.accessory, this.hap.Service.Battery, (this.device.variant === RatgdoVariant.RATGDO) && this.hints.discoBattery)) {
 
       return false;
     }
@@ -620,16 +588,8 @@ export class RatgdoAccessory {
   private configureDiscoLaserSwitch(): boolean {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.Switch, () => {
-
-      // We only enable this on Ratgdo devices when the user has enabled this capability.
-      if((this.device.variant !== RatgdoVariant.RATGDO) || !this.hints.discoLaserSwitch) {
-
-        return false;
-      }
-
-      return true;
-    }, RatgdoReservedNames.SWITCH_DISCO_LASER)) {
+    if(!validService(this.accessory, this.hap.Service.Switch, (this.device.variant === RatgdoVariant.RATGDO) && this.hints.discoLaserSwitch,
+      RatgdoReservedNames.SWITCH_DISCO_LASER)) {
 
       return false;
     }
@@ -662,16 +622,8 @@ export class RatgdoAccessory {
   private configureDiscoLedSwitch(): boolean {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.Switch, () => {
-
-      // We only enable this on Ratgdo devices when the user has enabled this capability.
-      if((this.device.variant !== RatgdoVariant.RATGDO) || !this.hints.discoLedSwitch) {
-
-        return false;
-      }
-
-      return true;
-    }, RatgdoReservedNames.SWITCH_DISCO_LED)) {
+    if(!validService(this.accessory, this.hap.Service.Switch, (this.device.variant === RatgdoVariant.RATGDO) && this.hints.discoLedSwitch,
+      RatgdoReservedNames.SWITCH_DISCO_LED)) {
 
       return false;
     }
@@ -704,16 +656,8 @@ export class RatgdoAccessory {
   private configureDiscoVehicleArrivingContactSensor(): boolean {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.ContactSensor, () => {
-
-      // We only enable this on Ratgdo devices when the user has enabled this capability.
-      if((this.device.variant !== RatgdoVariant.RATGDO) || !this.hints.discoVehicleArriving) {
-
-        return false;
-      }
-
-      return true;
-    }, RatgdoReservedNames.CONTACT_DISCO_VEHICLE_ARRIVING)) {
+    if(!validService(this.accessory, this.hap.Service.ContactSensor, (this.device.variant === RatgdoVariant.RATGDO) && this.hints.discoVehicleArriving,
+      RatgdoReservedNames.CONTACT_DISCO_VEHICLE_ARRIVING)) {
 
       return false;
     }
@@ -743,16 +687,8 @@ export class RatgdoAccessory {
   private configureDiscoVehicleLeavingContactSensor(): boolean {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.ContactSensor, () => {
-
-      // We only enable this on Ratgdo devices when the user has enabled this capability.
-      if((this.device.variant !== RatgdoVariant.RATGDO) || !this.hints.discoVehicleLeaving) {
-
-        return false;
-      }
-
-      return true;
-    }, RatgdoReservedNames.CONTACT_DISCO_VEHICLE_LEAVING)) {
+    if(!validService(this.accessory, this.hap.Service.ContactSensor, (this.device.variant === RatgdoVariant.RATGDO) && this.hints.discoVehicleLeaving,
+      RatgdoReservedNames.CONTACT_DISCO_VEHICLE_LEAVING)) {
 
       return false;
     }
@@ -782,16 +718,8 @@ export class RatgdoAccessory {
   private configureDiscoVehiclePresenceOccupancySensor(): boolean {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.OccupancySensor, () => {
-
-      // We only enable this on Ratgdo devices when the user has enabled this capability.
-      if((this.device.variant !== RatgdoVariant.RATGDO) || !this.hints.discoVehiclePresence) {
-
-        return false;
-      }
-
-      return true;
-    }, RatgdoReservedNames.OCCUPANCY_DISCO_VEHICLE_PRESENCE)) {
+    if(!validService(this.accessory, this.hap.Service.OccupancySensor, (this.device.variant === RatgdoVariant.RATGDO) && this.hints.discoVehiclePresence,
+      RatgdoReservedNames.OCCUPANCY_DISCO_VEHICLE_PRESENCE)) {
 
       return false;
     }
@@ -821,16 +749,8 @@ export class RatgdoAccessory {
   private configureKonnectedPcwSwitch(): boolean {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.Switch, () => {
-
-      // We only enable this on Konnected devices when the user has enabled this capability.
-      if((this.device.variant !== RatgdoVariant.KONNECTED) || !this.hints.konnectedPcwSwitch) {
-
-        return false;
-      }
-
-      return true;
-    }, RatgdoReservedNames.SWITCH_KONNECTED_PCW)) {
+    if(!validService(this.accessory, this.hap.Service.Switch, (this.device.variant === RatgdoVariant.KONNECTED) && this.hints.konnectedPcwSwitch,
+      RatgdoReservedNames.SWITCH_KONNECTED_PCW)) {
 
       return false;
     }
@@ -877,16 +797,8 @@ export class RatgdoAccessory {
   private configureKonnectedStrobeSwitch(): boolean {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.Switch, () => {
-
-      // We only enable this on Konnected devices when the user has enabled this capability.
-      if((this.device.variant !== RatgdoVariant.KONNECTED) || !this.hints.konnectedStrobeSwitch) {
-
-        return false;
-      }
-
-      return true;
-    }, RatgdoReservedNames.SWITCH_KONNECTED_STROBE)) {
+    if(!validService(this.accessory, this.hap.Service.Switch, (this.device.variant === RatgdoVariant.KONNECTED) && this.hints.konnectedStrobeSwitch,
+      RatgdoReservedNames.SWITCH_KONNECTED_STROBE)) {
 
       return false;
     }
@@ -919,16 +831,7 @@ export class RatgdoAccessory {
   private configureAutomationLockoutSwitch(): boolean {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.Switch, () => {
-
-      // The wireless lockout switch is disabled by default and primarily exists for automation purposes.
-      if(!this.hints.lockoutSwitch) {
-
-        return false;
-      }
-
-      return true;
-    }, RatgdoReservedNames.SWITCH_LOCKOUT)) {
+    if(!validService(this.accessory, this.hap.Service.Switch, this.hints.lock && this.hints.lockoutSwitch, RatgdoReservedNames.SWITCH_LOCKOUT)) {
 
       return false;
     }
@@ -972,16 +875,7 @@ export class RatgdoAccessory {
   private configureDoorOpenOccupancySensor(): boolean {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.OccupancySensor, () => {
-
-      // The occupancy sensor is disabled by default and primarily exists for automation purposes.
-      if(!this.hints.doorOpenOccupancySensor) {
-
-        return false;
-      }
-
-      return true;
-    }, RatgdoReservedNames.OCCUPANCY_SENSOR_DOOR_OPEN)) {
+    if(!validService(this.accessory, this.hap.Service.OccupancySensor, this.hints.doorOpenOccupancySensor, RatgdoReservedNames.OCCUPANCY_SENSOR_DOOR_OPEN)) {
 
       return false;
     }
@@ -1012,16 +906,7 @@ export class RatgdoAccessory {
   private configureMotionOccupancySensor(): boolean {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.OccupancySensor, () => {
-
-      // The occupancy sensor is disabled by default and primarily exists for automation purposes.
-      if(!this.hints.motionOccupancySensor) {
-
-        return false;
-      }
-
-      return true;
-    }, RatgdoReservedNames.OCCUPANCY_SENSOR_MOTION)) {
+    if(!validService(this.accessory, this.hap.Service.OccupancySensor, this.hints.motionOccupancySensor, RatgdoReservedNames.OCCUPANCY_SENSOR_MOTION)) {
 
       return false;
     }
@@ -1504,6 +1389,20 @@ export class RatgdoAccessory {
         break;
 
       case "lock-lock_remotes":
+
+        // If we've disabled the feature, ignore lock updates.
+        if(!this.hints.lock) {
+
+          break;
+        }
+
+        // Sanity check.
+        if(![ "LOCKED", "UNLOCKED" ].includes(event.state)) {
+
+          this.log.warn("Unknown wireless remote lock state detected: %s.", event.state);
+
+          break;
+        }
 
         // If we're already in the state we're updating to, we're done.
         if(this.status.lock === (event.state === "LOCKED" ? this.hap.Characteristic.LockCurrentState.SECURED : this.hap.Characteristic.LockCurrentState.UNSECURED)) {

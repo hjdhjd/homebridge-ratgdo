@@ -30,9 +30,6 @@ export const RATGDO_HEARTBEAT_INTERVAL = 300;
 // Duration, in seconds, of a motion sensor event.
 export const RATGDO_MOTION_DURATION = 5;
 
-// How often, in seconds, should we try to reconnect with an MQTT broker, if we have one configured.
-export const RATGDO_MQTT_RECONNECT_INTERVAL = 60;
-
 // Default MQTT topic to use when publishing events. This is in the form of: ratgdo/device/event
 export const RATGDO_MQTT_TOPIC = "ratgdo";
 

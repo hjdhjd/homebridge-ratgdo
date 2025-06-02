@@ -2,13 +2,14 @@
  *
  * ratgdo-platform.ts: homebridge-ratgdo platform class.
  */
-import { API, APIEvent, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
-import { Bonjour, Service } from "bonjour-service";
-import { FeatureOptions, MqttClient, Nullable, validateName } from "homebridge-plugin-utils";
+import type { API, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
+import { Bonjour, type Service } from "bonjour-service";
+import { FeatureOptions, MqttClient, type Nullable, validateName } from "homebridge-plugin-utils";
 import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_AUTODISCOVERY_INTERVAL, RATGDO_AUTODISCOVERY_PROJECT_NAMES, RATGDO_AUTODISCOVERY_TYPES, RATGDO_EVENT_API_HEARTBEAT_DURATION,
   RATGDO_HEARTBEAT_DURATION, RATGDO_HEARTBEAT_INTERVAL, RATGDO_MQTT_TOPIC } from "./settings.js";
-import { RatgdoOptions, featureOptionCategories, featureOptions } from "./ratgdo-options.js";
-import EventSource from "eventsource";
+import { type RatgdoOptions, featureOptionCategories, featureOptions } from "./ratgdo-options.js";
+import { APIEvent } from "homebridge";
+import { EventSource } from "eventsource";
 import { RatgdoAccessory } from "./ratgdo-device.js";
 import { RatgdoVariant } from "./ratgdo-types.js";
 import net from "node:net";
@@ -222,7 +223,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       // Capture log updates from the controller.
       this.espHomeEvents[mac].addEventListener("log", (message: MessageEvent<string>) => {
 
-        ratgdoAccessory.log.debug("Log event received: %s", message);
+        ratgdoAccessory.log.debug("Log event received: %s", util.inspect(message.data, { sorted: true }));
 
         // Ratgdo occasionally sends empty status updates - we ignore them.
         if(!message.data.length) {
@@ -379,7 +380,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
     if(this.config.debug) {
 
-      this.log.error(util.format(message, ...parameters));
+      this.log.warn(util.format(message, ...parameters));
     }
   }
 }

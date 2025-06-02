@@ -2,7 +2,7 @@
  *
  * ratgdo-options.ts: Feature option and type definitions for Ratgdo.
  */
-import { FeatureOptionEntry } from "homebridge-plugin-utils";
+import type { FeatureOptionEntry } from "homebridge-plugin-utils";
 import { RATGDO_OCCUPANCY_DURATION } from "./settings.js";
 
 // Plugin configuration options.
@@ -81,6 +81,7 @@ export const featureOptions: { [index: string]: FeatureOptionEntry[] } = {
   // Opener options.
   "Opener": [
 
+    { default: true, description: "Make the wireless remote lock on the opener available in HomeKit.", name: "Lock" },
     { default: false, description: "Make this opener read-only by ignoring open and close requests from HomeKit.", name: "ReadOnly" },
     { default: false, description: "Add a dimmer accessory to control the opener. This can be useful in automation scenarios where you want to set the door to a specific percentage.", name: "Dimmer" },
     { default: false, description: "Add a switch accessory to control the opener. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling garage door openers.", name: "Switch" },
