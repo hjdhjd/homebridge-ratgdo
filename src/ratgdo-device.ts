@@ -355,6 +355,8 @@ export class RatgdoAccessory {
 
       service.getCharacteristic(this.hap.Characteristic.LockTargetState).onSet(async (value: CharacteristicValue) => {
 
+        this.log.debug("User-initiated wireless remote %s requested.", (value === this.hap.Characteristic.LockTargetState.SECURED) ? "lock" : "unlock");
+
         if(!(await this.command("lock", (value === this.hap.Characteristic.LockTargetState.SECURED) ? "lock" : "unlock"))) {
 
           // Something went wrong. Let's make sure we revert the lock to it's prior state.

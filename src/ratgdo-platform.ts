@@ -177,18 +177,20 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
             return "Connection to the Ratgdo controller refused";
           }
 
-          if(message.startsWith("connect ETIMEDOUT ")) {
+          if(message.startsWith("connect ETIMEDOUT ") || message.startsWith("TypeError: fetch failed: Connect Timeout Error")) {
 
             return "Connection to the Ratgdo controller has timed out";
           }
 
-          if(message.startsWith("connect EHOSTDOWN ")) {
+          if(message.startsWith("connect EHOSTDOWN ") || message.startsWith("connect EHOSTUNREACH") ||
+            message.startsWith("TypeError: fetch failed: connect EHOSTUNREACH")) {
 
             return "Unable to connect to the Ratgdo controller. The host appears to be down";
           }
 
           const errorMessages: { [index: string]: string } = {
 
+            "TypeError: terminated: read ETIMEDOUT": "Connection to the Ratgdo controller has timed out while listening for events",
             "read ECONNRESET": "Connection to the Ratgdo controller has been reset",
             "read ETIMEDOUT": "Connection to the Ratgdo controller has timed out while listening for events",
             "unknown error.": "An unknown error on the Ratgdo controller has occurred. This will happen occasionally and can generally be ignored"
