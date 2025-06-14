@@ -2,6 +2,9 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 2.8.1 (2025-06-14)
+  * Housekeeping.
+
 ## 2.8.0 (2025-06-01)
   * New feature: you can now enable or disable Ratgdo’s wireless lockout in HomeKit. This adds a lock accessory to your garage door opener (visible in third-party HomeKit apps like Eve Home and Home+). Wireless lockout blocks all remote access, ideal for securing your home at night or when away. Enabled by default. This feature already existed in HBR, it can now be disabled, like the other capabilities of HBR.
   * Housekeeping.
