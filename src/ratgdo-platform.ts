@@ -4,15 +4,15 @@
  */
 import type { API, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
 import { Bonjour, type Service } from "bonjour-service";
-import { FeatureOptions, MqttClient, type Nullable, validateName } from "homebridge-plugin-utils";
-import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_AUTODISCOVERY_INTERVAL, RATGDO_AUTODISCOVERY_PROJECT_NAMES, RATGDO_AUTODISCOVERY_TYPES, RATGDO_EVENT_API_HEARTBEAT_DURATION,
-  RATGDO_HEARTBEAT_DURATION, RATGDO_HEARTBEAT_INTERVAL, RATGDO_MQTT_TOPIC } from "./settings.js";
+import { type EspHomeEvent, RatgdoAccessory } from "./ratgdo-device.js";
+import { EventSource, type MessageEvent } from "undici";
+import { FeatureOptions, MqttClient, type Nullable, sanitizeName } from "homebridge-plugin-utils";
+import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_API_HEARTBEAT_DURATION, RATGDO_AUTODISCOVERY_INTERVAL, RATGDO_AUTODISCOVERY_PROJECT_NAMES, RATGDO_AUTODISCOVERY_TYPES,
+  RATGDO_MQTT_TOPIC } from "./settings.js";
 import { type RatgdoOptions, featureOptionCategories, featureOptions } from "./ratgdo-options.js";
 import { APIEvent } from "homebridge";
-import { EventSource } from "eventsource";
-import { RatgdoAccessory } from "./ratgdo-device.js";
+import { EspHomeClient } from "./ratgdo-api.js";
 import { RatgdoVariant } from "./ratgdo-types.js";
-import net from "node:net";
 import util from "node:util";
 
 export class RatgdoPlatform implements DynamicPlatformPlugin {
@@ -20,8 +20,10 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   private readonly accessories: PlatformAccessory[];
   public readonly api: API;
   private discoveredDevices: { [index: string]: boolean };
+  private listeners:{ [index: string]: { [index: string]: (() => NodeJS.Timeout | void) | ((event: Event) => void) }};
+  public readonly espHomeApi: { [index: string]: EspHomeClient };
   private readonly espHomeEvents: { [index: string]: EventSource };
-  private readonly pingTimers: { [index: string]: NodeJS.Timeout };
+  private readonly heartbeatTimers: { [index: string]: NodeJS.Timeout };
   public featureOptions: FeatureOptions;
   public config: RatgdoOptions;
   public readonly configOptions: string[];
@@ -38,13 +40,15 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.configOptions = [];
     this.configuredDevices = {};
     this.discoveredDevices = {};
+    this.espHomeApi = {};
     this.espHomeEvents = {};
     this.featureOptions = new FeatureOptions(featureOptionCategories, featureOptions, config?.options);
     this.hap = api.hap;
+    this.listeners = {};
     this.log = log;
     this.log.debug = this.debug.bind(this);
     this.mqtt = null;
-    this.pingTimers = {};
+    this.heartbeatTimers = {};
 
     // We can't start without being configured.
     if(!config) {
@@ -74,11 +78,32 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     // Make sure we take ourselves offline when we shutdown.
     api.on(APIEvent.SHUTDOWN, () => {
 
-      // Close our events connection.
-      Object.values(this.espHomeEvents).map(deviceEvents => deviceEvents.close());
+      // Stop any open heartbeat timers.
+      Object.values(this.heartbeatTimers).map(timer => clearTimeout(timer));
 
-      // Clear any open ping timers.
-      Object.values(this.pingTimers).map(timer => clearTimeout(timer));
+      // Cleanup and close our events connection.
+      Object.keys(this.espHomeEvents).map(mac => {
+
+        this.espHomeEvents[mac].removeEventListener("log", this.listeners[mac].log);
+        delete this.listeners[mac].log;
+
+        this.espHomeEvents[mac].close();
+      });
+
+      // Cleanup and close our API connection.
+      Object.keys(this.listeners).map(mac => {
+
+        Object.keys(this.listeners[mac]).map(event => {
+
+          this.espHomeApi[mac].off(event, this.listeners[mac][event]);
+          delete this.listeners[mac][event];
+
+        });
+
+        this.espHomeApi[mac]?.disconnect();
+
+        delete this.espHomeApi[mac];
+      });
 
       // Inform our accessories we're going offline.
       Object.values(this.configuredDevices).map(device => device.updateState({ id: "availability", state: "offline" }));
@@ -95,6 +120,19 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
   // Configure and connect to Ratgdo ESPHome clients.
   private configureRatgdo(): void {
+
+    // The EventSource API client is currently flagged as experimental in undici, though it's quite stable and solid already. We work around this issue by forcibly
+    // filtering out the warning.
+    process.removeAllListeners("warning").on("warning", (warning: NodeJS.ErrnoException) => {
+
+      if((warning.code === "UNDICI-ES") && (warning.message === "EventSource is experimental, expect them to change at any time.")) {
+
+        return;
+      }
+
+      // eslint-disable-next-line no-console
+      console.warn(warning);
+    });
 
     // Instantiate our mDNS stack.
     const mdns = new Bonjour();
@@ -118,14 +156,6 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   // Ratgdo ESPHome device discovery.
   private discoverRatgdoDevice(service: Service): void {
 
-    // Define the EventSource error message type.
-    interface ESError {
-
-      message?: string,
-      status?: number,
-      type: string
-    }
-
     // We're only interested in ESPHome Ratgdo devices (and compatible variants) with valid MAC and IP addresses. Otherwise, we're done.
     if((!service.txt?.esphome_version && !service.txt?.version) || !service.txt?.mac || !service.addresses ||
       !RATGDO_AUTODISCOVERY_PROJECT_NAMES.some(project => (service.txt as Record<string, string>)?.project_name?.match(project))) {
@@ -136,96 +166,29 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     // We grab the first address provided for the ESPHome device.
     const address = service.addresses[0];
 
-    // Grab the MAC address. We uppercase it and put it in the familiar colon notation first.
-    const mac = (service.txt as Record<string, string>).mac.toUpperCase().replace(/(.{2})(?=.)/g, "$1:");
-
     // Configure the device.
-    const ratgdoAccessory = this.configureGdo(address, mac, service.txt);
+    const ratgdo = this.configureGdo(address, (service.txt as Record<string, string>).mac, service.txt);
 
     // If we've already configured this one, we're done.
-    if(!ratgdoAccessory) {
+    if(!ratgdo) {
 
       return;
     }
 
-    try {
+    this.listeners[ratgdo.device.mac] = {};
+
+    // Battery status is only available to us through log entries made by the SSE/EventSource API. The native API doesn't expose battery state yet.
+    if(ratgdo.hints.discoBattery) {
 
       // Connect to the Ratgdo ESPHome events API.
-      this.espHomeEvents[mac] = new EventSource("http://" + address + "/events");
-
-      // Handle errors in the events API.
-      this.espHomeEvents[mac].addEventListener("error", (payload: ESError) => {
-
-        // The eventsource library returns unknown network errors at times. We ignore them.
-        if(typeof payload.message === "undefined") {
-
-          return;
-        }
-
-        const getErrorMessage = (payload: ESError): string => {
-
-          const { message } = payload;
-          const errorMessage = "Unrecognized error: " + util.inspect(payload, { sorted: true });
-
-          if(typeof message !== "string") {
-
-            return errorMessage;
-          }
-
-          if(message.startsWith("connect ECONNREFUSED ")) {
-
-            return "Connection to the Ratgdo controller refused";
-          }
-
-          if(message.startsWith("connect ETIMEDOUT ") || message.startsWith("TypeError: fetch failed: Connect Timeout Error")) {
-
-            return "Connection to the Ratgdo controller has timed out";
-          }
-
-          if(message.startsWith("connect EHOSTDOWN ") || message.startsWith("connect EHOSTUNREACH") ||
-            message.startsWith("TypeError: fetch failed: connect EHOSTUNREACH")) {
-
-            return "Unable to connect to the Ratgdo controller. The host appears to be down";
-          }
-
-          const errorMessages: { [index: string]: string } = {
-
-            "TypeError: terminated: read ETIMEDOUT": "Connection to the Ratgdo controller has timed out while listening for events",
-            "read ECONNRESET": "Connection to the Ratgdo controller has been reset",
-            "read ETIMEDOUT": "Connection to the Ratgdo controller has timed out while listening for events",
-            "unknown error.": "An unknown error on the Ratgdo controller has occurred. This will happen occasionally and can generally be ignored"
-          };
-
-          return errorMessages[message] ?? errorMessage;
-        };
-
-        ratgdoAccessory.log.error("%s.", getErrorMessage(payload));
-      });
-
-      // Inform the user when we've successfully connected.
-      this.espHomeEvents[mac].addEventListener("open", () => {
-
-        ratgdoAccessory.updateState({ id: "availability", state: "online" });
-      });
-
-      // Inform the user about the availability of the events API.
-      this.espHomeEvents[mac].addEventListener("ping", () => {
-
-        if(this.pingTimers[mac]) {
-
-          clearTimeout(this.pingTimers[mac]);
-          delete this.pingTimers[mac];
-        }
-
-        ratgdoAccessory.updateState({ id: "availability", state: "online" });
-
-        this.pingTimers[mac] = setTimeout(() => ratgdoAccessory.updateState({ id: "availability", state: "offline" }), RATGDO_EVENT_API_HEARTBEAT_DURATION * 1000);
-      });
+      this.espHomeEvents[ratgdo.device.mac] = new EventSource("http://" + address + "/events");
 
       // Capture log updates from the controller.
-      this.espHomeEvents[mac].addEventListener("log", (message: MessageEvent<string>) => {
+      this.espHomeEvents[ratgdo.device.mac].addEventListener("log", this.listeners[ratgdo.device.mac].log = (event: Event): void => {
 
-        ratgdoAccessory.log.debug("Log event received: %s", util.inspect(message.data, { sorted: true }));
+        const message = event as MessageEvent<string>;
+
+        ratgdo.log.debug("Log event received: %s", util.inspect(message.data, { sorted: true }));
 
         // Ratgdo occasionally sends empty status updates - we ignore them.
         if(!message.data.length) {
@@ -239,66 +202,124 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
         // We've got a battery state update, inform the Ratgdo.
         if(batteryState) {
 
-          ratgdoAccessory.updateState({ id: "battery", state: batteryState[1] });
+          ratgdo.log.debug("BATTERY STATE UPDATE: \"%s\"", batteryState[1]);
+
+          ratgdo.updateState({ id: "battery", state: batteryState[1] });
         }
       });
-
-      // Capture state updates from the controller.
-      this.espHomeEvents[mac].addEventListener("state", (message: MessageEvent<string>) => {
-
-        let event;
-
-        ratgdoAccessory.log.debug("State event received: %s", util.inspect(message.data, { sorted: true }));
-
-        // Ratgdo occasionally sends empty status updates - we ignore them.
-        if(!message.data.length) {
-
-          return;
-        }
-
-        try {
-
-          event = JSON.parse(message.data);
-        } catch(error) {
-
-          ratgdoAccessory.log.error("Unable to parse state message: \"%s\". Invalid JSON.", message.data);
-
-          return;
-        }
-
-        ratgdoAccessory.updateState(event);
-      });
-
-      // Heartbeat the Ratgdo controller at regular intervals. We need to do this because the ESPHome firmware for Ratgdo has a failsafe that will autoreboot the
-      // Ratgdo every 15 minutes if it doesn't receive a native API connection. Fortunately, the failsafe only looks for an open connection to the API, allowing us the
-      // opportunity to heartbeat it with a connection we periodically reopen.
-      const heartbeat = (): void => {
-
-        // Connect to the Ratgdo, and setup our heartbeat to close after a configured duration.
-        const socket = net.createConnection({ host: address, port: 6053 }, () => setTimeout(() => {
-
-          socket.destroy();
-        }, RATGDO_HEARTBEAT_DURATION * 1000));
-
-        // Handle heartbeat errors.
-        socket.on("error", (err) => ratgdoAccessory.log.debug("Heartbeat error: %s.", util.inspect(err, { sorted: true })));
-
-        // Perpetually restart our heartbeat when it ends.
-        socket.on("close", () => setTimeout(() => heartbeat(), RATGDO_HEARTBEAT_INTERVAL * 1000));
-      };
-
-      heartbeat();
-    } catch(error) {
-
-      if(error instanceof Error) {
-
-        ratgdoAccessory.log.error("Ratgdo API error: %s", error.message);
-      }
     }
+
+    this.espHomeApi[ratgdo.device.mac] = new EspHomeClient(ratgdo.log, address);
+
+    // Kickoff our heartbeats only the very first time we connect.
+    this.espHomeApi[ratgdo.device.mac].once("connect", () => this.beat(ratgdo));
+
+    // Reconnect on disconnect.
+    this.espHomeApi[ratgdo.device.mac].on("disconnect",
+      this.listeners[ratgdo.device.mac].disconnect = (): void => this.beat(ratgdo, { reconnecting: true, updateState: false}));
+
+    // Heartbeat our Ratgdo.
+    this.espHomeApi[ratgdo.device.mac].on("message", this.listeners[ratgdo.device.mac].message = (): void => this.beat(ratgdo));
+
+    // Process telemetry from the Ratgdo.
+    this.espHomeApi[ratgdo.device.mac].on("telemetry", (data: { type: string, currentOperation?: number, entity: string, position?: number, value: string | number }) => {
+
+      const payload: EspHomeEvent = { id: (data.type + "-" + data.entity).replace(/ /g, "_").toLowerCase(), state: "" };
+
+      switch(data.type) {
+
+        case "binary_sensor":
+        case "light":
+        case "switch":
+
+          payload.state = data.value ? "ON" : "OFF";
+
+          break;
+
+        case "cover":
+        case "door_cover":
+
+          // data: {"id":"cover-door","value":0,"state":"CLOSED","current_operation":"IDLE","position":0}
+          payload.state = data.position ? "OPEN" : "CLOSED";
+
+          switch(data.currentOperation) {
+
+            case 1:
+
+              // eslint-disable-next-line camelcase
+              payload.current_operation = "OPENING";
+
+              break;
+
+            case 2:
+
+              // eslint-disable-next-line camelcase
+              payload.current_operation = "CLOSING";
+
+              break;
+
+            case undefined:
+            case 0:
+            default:
+
+              // eslint-disable-next-line camelcase
+              payload.current_operation = "IDLE";
+
+              break;
+
+          }
+
+          payload.position = data.position;
+
+          break;
+
+        case "lock":
+
+          switch(data.value) {
+
+            case 1:
+
+              payload.state = "LOCKED";
+
+              break;
+
+            case 2:
+
+              payload.state = "UNLOCKED";
+
+              break;
+
+            default:
+
+              payload.state = "UNKNOWN";
+
+              break;
+          }
+
+          break;
+
+        case "button":
+        case "sensor":
+        case "text_sensor":
+        default:
+
+          payload.state = (typeof data.value === "number") ? data.value.toString() : data.value;
+
+          break;
+      }
+
+      ratgdo.updateState(payload);
+    });
+
+
+    this.espHomeApi[ratgdo.device.mac].connect();
   }
 
   // Configure a discovered garage door opener.
   private configureGdo(address: string, mac: string, deviceInfo: Record<string, string>): Nullable<RatgdoAccessory> {
+
+    // We uppercase the MAC and normalize it to the familiar colon notation before we do anything else.
+    mac = mac.toUpperCase().replace(/(.{2})(?=.)/g, "$1:");
 
     // If we've already discovered this device, we're done.
     if(this.discoveredDevices[mac]) {
@@ -357,7 +378,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     // It's a new device - let's add it to HomeKit.
     if(!accessory) {
 
-      accessory = new this.api.platformAccessory(validateName(device.name), uuid);
+      accessory = new this.api.platformAccessory(sanitizeName(device.name), uuid);
 
       // Register this accessory with Homebridge and add it to the accessory array so we can track it.
       this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
@@ -375,6 +396,52 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.api.updatePlatformAccessories([accessory]);
 
     return this.configuredDevices[uuid];
+  }
+
+  // Heartbeat the Ratgdo.
+  private beat(ratgdo: RatgdoAccessory, options: Partial<{ reconnecting: boolean, updateState: boolean }> = {}): void {
+
+    options.reconnecting ??= false;
+    options.updateState ??= true;
+
+    if(this.heartbeatTimers[ratgdo.device.mac]) {
+
+      clearTimeout(this.heartbeatTimers[ratgdo.device.mac]);
+      clearTimeout(this.heartbeatTimers[ratgdo.device.mac + ".reconnect"]);
+
+      delete this.heartbeatTimers[ratgdo.device.mac];
+      delete this.heartbeatTimers[ratgdo.device.mac + ".reconnect"];
+    }
+
+    if(options.updateState) {
+
+      ratgdo.updateState({ id: "availability", state: "online" });
+    } else if(options.reconnecting) {
+
+      ratgdo.updateState({ id: "availability", state: "offline" });
+    }
+
+    // Reset our timer.
+    this.heartbeatTimers[ratgdo.device.mac] = setTimeout(() => {
+
+      // The API instance is no longer available due to plugin shutdown. We're done.
+      if(!this.espHomeApi[ratgdo.device.mac]) {
+
+        return;
+      }
+
+      // No heartbeat detected. Let's attempt to reconnect, unless we already have one inflight.
+      if(!options.reconnecting) {
+
+        this.espHomeApi[ratgdo.device.mac].disconnect();
+      }
+
+      this.heartbeatTimers[ratgdo.device.mac + ".reconnect"] = setTimeout(() => {
+
+        this.espHomeApi[ratgdo.device.mac].connect();
+        this.beat(ratgdo, { updateState: false });
+      }, 2000);
+    }, (options.reconnecting ? 0.5 : RATGDO_API_HEARTBEAT_DURATION) * 1000);
   }
 
   // Utility for debug logging.

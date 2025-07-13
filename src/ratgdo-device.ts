@@ -3,7 +3,7 @@
  * ratgdo-device.ts: Base class for all Ratgdo devices.
  */
 import type { API, CharacteristicValue, HAP, PlatformAccessory } from "homebridge";
-import { type HomebridgePluginLogging, type Nullable, acquireService, validService, validateName } from "homebridge-plugin-utils";
+import { type HomebridgePluginLogging, type Nullable, acquireService, sanitizeName, validService } from "homebridge-plugin-utils";
 import { RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION } from "./settings.js";
 import { type RatgdoDevice, RatgdoReservedNames, RatgdoVariant } from "./ratgdo-types.js";
 import type { RatgdoOptions } from "./ratgdo-options.js";
@@ -11,7 +11,7 @@ import type { RatgdoPlatform } from "./ratgdo-platform.js";
 import util from "node:util";
 
 // ESPHome EventSource state messages.
-interface EspHomeEvent {
+export interface EspHomeEvent {
 
   current_operation?: string,
   id: string,
@@ -78,7 +78,7 @@ export class RatgdoAccessory {
   public readonly device: RatgdoDevice;
   private doorOccupancyTimer: Nullable<NodeJS.Timeout>;
   private readonly hap: HAP;
-  private readonly hints: RatgdoHints;
+  public readonly hints: RatgdoHints;
   public readonly log: HomebridgePluginLogging;
   private motionOccupancyTimer: Nullable<NodeJS.Timeout>;
   private motionTimer: Nullable<NodeJS.Timeout>;
@@ -324,7 +324,7 @@ export class RatgdoAccessory {
   private configureGarageDoor(): boolean {
 
     // Acquire the service.
-    const service = acquireService(this.hap, this.accessory, this.hap.Service.GarageDoorOpener, this.name);
+    const service = acquireService(this.accessory, this.hap.Service.GarageDoorOpener, this.name);
 
     if(!service) {
 
@@ -353,11 +353,9 @@ export class RatgdoAccessory {
     // Configure the lock garage door lock current and target state characteristics if the user has enabled it.
     if(this.hints.lock) {
 
-      service.getCharacteristic(this.hap.Characteristic.LockTargetState).onSet(async (value: CharacteristicValue) => {
+      service.getCharacteristic(this.hap.Characteristic.LockTargetState).onSet((value: CharacteristicValue) => {
 
-        this.log.debug("User-initiated wireless remote %s requested.", (value === this.hap.Characteristic.LockTargetState.SECURED) ? "lock" : "unlock");
-
-        if(!(await this.command("lock", (value === this.hap.Characteristic.LockTargetState.SECURED) ? "lock" : "unlock"))) {
+        if(!this.command("lock", (value === this.hap.Characteristic.LockTargetState.SECURED) ? "lock" : "unlock")) {
 
           // Something went wrong. Let's make sure we revert the lock to it's prior state.
           setTimeout(() => {
@@ -393,7 +391,7 @@ export class RatgdoAccessory {
     }
 
     // Acquire the service.
-    const service = acquireService(this.hap, this.accessory, this.hap.Service.Lightbulb, this.name, undefined, () => this.log.info("Enabling light."));
+    const service = acquireService(this.accessory, this.hap.Service.Lightbulb, this.name, undefined, () => this.log.info("Enabling light."));
 
     if(!service) {
 
@@ -407,7 +405,7 @@ export class RatgdoAccessory {
 
     // Turn the light on or off.
     service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.status.light);
-    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => void this.command("light", value === true ? "on" : "off"));
+    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => this.command("light", value === true ? "on" : "off"));
 
     return true;
   }
@@ -422,7 +420,7 @@ export class RatgdoAccessory {
     }
 
     // Acquire the service.
-    const service = acquireService(this.hap, this.accessory, this.hap.Service.MotionSensor, this.name, undefined, () => this.log.info("Enabling motion sensor."));
+    const service = acquireService(this.accessory, this.hap.Service.MotionSensor, this.name, undefined, () => this.log.info("Enabling motion sensor."));
 
     if(!service) {
 
@@ -449,7 +447,7 @@ export class RatgdoAccessory {
     }
 
     // Acquire the service.
-    const service = acquireService(this.hap, this.accessory, this.hap.Service.Lightbulb, this.name + " Automation Door Position",
+    const service = acquireService(this.accessory, this.hap.Service.Lightbulb, this.name + " Automation Door Position",
       RatgdoReservedNames.DIMMER_OPENER_AUTOMATION);
 
     if(!service) {
@@ -519,7 +517,7 @@ export class RatgdoAccessory {
     }
 
     // Acquire the service.
-    const service = acquireService(this.hap, this.accessory, this.hap.Service.Switch, this.name + " Automation Opener", RatgdoReservedNames.SWITCH_OPENER_AUTOMATION);
+    const service = acquireService(this.accessory, this.hap.Service.Switch, this.name + " Automation Opener", RatgdoReservedNames.SWITCH_OPENER_AUTOMATION);
 
     if(!service) {
 
@@ -566,7 +564,7 @@ export class RatgdoAccessory {
     }
 
     // Acquire the service.
-    const service = acquireService(this.hap, this.accessory, this.hap.Service.Battery, this.name);
+    const service = acquireService(this.accessory, this.hap.Service.Battery, this.name);
 
     if(!service) {
 
@@ -597,7 +595,7 @@ export class RatgdoAccessory {
     }
 
     // Acquire the service.
-    const service = acquireService(this.hap, this.accessory, this.hap.Service.Switch, this.name + " Laser", RatgdoReservedNames.SWITCH_DISCO_LASER);
+    const service = acquireService(this.accessory, this.hap.Service.Switch, this.name + " Laser", RatgdoReservedNames.SWITCH_DISCO_LASER);
 
     if(!service) {
 
@@ -610,7 +608,7 @@ export class RatgdoAccessory {
     service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.status.discoLaser);
 
     // Open or close the switch.
-    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => void this.command("disco-laser", value === true ? "on" : "off"));
+    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => this.command("disco-laser", value === true ? "on" : "off"));
 
     // Initialize the switch.
     service.updateCharacteristic(this.hap.Characteristic.On, this.status.discoLaser);
@@ -631,7 +629,7 @@ export class RatgdoAccessory {
     }
 
     // Acquire the service.
-    const service = acquireService(this.hap, this.accessory, this.hap.Service.Switch, this.name + " LED", RatgdoReservedNames.SWITCH_DISCO_LED);
+    const service = acquireService(this.accessory, this.hap.Service.Switch, this.name + " LED", RatgdoReservedNames.SWITCH_DISCO_LED);
 
     if(!service) {
 
@@ -644,7 +642,7 @@ export class RatgdoAccessory {
     service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.status.discoLed);
 
     // Open or close the switch.
-    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => void this.command("disco-led", value === true ? "on" : "off"));
+    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => this.command("disco-led", value === true ? "on" : "off"));
 
     // Initialize the switch.
     service.updateCharacteristic(this.hap.Characteristic.On, this.status.discoLed);
@@ -665,7 +663,7 @@ export class RatgdoAccessory {
     }
 
     // Acquire the service.
-    const service = acquireService(this.hap, this.accessory, this.hap.Service.ContactSensor, this.name + " Vehicle Arriving",
+    const service = acquireService(this.accessory, this.hap.Service.ContactSensor, this.name + " Vehicle Arriving",
       RatgdoReservedNames.CONTACT_DISCO_VEHICLE_ARRIVING);
 
     if(!service) {
@@ -696,7 +694,7 @@ export class RatgdoAccessory {
     }
 
     // Acquire the service.
-    const service = acquireService(this.hap, this.accessory, this.hap.Service.ContactSensor, this.name + " Vehicle Leaving",
+    const service = acquireService(this.accessory, this.hap.Service.ContactSensor, this.name + " Vehicle Leaving",
       RatgdoReservedNames.CONTACT_DISCO_VEHICLE_LEAVING);
 
     if(!service) {
@@ -727,7 +725,7 @@ export class RatgdoAccessory {
     }
 
     // Acquire the service.
-    const service = acquireService(this.hap, this.accessory, this.hap.Service.OccupancySensor, this.name + " Vehicle Presence",
+    const service = acquireService(this.accessory, this.hap.Service.OccupancySensor, this.name + " Vehicle Presence",
       RatgdoReservedNames.OCCUPANCY_DISCO_VEHICLE_PRESENCE);
 
     if(!service) {
@@ -758,7 +756,7 @@ export class RatgdoAccessory {
     }
 
     // Acquire the service.
-    const service = acquireService(this.hap, this.accessory, this.hap.Service.Switch, this.name + " Pre Close Warning", RatgdoReservedNames.SWITCH_KONNECTED_PCW);
+    const service = acquireService(this.accessory, this.hap.Service.Switch, this.name + " Pre Close Warning", RatgdoReservedNames.SWITCH_KONNECTED_PCW);
 
     if(!service) {
 
@@ -771,13 +769,13 @@ export class RatgdoAccessory {
     service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => false);
 
     // Open or close the switch.
-    service.getCharacteristic(this.hap.Characteristic.On)?.onSet(async (value: CharacteristicValue) => {
+    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => {
 
       // Default to reseting our switch state after the pre-close warning has completed playing.
       let resetTimer = 5000;
 
       // Send the command.
-      if(!(await this.command("konnected-pcw"))) {
+      if(!this.command("konnected-pcw")) {
 
         // Something went wrong. Let's make sure we revert the switch to it's prior state immediately.
         resetTimer = 50;
@@ -806,7 +804,7 @@ export class RatgdoAccessory {
     }
 
     // Acquire the service.
-    const service = acquireService(this.hap, this.accessory, this.hap.Service.Switch, this.name + " Strobe", RatgdoReservedNames.SWITCH_KONNECTED_STROBE);
+    const service = acquireService(this.accessory, this.hap.Service.Switch, this.name + " Strobe", RatgdoReservedNames.SWITCH_KONNECTED_STROBE);
 
     if(!service) {
 
@@ -819,7 +817,7 @@ export class RatgdoAccessory {
     service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.status.konnectedStrobe);
 
     // Open or close the switch.
-    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => void this.command("konnected-strobe", value === true ? "on" : "off"));
+    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => this.command("konnected-strobe", value === true ? "on" : "off"));
 
     // Initialize the switch.
     service.updateCharacteristic(this.hap.Characteristic.On, this.status.konnectedStrobe);
@@ -839,7 +837,7 @@ export class RatgdoAccessory {
     }
 
     // Acquire the service.
-    const service = acquireService(this.hap, this.accessory, this.hap.Service.Switch, this.name + " Lockout", RatgdoReservedNames.SWITCH_LOCKOUT);
+    const service = acquireService(this.accessory, this.hap.Service.Switch, this.name + " Lockout", RatgdoReservedNames.SWITCH_LOCKOUT);
 
     if(!service) {
 
@@ -852,13 +850,13 @@ export class RatgdoAccessory {
     service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.status.lock === this.hap.Characteristic.LockCurrentState.SECURED);
 
     // Lock or unlock the wireless remotes.
-    service.getCharacteristic(this.hap.Characteristic.On)?.onSet(async (value: CharacteristicValue) => {
+    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => {
 
       // Inform the user.
       this.log.info("Automation wireless remote lockout switch: remotes are %s.", value ? "locked out" : "permitted");
 
       // Send the command.
-      if(!(await this.command("lock", value ? "lock" : "unlock"))) {
+      if(!this.command("lock", value ? "lock" : "unlock")) {
 
         // Something went wrong. Let's make sure we revert the switch to it's prior state.
         setTimeout(() => service?.updateCharacteristic(this.hap.Characteristic.On, !value), 50);
@@ -883,7 +881,7 @@ export class RatgdoAccessory {
     }
 
     // Acquire the service.
-    const service = acquireService(this.hap, this.accessory, this.hap.Service.OccupancySensor, this.name + " Open", RatgdoReservedNames.OCCUPANCY_SENSOR_DOOR_OPEN);
+    const service = acquireService(this.accessory, this.hap.Service.OccupancySensor, this.name + " Open", RatgdoReservedNames.OCCUPANCY_SENSOR_DOOR_OPEN);
 
     if(!service) {
 
@@ -914,7 +912,7 @@ export class RatgdoAccessory {
     }
 
     // Acquire the service.
-    const service = acquireService(this.hap, this.accessory, this.hap.Service.OccupancySensor, this.name, RatgdoReservedNames.OCCUPANCY_SENSOR_MOTION);
+    const service = acquireService(this.accessory, this.hap.Service.OccupancySensor, this.name, RatgdoReservedNames.OCCUPANCY_SENSOR_MOTION);
 
     if(!service) {
 
@@ -969,7 +967,7 @@ export class RatgdoAccessory {
       this.log.debug("User-initiated stop requested while transitioning between open and close states.");
 
       // Execute the stop command.
-      void this.command("door", "stop");
+      this.command("door", "stop");
 
       return true;
     }
@@ -980,10 +978,16 @@ export class RatgdoAccessory {
       this.log.debug("User-initiated door state change: %s%s.", this.translateTargetDoorState(value), (position !== undefined) ? " (" + position.toString() + "%)" : "");
 
       // Execute the command.
-      void this.command("door", targetAction, position);
+      this.command("door", targetAction, position);
     }
 
     return true;
+  }
+
+  // Refresh our state.
+  public refresh(): void {
+
+    this.command("refresh");
   }
 
   // Update the state of the accessory.
@@ -1484,31 +1488,26 @@ export class RatgdoAccessory {
   }
 
   // Utility function to transmit a command to Ratgdo.
-  private async command(topic: string, payload = "", position?: number): Promise<boolean> {
+  private command(topic: string, payload = "", position?: number): boolean {
 
     // Now we handle ESPHome firmware commands.
-    let endpoint;
     let action;
 
     switch(topic) {
 
       case "disco-laser":
 
-        endpoint = "switch/laser";
-        action = (payload === "on") ? "turn_on" : "turn_off";
+        this.platform.espHomeApi[this.device.mac].sendSwitchCommand("switch-laser", payload === "on");
 
         break;
 
       case "disco-led":
 
-        endpoint = "switch/led";
-        action = (payload === "on") ? "turn_on" : "turn_off";
+        this.platform.espHomeApi[this.device.mac].sendSwitchCommand("switch-led", payload === "on");
 
         break;
 
       case "door":
-
-        endpoint = (this.device.variant === RatgdoVariant.KONNECTED) ? "cover/garage_door" : "cover/door";
 
         switch(payload) {
 
@@ -1534,7 +1533,7 @@ export class RatgdoAccessory {
               return false;
             }
 
-            action = "set?position=" + (position / 100).toString();
+            action = "set";
 
             break;
 
@@ -1545,40 +1544,50 @@ export class RatgdoAccessory {
             return false;
         }
 
+        // Set the door position to the requested percentage.
+        if(position !== undefined) {
+
+          this.platform.espHomeApi[this.device.mac].sendCoverCommand("cover-" + ((this.device.variant === RatgdoVariant.KONNECTED) ? "garage_door" : "door"),
+            { position: position / 100 });
+
+          return true;
+        }
+
+        // Execute the command.
+        this.platform.espHomeApi[this.device.mac].sendCoverCommand("cover-" + ((this.device.variant === RatgdoVariant.KONNECTED) ? "garage_door" : "door"),
+          { command: (action as "open" | "close" | "stop") });
+
         break;
 
       case "konnected-pcw":
 
-        endpoint = "button/pre-close_warning";
-        action = "press";
+        this.platform.espHomeApi[this.device.mac].sendButtonCommand("button-pre-close_warning");
 
         break;
 
       case "konnected-strobe":
 
-        endpoint = "switch/str_output";
-        action = (payload === "on") ? "turn_on" : "turn_off";
+        this.platform.espHomeApi[this.device.mac].sendSwitchCommand("switch-str_output", payload === "on");
 
         break;
 
       case "light":
 
-        endpoint = (this.device.variant === RatgdoVariant.KONNECTED) ? "light/garage_light" : "light/light";
-        action = (payload === "on") ? "turn_on" : "turn_off";
+        this.platform.espHomeApi[this.device.mac].sendLightCommand("light-" + ((this.device.variant === RatgdoVariant.KONNECTED) ? "garage_light" : "light"),
+          { state: payload === "on" });
 
         break;
 
       case "lock":
 
-        endpoint = (this.device.variant === RatgdoVariant.KONNECTED) ? "lock/lock" : "lock/lock_remotes";
-        action = (payload === "lock") ? "lock" : "unlock";
+        this.platform.espHomeApi[this.device.mac].sendLockCommand("lock-" + ((this.device.variant === RatgdoVariant.KONNECTED) ? "lock" : "lock_remotes"),
+          (payload === "lock") ? "lock" : "unlock");
 
         break;
 
       case "refresh":
 
-        endpoint = "button/query_status";
-        action = "press";
+        this.platform.espHomeApi[this.device.mac].sendButtonCommand("button-query_status");
 
         break;
 
@@ -1587,60 +1596,6 @@ export class RatgdoAccessory {
         this.log.error("Unknown command received: %s - %s.", topic, payload);
 
         return false;
-    }
-
-    try {
-
-      // Execute the action.
-      const response = await fetch("http://" + this.device.address + "/" + endpoint + "/" + action, { body: JSON.stringify({}), method: "POST"});
-
-      if(!response?.ok) {
-
-        this.log.error("Unable to execute command: %s - %s.", topic, action);
-
-        return false;
-      }
-    } catch(error) {
-
-      let errorMessage = "\n" + util.inspect(error, {colors: true, depth: null, sorted: true });
-
-      if(error instanceof TypeError) {
-
-        switch((error.cause as NodeJS.ErrnoException)?.code) {
-
-          case "ECONNRESET":
-
-            errorMessage = "Connection to the Ratgdo controller has been reset";
-
-            break;
-
-          case "EHOSTDOWN":
-
-            errorMessage = "Connection to the Ratgdo controller has been reset";
-
-            break;
-
-          case "ETIMEDOUT":
-          case "UND_ERR_BODY_TIMEOUT":
-          case "UND_ERR_CONNECT_TIMEOUT":
-          case "UND_ERR_HEADERS_TIMEOUT":
-
-            errorMessage = "Connection to the Ratgdo controller has timed out";
-
-            break;
-
-          default:
-
-            errorMessage = " " + (error.cause as NodeJS.ErrnoException)?.code + " (errno: " + (error.cause as NodeJS.ErrnoException)?.errno?.toString() + ")\n" +
-              util.inspect(error.cause, { depth: null, sorted: true });
-
-            break;
-        }
-      }
-
-      this.log.error("Ratgdo API error sending command:%s", errorMessage);
-
-      return false;
     }
 
     return true;
@@ -1813,7 +1768,7 @@ export class RatgdoAccessory {
   // Utility function to set the current accessory name of this device.
   private set accessoryName(name: string) {
 
-    const cleanedName = validateName(name);
+    const cleanedName = sanitizeName(name);
 
     // Set all the internally managed names within Homebridge to the new accessory name.
     this.accessory.displayName = cleanedName;

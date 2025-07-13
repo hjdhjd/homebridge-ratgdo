@@ -9,6 +9,10 @@ export const PLATFORM_NAME = "Ratgdo";
 // The name of our plugin.
 export const PLUGIN_NAME = "homebridge-ratgdo";
 
+// Duration, in seconds, to wait for a response from the ESPHome API. ESPHome will ping us about every 60 seconds or so by default, so we set this sufficiently high to
+// account for dead connections.
+export const RATGDO_API_HEARTBEAT_DURATION = 100;
+
 // Interval, in seconds, to initiate mDNS discovery requests for new Ratgdo devices.
 export const RATGDO_AUTODISCOVERY_INTERVAL = 10;
 
@@ -17,15 +21,6 @@ export const RATGDO_AUTODISCOVERY_PROJECT_NAMES: RegExp[] = [ /^ratgdo\.esphome$
 
 // mDNS service types associated with a Ratgdo device.
 export const RATGDO_AUTODISCOVERY_TYPES = [ "esphomelib" ];
-
-// Duration, in seconds, to wait for a ping event from the ESPHome eventsource API. ESPHome defaults to sending a ping every 10 seconds.
-export const RATGDO_EVENT_API_HEARTBEAT_DURATION = 10 * 2;
-
-// Duration, in seconds, for a single heartbeat to ensure the Ratgdo doesn't autoreboot.
-export const RATGDO_HEARTBEAT_DURATION = 120;
-
-// Interval, in seconds, for heartbeat requests to ensure the Ratgdo doesn't autoreboot.
-export const RATGDO_HEARTBEAT_INTERVAL = 300;
 
 // Duration, in seconds, of a motion sensor event.
 export const RATGDO_MOTION_DURATION = 5;
