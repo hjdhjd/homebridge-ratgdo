@@ -2,6 +2,9 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 2.9.1 (2025-07-12)
+  * Housekeeping.
+
 ## 2.9.0 (2025-07-12)
   * Behavior change: HBR now uses the native ESPHome API to communicate with Ratgdo. This should be functionally invisible for most users, but under the hood it’s a big change: existing ESPHome client libraries were inelegant, outdated, or poorly maintained - so I wrote a new one specifically for HBR that’s been well-tested. The switch was necessary because newer ESPHome/Ratgdo firmware releases appears to have a bug that can randomly trigger the wireless remote lockout when using the SSE API (which HBR used until now). To avoid this, HBR now uses the native API. However, the SSE API is the only way to get battery charging status for Ratgdo 32/32 Disco units with battery-backed garage door openers. **If you enable HBR’s battery status feature, it will use the SSE API to retrieve that info, which means you may encounter the random lockout bug until ESPHome or Ratgdo fix it.** If you don’t enable that feature, only the native API will be used.
   * Behavior change: you can now rename your garage door openers and related accessories at will. Due to a bug in HomeKit, unfortunately when opener names change in the Home app, they aren't being provided back to HomeKit and HBR doesn't know about them. You should no longer see names spontaneously reverting in HBR. I hope this bug is fixed in future iOS releases by Apple.

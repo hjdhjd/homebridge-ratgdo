@@ -47,6 +47,8 @@ enum MessageType {
   FAN_COMMAND_REQUEST                    = 31,
   LIGHT_COMMAND_REQUEST                  = 32,
   SWITCH_COMMAND_REQUEST                 = 33,
+  GET_TIME_REQUEST                       = 36,
+  GET_TIME_RESPONSE                      = 37,
   LIST_ENTITIES_SERVICES_RESPONSE        = 41,
   LIST_ENTITIES_NUMBER_RESPONSE          = 49,
   NUMBER_STATE                           = 50,
@@ -398,6 +400,8 @@ export class EspHomeClient extends EventEmitter {
    */
   private handleMessage(type: number, payload: Buffer): void {
 
+    let epoch, nowBuf;
+
     // Emit a generic message event for all message types.
     this.emit("message", { payload, type });
 
@@ -471,6 +475,37 @@ export class EspHomeClient extends EventEmitter {
 
         // Emit heartbeat event for connection monitoring.
         this.emit("heartbeat");
+
+        break;
+
+      case MessageType.GET_TIME_REQUEST:
+
+        // We got a time‐sync request from the device; reply with our current epoch.
+        this.log.debug("Received GetTimeRequest, replying with current epoch time");
+
+        // Prepare a four-byte little‐endian buffer.
+        nowBuf = Buffer.alloc(FIXED32_SIZE);
+
+        // Calculate our time in seconds and encode it in our buffer.
+        nowBuf.writeUInt32LE(Math.floor(Date.now() / 1000), 0);
+
+        // Build the protobuf field: field 1, fixed32 wire type, then encode and send the message.
+        this.frameAndSend(MessageType.GET_TIME_RESPONSE, this.encodeProtoFields([ { fieldNumber: 1, value: nowBuf, wireType: WireType.FIXED32 } ]));
+
+        break;
+
+      case MessageType.GET_TIME_RESPONSE:
+
+        // Decode the fields in the GetTimeResponse payload and extract the epoch_seconds fixed32 field (field 1).
+        epoch = this.extractFixed32Field(this.decodeProtobuf(payload), 1);
+
+        if(epoch !== undefined) {
+
+          // Emit a `time` event carrying the returned epoch seconds.
+          this.emit("time", epoch);
+
+          this.log.debug("Received GetTimeResponse: epoch seconds", epoch);
+        }
 
         break;
 
