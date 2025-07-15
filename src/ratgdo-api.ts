@@ -364,33 +364,59 @@ export class EspHomeClient extends EventEmitter {
       if(this.recvBuffer[0] !== 0) {
 
         this.log.error("Framing error: missing 0x00.");
-        this.recvBuffer = Buffer.alloc(0);
 
-        return;
+        // Find the next sentinel position.
+        const idx = this.recvBuffer.indexOf(0);
+
+        // If no sentinel is found, drop all data and exit loop.
+        if(idx === -1) {
+
+          this.recvBuffer = Buffer.alloc(0);
+
+          break;
+        }
+
+        // Discard data up to the sentinel.
+        this.recvBuffer = this.recvBuffer.subarray(idx);
+
+        // Retry parsing with the new buffer.
+        continue;
       }
 
-      // Read the message length as a varint.
+      // Attempt to read the message length varint.
       const [length, lenBytes] = this.readVarint(this.recvBuffer, 1);
 
-      // Read the message type as a varint.
+      // Incomplete varint; wait for more data.
+      if((length === -1) && (lenBytes === -1)) {
+
+        break;
+      }
+
+      // Attempt to read the message type varint.
       const [type, typeBytes] = this.readVarint(this.recvBuffer, 1 + lenBytes);
+
+      // Incomplete varint; wait for more data.
+      if((type === -1) && (typeBytes === -1)) {
+
+        break;
+      }
 
       // Calculate the total header size.
       const headerSize = 1 + lenBytes + typeBytes;
 
-      // Check if we have received the complete message payload.
-      if(this.recvBuffer.length < (headerSize + length)) {
+      // If full message is not yet received, wait for more data.
+      if(this.recvBuffer.length < (headerSize + length)){
 
         break;
       }
 
       // Extract the message payload.
-      const payload = this.recvBuffer.subarray(headerSize, headerSize + length);
+      const payload = this.recvBuffer.subarray(headerSize, (headerSize + length));
 
-      // Process the complete message.
+      // Dispatch the message to the handler.
       this.handleMessage(type, payload);
 
-      // Remove the processed message from the receive buffer.
+      // Remove the processed message from the buffer.
       this.recvBuffer = this.recvBuffer.subarray(headerSize + length);
     }
   }
@@ -1291,7 +1317,6 @@ export class EspHomeClient extends EventEmitter {
     this.frameAndSend(MessageType.LOCK_COMMAND_REQUEST, payload);
   }
 
-
   /**
    * Encode an integer as a VarInt (protobuf-style).
    */
@@ -1339,6 +1364,14 @@ export class EspHomeClient extends EventEmitter {
 
     // Read byte-by-byte, adding 7 bits at each step, until the continuation bit is clear.
     for(let shift = 0; ; shift += 7) {
+
+      // If we're trying to read past the end, let's quit.
+      if(offset + bytesRead >= buffer.length){
+
+        this.log.error("Incomplete response received from the API.");
+
+        return [-1, -1];
+      }
 
       // Fetch the next raw byte from the buffer.
       const byte = buffer[offset + bytesRead];
