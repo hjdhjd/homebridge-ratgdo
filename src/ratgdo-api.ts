@@ -60,6 +60,19 @@ enum MessageType {
 }
 
 /**
+ * Protocol states for proper handshake sequencing.
+ */
+enum ProtocolState {
+
+  DISCONNECTED = 0,
+  CONNECTED = 1,
+  HELLO_SENT = 2,
+  HELLO_RECEIVED = 3,
+  AUTHENTICATED = 4,
+  READY = 5
+}
+
+/**
  * Define the valid types that a decoded ESPHome field value can have.
  */
 type FieldValue = Buffer | number;
@@ -201,6 +214,15 @@ export class EspHomeClient extends EventEmitter {
   // Map from entity keys to their type labels.
   private entityTypes;
 
+  // Current protocol state.
+  private protocolState: ProtocolState;
+
+  // Tracks if we initiated the hello exchange.
+  private helloInitiator: boolean;
+
+  // Message queue for messages received out of order.
+  private messageQueue: Array<{ type: number; payload: Buffer }>;
+
   /**
    * Creates a new ESPHome client instance.
    *
@@ -218,9 +240,12 @@ export class EspHomeClient extends EventEmitter {
     this.entityKeys = new Map<string, number>();
     this.entityNames = new Map<number, string>();
     this.entityTypes = new Map<number, string>();
+    this.helloInitiator = false;
     this.host = host;
     this.log = log;
+    this.messageQueue = [];
     this.port = port;
+    this.protocolState = ProtocolState.DISCONNECTED;
     this.recvBuffer = Buffer.alloc(0);
     this.remoteDeviceInfo = null;
   }
@@ -232,6 +257,11 @@ export class EspHomeClient extends EventEmitter {
 
     // Clean up any existing data listener before establishing a new connection.
     this.cleanupDataListener();
+
+    // Reset protocol state.
+    this.protocolState = ProtocolState.DISCONNECTED;
+    this.helloInitiator = false;
+    this.messageQueue = [];
 
     // Create a new TCP connection to the ESPHome device.
     this.clientSocket = createConnection({ host: this.host, port: this.port });
@@ -265,6 +295,8 @@ export class EspHomeClient extends EventEmitter {
       this.clientSocket = null;
     }
 
+    this.protocolState = ProtocolState.DISCONNECTED;
+
     this.emit("disconnect");
   }
 
@@ -275,22 +307,51 @@ export class EspHomeClient extends EventEmitter {
 
     this.log.debug("Connected to " + this.host + ":" + this.port + ".");
 
-    // Send the initial hello request to start the handshake.
+    this.protocolState = ProtocolState.CONNECTED;
+
+    // Wait a brief moment to see if the device sends us a HELLO_REQUEST first. It seems that some devices may initiate the handshake rather than expect us to.
+    setTimeout(() => this.protocolState === ProtocolState.CONNECTED && this.sendHelloRequest(), 100);
+  }
+
+  /**
+   * Send the initial HELLO_REQUEST to start the handshake.
+   */
+  private sendHelloRequest(): void {
+
+    this.log.debug("Sending HELLO_REQUEST");
+
+    this.helloInitiator = true;
+
     // Prepare the client information string for the hello message.
     const clientInfo = Buffer.from("homebridge-ratgdo", "utf8");
 
     // Build the hello payload fields.
     const fields: ProtoField[] = [
 
-      { fieldNumber: 1, value: clientInfo, wireType: WireType.LENGTH_DELIMITED },
-      { fieldNumber: 2, value: 1, wireType: WireType.VARINT },
-      { fieldNumber: 3, value: 10, wireType: WireType.VARINT }
+      { fieldNumber: 1, value: clientInfo, wireType: WireType.LENGTH_DELIMITED }
     ];
 
     // Encode and send the hello request.
     const payload = this.encodeProtoFields(fields);
 
     this.frameAndSend(MessageType.HELLO_REQUEST, payload);
+
+    this.protocolState = ProtocolState.HELLO_SENT;
+  }
+
+  /**
+   * Verify the protocol is ready.
+   */
+  private isReady(command: string): boolean {
+
+    if(this.protocolState === ProtocolState.READY) {
+
+      return true;
+    }
+
+    this.log.warn("Cannot send " + command + " command - protocol not ready (state: " + this.protocolState + ")");
+
+    return false;
   }
 
   /**
@@ -363,7 +424,7 @@ export class EspHomeClient extends EventEmitter {
       // Verify the frame starts with the expected sentinel byte.
       if(this.recvBuffer[0] !== 0) {
 
-        this.log.error("Framing error: missing 0x00.");
+        this.log.error("Framing error: missing 0x00. Buffer: " + this.recvBuffer.subarray(0, Math.min(20, this.recvBuffer.length)).toString("hex"));
 
         // Find the next sentinel position.
         const idx = this.recvBuffer.indexOf(0);
@@ -384,22 +445,26 @@ export class EspHomeClient extends EventEmitter {
       }
 
       // Attempt to read the message length varint.
-      const [length, lenBytes] = this.readVarint(this.recvBuffer, 1);
+      const lengthResult = this.readVarint(this.recvBuffer, 1);
 
       // Incomplete varint; wait for more data.
-      if((length === -1) && (lenBytes === -1)) {
+      if(!lengthResult) {
 
         break;
       }
+
+      const [length, lenBytes] = lengthResult;
 
       // Attempt to read the message type varint.
-      const [type, typeBytes] = this.readVarint(this.recvBuffer, 1 + lenBytes);
+      const typeResult = this.readVarint(this.recvBuffer, 1 + lenBytes);
 
       // Incomplete varint; wait for more data.
-      if((type === -1) && (typeBytes === -1)) {
+      if(!typeResult) {
 
         break;
       }
+
+      const [type, typeBytes] = typeResult;
 
       // Calculate the total header size.
       const headerSize = 1 + lenBytes + typeBytes;
@@ -411,13 +476,66 @@ export class EspHomeClient extends EventEmitter {
       }
 
       // Extract the message payload.
-      const payload = this.recvBuffer.subarray(headerSize, (headerSize + length));
+      const payload = this.recvBuffer.subarray(headerSize, headerSize + length);
 
-      // Dispatch the message to the handler.
-      this.handleMessage(type, payload);
-
-      // Remove the processed message from the buffer.
+      // Remove the processed message from the buffer before handling to prevent re-processing if handleMessage fails.
       this.recvBuffer = this.recvBuffer.subarray(headerSize + length);
+
+      // Handle or queue the message based on protocol state.
+      this.processMessage(type, payload);
+    }
+  }
+
+  /**
+   * Process a message based on current protocol state.
+   */
+  private processMessage(type: number, payload: Buffer): void {
+
+    // During handshake, some messages need to be processed in order.
+    if(this.protocolState < ProtocolState.READY) {
+
+      // These messages can be processed immediately during handshake.
+      const immediateMessages = [
+
+        MessageType.HELLO_REQUEST,
+        MessageType.HELLO_RESPONSE,
+        MessageType.CONNECT_REQUEST,
+        MessageType.CONNECT_RESPONSE,
+        MessageType.DISCONNECT_REQUEST,
+        MessageType.DISCONNECT_RESPONSE,
+        MessageType.PING_REQUEST,
+        MessageType.PING_RESPONSE
+      ];
+
+      if(!immediateMessages.includes(type)) {
+
+        // Queue other messages until handshake is complete.
+        this.log.debug("Queueing message type " + type + " until handshake complete");
+
+        this.messageQueue.push({ payload, type });
+
+        return;
+      }
+    }
+
+    // Dispatch the message to the handler.
+    this.handleMessage(type, payload);
+  }
+
+  /**
+   * Process any queued messages after handshake completion.
+   */
+  private processQueuedMessages(): void {
+
+    const queue = this.messageQueue;
+
+    this.messageQueue = [];
+
+    for(const msg of queue) {
+
+      this.log.debug("Processing queued message type " + msg.type);
+
+      this.handleMessage(msg.type, msg.payload);
     }
   }
 
@@ -434,20 +552,28 @@ export class EspHomeClient extends EventEmitter {
     // Handle specific message types.
     switch(type) {
 
+      case MessageType.HELLO_REQUEST:
+
+        this.handleHelloRequest();
+
+        break;
+
       case MessageType.HELLO_RESPONSE:
 
-        // Send the connect request to complete the handshake.
-        this.frameAndSend(MessageType.CONNECT_REQUEST, Buffer.alloc(0));
+        this.handleHelloResponse();
+
+        break;
+
+      case MessageType.CONNECT_REQUEST:
+
+        // Device is asking us to connect - this shouldn't happen in client mode.
+        this.log.warn("Received unexpected CONNECT_REQUEST from device");
 
         break;
 
       case MessageType.CONNECT_RESPONSE:
 
-        // Query device information once we're connected.
-        this.frameAndSend(MessageType.DEVICE_INFO_REQUEST, Buffer.alloc(0));
-
-        // Start entity enumeration after successful connection.
-        this.frameAndSend(MessageType.LIST_ENTITIES_REQUEST, Buffer.alloc(0));
+        this.handleConnectResponse(payload);
 
         break;
 
@@ -466,12 +592,9 @@ export class EspHomeClient extends EventEmitter {
 
         break;
 
-
       case MessageType.DEVICE_INFO_RESPONSE:
 
         this.handleDeviceInfoResponse(payload);
-
-        this.emit("connect", this.remoteDeviceInfo);
 
         break;
 
@@ -554,10 +677,124 @@ export class EspHomeClient extends EventEmitter {
         }
 
         // Unhandled message type.
-        this.log.warn("Unhandled message type: " + type + " | payload: " + payload.toString("hex"));
+        this.log.warn("Unhandled message type: " + type + " | " + MessageType[type] + " | payload: " + payload.toString("hex"));
+
+        // If payload looks like text, also show it.
+        if(payload.length > 0 && payload.length < 100) {
+
+          const text = payload.toString("utf8").replace(/[^\x20-\x7E]/g, ".");
+
+          if(text.match(/^[\x20-\x7E]+$/)) {
+
+            this.log.warn("Payload as text: " + text);
+          }
+        }
 
         break;
     }
+  }
+
+  /**
+   * Handle HELLO_REQUEST from device.
+   */
+  private handleHelloRequest(): void {
+
+    this.log.debug("Received HELLO_REQUEST");
+
+    // Some devices send HELLO_REQUEST first.
+    if(this.protocolState === ProtocolState.CONNECTED) {
+
+      // Respond with HELLO_RESPONSE.
+      this.sendHelloResponse();
+
+      this.protocolState = ProtocolState.HELLO_RECEIVED;
+    } else if(this.protocolState === ProtocolState.HELLO_SENT) {
+
+      // We both sent HELLO_REQUEST - device wins, send response.
+      this.log.debug("Simultaneous HELLO_REQUEST - responding");
+
+      this.sendHelloResponse();
+
+      this.protocolState = ProtocolState.HELLO_RECEIVED;
+    } else {
+
+      this.log.warn("Unexpected HELLO_REQUEST in state " + this.protocolState);
+    }
+  }
+
+  /**
+   * Handle HELLO_RESPONSE from device.
+   */
+  private handleHelloResponse(): void {
+
+    this.log.debug("Received HELLO_RESPONSE");
+
+    if(this.protocolState === ProtocolState.HELLO_SENT) {
+
+      // Send the connect request to complete the handshake.
+      this.frameAndSend(MessageType.CONNECT_REQUEST, Buffer.alloc(0));
+
+      this.protocolState = ProtocolState.AUTHENTICATED;
+    } else {
+
+      this.log.warn("Unexpected HELLO_RESPONSE in state " + this.protocolState);
+    }
+  }
+
+  /**
+   * Send HELLO_RESPONSE.
+   */
+  private sendHelloResponse(): void {
+
+    this.log.debug("Sending HELLO_RESPONSE");
+
+    // Prepare the client information string for the hello message.
+    const clientInfo = Buffer.from("homebridge-ratgdo", "utf8");
+
+    // Build the hello payload fields.
+    const fields: ProtoField[] = [
+
+      { fieldNumber: 1, value: clientInfo, wireType: WireType.LENGTH_DELIMITED }
+    ];
+
+    // Encode and send the hello response.
+    const payload = this.encodeProtoFields(fields);
+
+    this.frameAndSend(MessageType.HELLO_RESPONSE, payload);
+  }
+
+  /**
+   * Handle CONNECT_RESPONSE from device.
+   */
+  private handleConnectResponse(payload: Buffer): void {
+
+    this.log.debug("Received CONNECT_RESPONSE");
+
+    const fields = this.decodeProtobuf(payload);
+
+    // Check if there's an error code (field 1).
+    const invalidPassword = this.extractNumberField(fields, 1);
+
+    if(invalidPassword === 1) {
+
+      this.log.error("Connection rejected: Invalid password");
+
+      this.disconnect();
+
+      return;
+    }
+
+    // Connection successful.
+    this.protocolState = ProtocolState.READY;
+
+    // Query device information once we're connected.
+    this.frameAndSend(MessageType.DEVICE_INFO_REQUEST, Buffer.alloc(0));
+
+    // Start entity enumeration after successful connection.
+    this.frameAndSend(MessageType.LIST_ENTITIES_REQUEST, Buffer.alloc(0));
+
+    // Process any queued messages.
+    this.processQueuedMessages();
   }
 
   /**
@@ -611,6 +848,8 @@ export class EspHomeClient extends EventEmitter {
 
     // Store the remote device info.
     this.remoteDeviceInfo = info;
+
+    this.emit("connect", this.remoteDeviceInfo);
   }
 
   /**
@@ -854,14 +1093,19 @@ export class EspHomeClient extends EventEmitter {
    */
   private frameAndSend(type: MessageType, payload: Buffer): void {
 
+    // Verify we have an active connection.
+    if(!this.clientSocket || this.protocolState === ProtocolState.DISCONNECTED) {
+
+      this.log.warn("Attempted to send message type " + type + " without active connection");
+
+      return;
+    }
+
     // Construct the message header with sentinel, length, and type.
     const header = Buffer.concat([ Buffer.from([0x00]), this.encodeVarint(payload.length), this.encodeVarint(type) ]);
 
     // Write the complete framed message to the socket.
-    if(this.clientSocket) {
-
-      this.clientSocket.write(Buffer.concat([header, payload]));
-    }
+    this.clientSocket.write(Buffer.concat([header, payload]));
   }
 
   /**
@@ -1050,6 +1294,12 @@ export class EspHomeClient extends EventEmitter {
    */
   public sendSwitchCommand(id: string, state: boolean): void {
 
+    // Validate our state.
+    if(!this.isReady("switch")) {
+
+      return;
+    }
+
     // Look up the entity key using the provided ID.
     const key = this.entityKeys.get(id);
 
@@ -1079,6 +1329,12 @@ export class EspHomeClient extends EventEmitter {
    * @param id - The entity ID (format: "button-entityname").
    */
   public sendButtonCommand(id: string): void {
+
+    // Validate our state.
+    if(!this.isReady("button")) {
+
+      return;
+    }
 
     // Look up the entity key using the provided ID.
     const key = this.entityKeys.get(id);
@@ -1125,6 +1381,12 @@ export class EspHomeClient extends EventEmitter {
    * ```
    */
   public sendCoverCommand(id: string, options: { command?: "open" | "close" | "stop"; position?: number; tilt?: number }): void {
+
+    // Validate our state.
+    if(!this.isReady("cover")) {
+
+      return;
+    }
 
     // Validate that at least one option is provided.
     if(!options.command && typeof options.position !== "number" && typeof options.tilt !== "number") {
@@ -1216,6 +1478,12 @@ export class EspHomeClient extends EventEmitter {
    */
   public sendLightCommand(id: string, options: { state?: boolean; brightness?: number }): void {
 
+    // Validate our state.
+    if(!this.isReady("light")) {
+
+      return;
+    }
+
     // Look up the entity key using the provided ID.
     const key = this.entityKeys.get(id);
 
@@ -1275,6 +1543,12 @@ export class EspHomeClient extends EventEmitter {
    * @param code - Optional unlock code.
    */
   public sendLockCommand(id: string, command: "lock" | "unlock", code?: string): void {
+
+    // Validate our state.
+    if(!this.isReady("lock")) {
+
+      return;
+    }
 
     // Look up the entity key using the provided ID.
     const key = this.entityKeys.get(id);
@@ -1352,9 +1626,9 @@ export class EspHomeClient extends EventEmitter {
   }
 
   /**
-   * Read a VarInt from buffer at offset; returns [value, bytesRead].
+   * Read a VarInt from buffer at offset; returns [value, bytesRead] or null if incomplete.
    */
-  private readVarint(buffer: Buffer, offset: number): [number, number] {
+  private readVarint(buffer: Buffer, offset: number): Nullable<[number, number]> {
 
     // Accumulator for the decoded integer result.
     let result = 0;
@@ -1362,15 +1636,16 @@ export class EspHomeClient extends EventEmitter {
     // Counter for how many bytes we've consumed.
     let bytesRead = 0;
 
-    // Read byte-by-byte, adding 7 bits at each step, until the continuation bit is clear.
-    for(let shift = 0; ; shift += 7) {
+    // Maximum bytes for a varint.
+    const maxBytes = 10;
 
-      // If we're trying to read past the end, let's quit.
+    // Read byte-by-byte, adding 7 bits at each step, until the continuation bit is clear.
+    for(let shift = 0; bytesRead < maxBytes; shift += 7) {
+
+      // If we're trying to read past the end, return null to indicate incomplete data.
       if(offset + bytesRead >= buffer.length){
 
-        this.log.error("Incomplete response received from the API.");
-
-        return [-1, -1];
+        return null;
       }
 
       // Fetch the next raw byte from the buffer.
@@ -1387,6 +1662,14 @@ export class EspHomeClient extends EventEmitter {
 
         break;
       }
+    }
+
+    // Check if we exceeded the maximum varint size.
+    if(bytesRead === maxBytes && (buffer[offset + bytesRead - 1] & 0x80) !== 0) {
+
+      this.log.error("Varint too long at offset " + offset);
+
+      return null;
     }
 
     // Return the decoded integer and the number of bytes we consumed.
@@ -1411,7 +1694,15 @@ export class EspHomeClient extends EventEmitter {
       let vLen: number;
 
       // Read the next varint as the tag (combines field number and wire type).
-      const [tag, tagLen] = this.readVarint(buffer, offset);
+      const tagResult = this.readVarint(buffer, offset);
+
+      if(!tagResult) {
+
+        // Incomplete tag at end of buffer.
+        break;
+      }
+
+      const [tag, tagLen] = tagResult;
 
       // Advance past the tag bytes.
       offset += tagLen;
@@ -1422,13 +1713,25 @@ export class EspHomeClient extends EventEmitter {
       // Extract the wire type (lower 3 bits of tag).
       const wireType = tag & 0x07;
 
+      let vResult;
+
       // Decode the payload based on its wire type.
       switch(wireType) {
 
         case WireType.VARINT:
 
           // Read a varint payload.
-          [v, vLen] = this.readVarint(buffer, offset);
+          vResult = this.readVarint(buffer, offset);
+
+          if(!vResult) {
+
+            // Incomplete varint.
+            this.log.warn("Incomplete varint in protobuf at offset " + offset);
+
+            return fields;
+          }
+
+          [v, vLen] = vResult;
 
           // Assign the numeric result.
           value = v;
@@ -1439,6 +1742,14 @@ export class EspHomeClient extends EventEmitter {
           break;
 
         case WireType.FIXED64:
+
+          // Ensure we have 8 bytes.
+          if(offset + 8 > buffer.length) {
+
+            this.log.warn("Incomplete fixed64 in protobuf at offset " + offset);
+
+            return fields;
+          }
 
           // Read a 64-bit little-endian double.
           value = buffer.readDoubleLE(offset);
@@ -1451,10 +1762,28 @@ export class EspHomeClient extends EventEmitter {
         case WireType.LENGTH_DELIMITED:
 
           // Read the length prefix as a varint.
-          [len, lenLen] = this.readVarint(buffer, offset);
+          vResult = this.readVarint(buffer, offset);
+
+          if(!vResult) {
+
+            // Incomplete length prefix.
+            this.log.warn("Incomplete length prefix in protobuf at offset " + offset);
+
+            return fields;
+          }
+
+          [len, lenLen] = vResult;
 
           // Advance past the length prefix.
           offset += lenLen;
+
+          // Ensure we have enough bytes for the payload.
+          if(offset + len > buffer.length) {
+
+            this.log.warn("Incomplete length-delimited field in protobuf at offset " + offset + ", need " + len + " bytes");
+
+            return fields;
+          }
 
           // Slice out the next len bytes as a Buffer.
           value = buffer.subarray(offset, offset + len);
@@ -1465,6 +1794,14 @@ export class EspHomeClient extends EventEmitter {
           break;
 
         case WireType.FIXED32:
+
+          // Ensure we have 4 bytes.
+          if(offset + 4 > buffer.length) {
+
+            this.log.warn("Incomplete fixed32 in protobuf at offset " + offset);
+
+            return fields;
+          }
 
           // For 32-bit fields, return the raw bytes for caller interpretation.
           value = buffer.subarray(offset, offset + 4);
@@ -1477,7 +1814,7 @@ export class EspHomeClient extends EventEmitter {
         default:
 
           // Warn about unsupported wire types and return what's decoded so far.
-          this.log.warn("Unsupported wire type " + wireType + ".");
+          this.log.warn("Unsupported wire type " + wireType + " at offset " + offset);
 
           return fields;
       }

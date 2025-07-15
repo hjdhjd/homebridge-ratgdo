@@ -2,6 +2,9 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 2.9.3 (2025-07-15)
+  * Housekeeping.
+
 ## 2.9.2 (2025-07-15)
   * Fix: address API communication edge cases.
   * Improvement: Ratgdo board type is now included in the model information for an accessory, when available.
