@@ -205,7 +205,7 @@ export class RatgdoAccessory {
 
     // Update the model information for this device.
     this.accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.Model,
-      (this.device.variant === RatgdoVariant.KONNECTED) ? "Konnected" : "Ratgdo");
+      ((this.device.variant === RatgdoVariant.KONNECTED) ? "Konnected" : "Ratgdo") + (this.device.model ? " " + this.device.model : ""));
 
     // Update the serial number for this device.
     this.accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.SerialNumber, this.device.mac);
@@ -1013,6 +1013,9 @@ export class RatgdoAccessory {
     switch(event.id) {
 
       case "availability":
+
+        // Update our information.
+        this.configureInfo();
 
         // Update our availability.
         discoVehicleArrivingContactService?.updateCharacteristic(this.hap.Characteristic.StatusActive, event.state === "online");

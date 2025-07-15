@@ -4,6 +4,7 @@
  */
 import type { API, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
 import { Bonjour, type Service } from "bonjour-service";
+import { type DeviceInfo, EspHomeClient } from "./ratgdo-api.js";
 import { type EspHomeEvent, RatgdoAccessory } from "./ratgdo-device.js";
 import { EventSource, type MessageEvent } from "undici";
 import { FeatureOptions, MqttClient, type Nullable, sanitizeName } from "homebridge-plugin-utils";
@@ -11,7 +12,6 @@ import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_API_HEARTBEAT_DURATION, RATGDO_AUTOD
   RATGDO_MQTT_TOPIC } from "./settings.js";
 import { type RatgdoOptions, featureOptionCategories, featureOptions } from "./ratgdo-options.js";
 import { APIEvent } from "homebridge";
-import { EspHomeClient } from "./ratgdo-api.js";
 import { RatgdoVariant } from "./ratgdo-types.js";
 import util from "node:util";
 
@@ -212,7 +212,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.espHomeApi[ratgdo.device.mac] = new EspHomeClient(ratgdo.log, address);
 
     // Kickoff our heartbeats only the very first time we connect.
-    this.espHomeApi[ratgdo.device.mac].once("connect", () => this.beat(ratgdo));
+    this.espHomeApi[ratgdo.device.mac].once("connect", (info: DeviceInfo) => this.beat(ratgdo, { info }));
 
     // Reconnect on disconnect.
     this.espHomeApi[ratgdo.device.mac].on("disconnect",
@@ -399,10 +399,15 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   }
 
   // Heartbeat the Ratgdo.
-  private beat(ratgdo: RatgdoAccessory, options: Partial<{ reconnecting: boolean, updateState: boolean }> = {}): void {
+  private beat(ratgdo: RatgdoAccessory, options: Partial<{ info: DeviceInfo, reconnecting: boolean, updateState: boolean }> = {}): void {
 
     options.reconnecting ??= false;
     options.updateState ??= true;
+
+    if(options.info) {
+
+      ratgdo.device.model = options.info.projectVersion;
+    }
 
     if(this.heartbeatTimers[ratgdo.device.mac]) {
 
