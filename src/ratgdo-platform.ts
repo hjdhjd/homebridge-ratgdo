@@ -215,8 +215,19 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.espHomeApi[ratgdo.device.mac].once("connect", (info: DeviceInfo) => this.beat(ratgdo, { info }));
 
     // Reconnect on disconnect.
-    this.espHomeApi[ratgdo.device.mac].on("disconnect",
-      this.listeners[ratgdo.device.mac].disconnect = (): void => this.beat(ratgdo, { reconnecting: true, updateState: false}));
+    this.espHomeApi[ratgdo.device.mac].on("disconnect", this.listeners[ratgdo.device.mac].disconnect = (reason?: string): void => {
+
+      if(reason === "encryption unsupported") {
+
+        ratgdo.updateState({ id: "availability", state: "offline" });
+
+        this.log.error("Encrypted API communication is not currently supported. Please disable it in your Ratgdo firmware configuration.");
+
+        return;
+      }
+
+      this.beat(ratgdo, { reconnecting: true, updateState: false});
+    });
 
     // Heartbeat our Ratgdo.
     this.espHomeApi[ratgdo.device.mac].on("message", this.listeners[ratgdo.device.mac].message = (): void => this.beat(ratgdo));

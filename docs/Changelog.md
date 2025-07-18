@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 2.9.4 (2025-07-18)
+  * Improvement: HBR now alerts users when API encryption is detected, which HBR does not currently support.
+  * Housekeeping.
+
 ## 2.9.3 (2025-07-15)
   * Housekeeping.
 
