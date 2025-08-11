@@ -17,13 +17,13 @@ export type RatgdoOptions = Partial<{
 // Feature option categories.
 export const featureOptionCategories = [
 
-  { description: "Device feature options.", name: "Device" },
-  { description: "Logging feature options.", name: "Log" },
-  { description: "Opener feature options.", name: "Opener" },
-  { description: "Opener light feature options.", name: "Light" },
-  { description: "Opener motion feature options.", name: "Motion" },
-  { description: "Ratgdo (ESP32) Disco device-specific feature options.", name: "Disco" },
-  { description: "Konnected device-specific feature options.", name: "Konnected" }
+  { description: "Device", name: "Device" },
+  { description: "Logging", name: "Log" },
+  { description: "Opener", name: "Opener" },
+  { description: "Light", name: "Light" },
+  { description: "Motion", name: "Motion" },
+  { description: "Ratgdo (ESP32) Disco", name: "Disco" },
+  { description: "Konnected", name: "Konnected" }
 ];
 
 /* eslint-disable @stylistic/max-len */
@@ -33,7 +33,9 @@ export const featureOptions: { [index: string]: FeatureOptionEntry[] } = {
   // Device options.
   "Device": [
 
-    { default: true, description: "Make this device available in HomeKit.", name: "" }
+    { default: true, description: "Make this device available in HomeKit.", name: "" },
+    { default: false, defaultValue: "", description: "Name to use for logging purposes. Defaults to the name the Ratgdo device advertises.", inputSize: 15, name: "LogName" },
+    { default: false, defaultValue: "", description: "Base64-encoded encryption key to use for the ESPHome API as specified in your YAML configuration.", inputSize: 44, name: "Encryption.Key" }
   ],
 
   // Ratgdo ESP32 Disco options.

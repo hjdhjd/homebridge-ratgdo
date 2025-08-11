@@ -4,7 +4,7 @@
  */
 import type { API, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
 import { Bonjour, type Service } from "bonjour-service";
-import { type DeviceInfo, EspHomeClient } from "./ratgdo-api.js";
+import { type DeviceInfo, EspHomeClient } from "esphome-client";
 import { type EspHomeEvent, RatgdoAccessory } from "./ratgdo-device.js";
 import { EventSource, type MessageEvent } from "undici";
 import { FeatureOptions, MqttClient, type Nullable, sanitizeName } from "homebridge-plugin-utils";
@@ -209,28 +209,44 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       });
     }
 
-    this.espHomeApi[ratgdo.device.mac] = new EspHomeClient(ratgdo.log, address);
+    this.espHomeApi[ratgdo.device.mac] = new EspHomeClient({
+
+      host: address,
+      logger: ratgdo.log,
+      psk: this.featureOptions.value("Device.Encryption.Key", ratgdo.device.mac)
+    });
 
     // Kickoff our heartbeats only the very first time we connect.
-    this.espHomeApi[ratgdo.device.mac].once("connect", (info: DeviceInfo) => this.beat(ratgdo, { info }));
+    this.espHomeApi[ratgdo.device.mac].once("deviceInfo", (info: DeviceInfo, encrypted: boolean) => {
+
+      this.beat(ratgdo, { encrypted, info });
+
+      // Heartbeat our Ratgdo.
+      this.espHomeApi[ratgdo.device.mac].on("message", this.listeners[ratgdo.device.mac].message = (): void => this.beat(ratgdo));
+    });
 
     // Reconnect on disconnect.
     this.espHomeApi[ratgdo.device.mac].on("disconnect", this.listeners[ratgdo.device.mac].disconnect = (reason?: string): void => {
 
-      if(reason === "encryption unsupported") {
+      switch(reason) {
 
-        ratgdo.updateState({ id: "availability", state: "offline" });
+        case "encryption key invalid":
+        case "encryption key missing":
 
-        this.log.error("Encrypted API communication is not currently supported. Please disable it in your Ratgdo firmware configuration.");
+          ratgdo.updateState({ id: "availability", state: "offline" });
 
-        return;
+          ratgdo.log.error("%s encryption key. Please ensure you configure HBR with the correct base64-encoded encryption key for this device.",
+            (reason === "encryption key invalid") ? "Invalid" : "Missing");
+
+          break;
+
+        default:
+
+          this.beat(ratgdo, { reconnecting: true, updateState: false});
+
+          break;
       }
-
-      this.beat(ratgdo, { reconnecting: true, updateState: false});
     });
-
-    // Heartbeat our Ratgdo.
-    this.espHomeApi[ratgdo.device.mac].on("message", this.listeners[ratgdo.device.mac].message = (): void => this.beat(ratgdo));
 
     // Process telemetry from the Ratgdo.
     this.espHomeApi[ratgdo.device.mac].on("telemetry", (data: { type: string, currentOperation?: number, entity: string, position?: number, value: string | number }) => {
@@ -350,7 +366,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       address: address,
       firmwareVersion: deviceInfo.version ?? deviceInfo.esphome_version,
       mac: mac.replace(/:/g, ""),
-      name: deviceInfo.friendly_name ?? "Ratgdo",
+      name: this.featureOptions.value("Device.LogName", mac.replace(/:/g, "")) ?? deviceInfo.friendly_name ?? "Ratgdo",
       variant: (deviceInfo.project_name === "ratgdo.esphome") ? RatgdoVariant.RATGDO : RatgdoVariant.KONNECTED
     };
 
@@ -371,7 +387,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
         this.log.info("%s: Removing device from HomeKit.", accessory.displayName);
 
         // Unregister the accessory and delete it's remnants from HomeKit.
-        this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [ accessory ]);
+        this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
         this.accessories.splice(this.accessories.indexOf(accessory), 1);
         this.api.updatePlatformAccessories(this.accessories);
       }
@@ -410,7 +426,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   }
 
   // Heartbeat the Ratgdo.
-  private beat(ratgdo: RatgdoAccessory, options: Partial<{ info: DeviceInfo, reconnecting: boolean, updateState: boolean }> = {}): void {
+  private beat(ratgdo: RatgdoAccessory, options: Partial<{ encrypted: boolean, info: DeviceInfo, reconnecting: boolean, updateState: boolean }> = {}): void {
 
     options.reconnecting ??= false;
     options.updateState ??= true;
@@ -431,7 +447,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
     if(options.updateState) {
 
-      ratgdo.updateState({ id: "availability", state: "online" });
+      ratgdo.updateState({ id: "availability", state: "online", ...(options.encrypted !== undefined && { value: options.encrypted ? "encrypted" : "unencrypted" }) });
     } else if(options.reconnecting) {
 
       ratgdo.updateState({ id: "availability", state: "offline" });

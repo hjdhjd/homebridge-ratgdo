@@ -1029,7 +1029,7 @@ export class RatgdoAccessory {
         if(this.status.availability !== (event.state === "online")) {
 
           this.status.availability = event.state === "online";
-          this.log.info("Ratgdo %s.", this.status.availability ? "connected" : "disconnected");
+          this.log.info("%sRatgdo %s.", (event.value === "encrypted") ? "\u{1F512}\uFE0E  " : "", this.status.availability ? "connected" : "disconnected");
         }
 
         break;
@@ -1742,6 +1742,12 @@ export class RatgdoAccessory {
 
   // Utility function to return the name of this device.
   private get name(): string {
+
+    // If we have a name defined for logging purposes, use that.
+    if(this.platform.featureOptions.value("Device.LogName", this.device.mac)) {
+
+      return this.device.name;
+    }
 
     // We use the garage door service as the natural proxy for the name.
     let name = this.accessory.getService(this.hap.Service.GarageDoorOpener)?.getCharacteristic(this.hap.Characteristic.Name).value as string;

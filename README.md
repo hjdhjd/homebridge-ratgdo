@@ -44,17 +44,6 @@ To get started with `homebridge-ratgdo`:
   * Fully open and close the garage door one time. ESPHome Ratgdo will use this to determine how long it takes to open and close your garage door to enable precise control of the position of the garage door opener.
   * That's it. Ensure `homebridge-ratgdo` is running and it will autodiscover your Ratgdo devices and make them available in HomeKit.
 
-<A NAME="notes"></A>
-> [!TIP]
-> If you would like to tailor your experience a bit further, you can choose to use the [hombridge-ratgdo ESPHome YAML configuration file](https://github.com/hjdhjd/homebridge-ratgdo/blob/main/esphome/homebridge-ratgdo.yaml) and use it to create a more customized Ratgdo ESPHome firmware. Using this firmware allows you to do the following things for those using Ratgdo hardware revision 2.5 or beyond:
->
->   * The ability to customize the name (and friendly name) of the Ratgdo device. Though cosmetic, it can be helpful when you have multiple Ratgdo devices.
->   * Use SNTP to set the time on the Ratgdo device. Not strictly necessary, but good hygeine.
->   * Allows you to configure the timezone either yourself or automatically. The timezone will be autoconfigured using the World Time API geoIP by default.
->   * Set the interval to check for updates from the Ratgdo repository to every 6 hours instead of the Ratgdo default of every second.
->
-> **Using this YAML is completely optional and largely for cosmetic purposes. There are no functional differences between using this custom YAML configuration and the default Ratgdo ESPHome one.**
-
 ## Documentation
 * Getting Started
   * [Installation](#installation): installing this plugin, including system requirements.

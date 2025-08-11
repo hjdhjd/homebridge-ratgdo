@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 2.10.0 (2025-08-11)
+  * New feature: HBR now supports encrypted API connections. **Configuring your Ratgdo to use [encrypted API connections](https://esphome.io/components/api.html#configuration-variables) is beyond the scope of any support I provide, but the link should point you in the right direction. You can set your encryption key under the Device section of feature options.**
+  * New feature: You can set the log name used for your device, so you don't see the generated name that Ratgdo uses. Available under Device section of feature options.
+  * Improvement: refreshed webUI.
+  * Housekeeping.
+
 ## 2.9.4 (2025-07-18)
   * Improvement: HBR now alerts users when API encryption is detected, which HBR does not currently support.
   * Housekeeping.

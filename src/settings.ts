@@ -20,7 +20,7 @@ export const RATGDO_AUTODISCOVERY_INTERVAL = 10;
 export const RATGDO_AUTODISCOVERY_PROJECT_NAMES: RegExp[] = [ /^ratgdo\.esphome$/i, /^konnected.garage-door-gdov2.*$/i ];
 
 // mDNS service types associated with a Ratgdo device.
-export const RATGDO_AUTODISCOVERY_TYPES = [ "esphomelib" ];
+export const RATGDO_AUTODISCOVERY_TYPES = ["esphomelib"];
 
 // Duration, in seconds, of a motion sensor event.
 export const RATGDO_MOTION_DURATION = 5;

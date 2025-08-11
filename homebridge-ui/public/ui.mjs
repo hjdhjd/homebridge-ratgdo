@@ -10,20 +10,32 @@ import { webUi } from "./lib/webUi.mjs";
 // Show the details for this device.
 const showRatgdoDetails = (device) => {
 
+  const deviceStatsContainer = document.getElementById("deviceStatsContainer");
+
   // No device specified, we must be in a global context.
   if(!device) {
 
-    document.getElementById("device_model").innerHTML = "N/A";
-    document.getElementById("device_mac").innerHTML = "N/A";
-    document.getElementById("device_firmware").innerHTML = "N/A";
+    deviceStatsContainer.textContent = "";
 
     return;
   }
 
   // Populate the device details.
-  document.getElementById("device_model").innerHTML = device.model;
-  document.getElementById("device_mac").innerHTML = device.serialNumber;
-  document.getElementById("device_firmware").innerHTML = device.firmwareRevision;
+  deviceStatsContainer.innerHTML =
+    "<div class=\"device-stats-grid\">" +
+      "<div class=\"stat-item\">" +
+        "<span class=\"stat-label\">Model</span>" +
+        "<span class=\"stat-value\">" + device.model + "</span>" +
+      "</div>" +
+      "<div class=\"stat-item\">" +
+        "<span class=\"stat-label\">MAC Address</span>" +
+        "<span class=\"stat-value font-monospace\">" + device.serialNumber + "</span>" +
+      "</div>" +
+      "<div class=\"stat-item\">" +
+        "<span class=\"stat-label\">Firmware</span>" +
+        "<span class=\"stat-value\">" +  device.firmwareRevision + "</span>" +
+      "</div>" +
+    "</div>";
 };
 
 // Parameters for our feature options webUI.
