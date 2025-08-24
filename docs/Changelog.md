@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 2.11.0 (2025-08-24)
+  * Improvement: Ratgdo Disco battery status support now uses the native ESPHome API to derive the charging status of garage door opener backup batteries.
+  * Fully retired the SSE API. HBR now only uses the native API.
+  * Housekeeping.
+
 ## 2.10.0 (2025-08-11)
   * New feature: HBR now supports encrypted API connections. **Configuring your Ratgdo to use [encrypted API connections](https://esphome.io/components/api.html#configuration-variables) is beyond the scope of any support I provide, but the link should point you in the right direction. You can set your encryption key under the Device section of feature options.**
   * New feature: You can set the log name used for your device, so you don't see the generated name that Ratgdo uses. Available under Device section of feature options.

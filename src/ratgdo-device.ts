@@ -360,8 +360,8 @@ export class RatgdoAccessory {
           // Something went wrong. Let's make sure we revert the lock to it's prior state.
           setTimeout(() => {
 
-            service?.updateCharacteristic(this.hap.Characteristic.LockTargetState, this.lockTargetStateBias(this.status.lock));
-            service?.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.status.lock);
+            service.updateCharacteristic(this.hap.Characteristic.LockTargetState, this.lockTargetStateBias(this.status.lock));
+            service.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.status.lock);
           }, 50);
         }
       });
@@ -404,8 +404,8 @@ export class RatgdoAccessory {
     service.updateCharacteristic(this.hap.Characteristic.On, this.status.light);
 
     // Turn the light on or off.
-    service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.status.light);
-    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => this.command("light", value === true ? "on" : "off"));
+    service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.status.light);
+    service.getCharacteristic(this.hap.Characteristic.On).onSet((value: CharacteristicValue) => this.command("light", value === true ? "on" : "off"));
 
     return true;
   }
@@ -458,10 +458,10 @@ export class RatgdoAccessory {
     }
 
     // Return the current state of the opener. We're on if we are in any state other than closed (specifically open or stopped).
-    service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED);
+    service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED);
 
     // Close the opener. Opening is really handled in the brightness event.
-    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => {
+    service.getCharacteristic(this.hap.Characteristic.On).onSet((value: CharacteristicValue) => {
 
       // We really only want to act when the opener is open. Otherwise, it's handled by the brightness event.
       if(value) {
@@ -479,15 +479,15 @@ export class RatgdoAccessory {
       if(!this.setDoorState(this.hap.Characteristic.TargetDoorState.CLOSED)) {
 
         // Something went wrong. Let's make sure we revert the dimmer to it's prior state.
-        setTimeout(() => service?.updateCharacteristic(this.hap.Characteristic.On, !value), 50);
+        setTimeout(() => service.updateCharacteristic(this.hap.Characteristic.On, !value), 50);
       }
     });
 
     // Return the door position of the opener.
-    service.getCharacteristic(this.hap.Characteristic.Brightness)?.onGet(() => this.status.doorPosition);
+    service.getCharacteristic(this.hap.Characteristic.Brightness).onGet(() => this.status.doorPosition);
 
     // Adjust the door position of the opener by adjusting brightness of the light.
-    service.getCharacteristic(this.hap.Characteristic.Brightness)?.onSet((value: CharacteristicValue) => {
+    service.getCharacteristic(this.hap.Characteristic.Brightness).onSet((value: CharacteristicValue) => {
 
       if(this.hints.logOpener) {
 
@@ -527,10 +527,10 @@ export class RatgdoAccessory {
     }
 
     // Return the current state of the opener. We're on if we are in any state other than closed (specifically open or stopped).
-    service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED);
+    service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED);
 
     // Open or close the opener.
-    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => {
+    service.getCharacteristic(this.hap.Characteristic.On).onSet((value: CharacteristicValue) => {
 
       // Inform the user.
       if(this.hints.logOpener) {
@@ -542,7 +542,7 @@ export class RatgdoAccessory {
       if(!this.setDoorState(value ? this.hap.Characteristic.TargetDoorState.OPEN : this.hap.Characteristic.TargetDoorState.CLOSED)) {
 
         // Something went wrong. Let's make sure we revert the switch to it's prior state.
-        setTimeout(() => service?.updateCharacteristic(this.hap.Characteristic.On, !value), 50);
+        setTimeout(() => service.updateCharacteristic(this.hap.Characteristic.On, !value), 50);
       }
     });
 
@@ -568,18 +568,18 @@ export class RatgdoAccessory {
 
     if(!service) {
 
-      this.log.error("Unable to add the Ratgdo (ESP32) Disco backup battery status.");
+      this.log.error("Unable to add the Ratgdo (ESP32) backup battery status.");
 
       return false;
     }
 
     // Return the current state of the charging state.
-    service.getCharacteristic(this.hap.Characteristic.ChargingState)?.onGet(() => this.status.discoBatteryState);
+    service.getCharacteristic(this.hap.Characteristic.ChargingState).onGet(() => this.status.discoBatteryState);
 
     // Initialize the charging state.
     service.updateCharacteristic(this.hap.Characteristic.ChargingState, this.status.discoBatteryState);
 
-    this.log.info("Enabling the Ratgdo (ESP32) Disco backup battery status.");
+    this.log.info("Enabling the Ratgdo (ESP32) backup battery status.");
 
     return true;
   }
@@ -605,10 +605,10 @@ export class RatgdoAccessory {
     }
 
     // Return the current state of the switch.
-    service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.status.discoLaser);
+    service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.status.discoLaser);
 
     // Open or close the switch.
-    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => this.command("disco-laser", value === true ? "on" : "off"));
+    service.getCharacteristic(this.hap.Characteristic.On).onSet((value: CharacteristicValue) => this.command("disco-laser", value === true ? "on" : "off"));
 
     // Initialize the switch.
     service.updateCharacteristic(this.hap.Characteristic.On, this.status.discoLaser);
@@ -639,10 +639,10 @@ export class RatgdoAccessory {
     }
 
     // Return the current state of the switch.
-    service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.status.discoLed);
+    service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.status.discoLed);
 
     // Open or close the switch.
-    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => this.command("disco-led", value === true ? "on" : "off"));
+    service.getCharacteristic(this.hap.Characteristic.On).onSet((value: CharacteristicValue) => this.command("disco-led", value === true ? "on" : "off"));
 
     // Initialize the switch.
     service.updateCharacteristic(this.hap.Characteristic.On, this.status.discoLed);
@@ -766,10 +766,10 @@ export class RatgdoAccessory {
     }
 
     // Return the current state of the switch.
-    service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => false);
+    service.getCharacteristic(this.hap.Characteristic.On).onGet(() => false);
 
     // Open or close the switch.
-    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => {
+    service.getCharacteristic(this.hap.Characteristic.On).onSet((value: CharacteristicValue) => {
 
       // Default to reseting our switch state after the pre-close warning has completed playing.
       let resetTimer = 5000;
@@ -782,7 +782,7 @@ export class RatgdoAccessory {
       }
 
       // Reset the switch state.
-      setTimeout(() => service?.updateCharacteristic(this.hap.Characteristic.On, !value), resetTimer);
+      setTimeout(() => service.updateCharacteristic(this.hap.Characteristic.On, !value), resetTimer);
     });
 
     // Initialize the switch.
@@ -814,10 +814,10 @@ export class RatgdoAccessory {
     }
 
     // Return the current state of the switch.
-    service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.status.konnectedStrobe);
+    service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.status.konnectedStrobe);
 
     // Open or close the switch.
-    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => this.command("konnected-strobe", value === true ? "on" : "off"));
+    service.getCharacteristic(this.hap.Characteristic.On).onSet((value: CharacteristicValue) => this.command("konnected-strobe", value === true ? "on" : "off"));
 
     // Initialize the switch.
     service.updateCharacteristic(this.hap.Characteristic.On, this.status.konnectedStrobe);
@@ -847,10 +847,10 @@ export class RatgdoAccessory {
     }
 
     // Return the current state of the opener. We're on if we are in any state other than locked.
-    service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.status.lock === this.hap.Characteristic.LockCurrentState.SECURED);
+    service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.status.lock === this.hap.Characteristic.LockCurrentState.SECURED);
 
     // Lock or unlock the wireless remotes.
-    service.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => {
+    service.getCharacteristic(this.hap.Characteristic.On).onSet((value: CharacteristicValue) => {
 
       // Inform the user.
       this.log.info("Automation wireless remote lockout switch: remotes are %s.", value ? "locked out" : "permitted");
@@ -859,7 +859,7 @@ export class RatgdoAccessory {
       if(!this.command("lock", value ? "lock" : "unlock")) {
 
         // Something went wrong. Let's make sure we revert the switch to it's prior state.
-        setTimeout(() => service?.updateCharacteristic(this.hap.Characteristic.On, !value), 50);
+        setTimeout(() => service.updateCharacteristic(this.hap.Characteristic.On, !value), 50);
       }
     });
 
@@ -1333,8 +1333,10 @@ export class RatgdoAccessory {
             break;
         }
 
-        // We are only going to update the target state if our current state is NOT stopped. If we are stopped, we are at the target state by definition. We also want to
-        // ensure we update TargetDoorState before updating CurrentDoorState in order to work around some notification quirks HomeKit occasionally has.
+        // We only update the target state if our current state is NOT stopped. If we are stopped, we are at the target state by definition. When the user resumes the
+        // door operation, it will complete the action. Put another way, when we enter a stopped state, HomeKit essentially is pausing the action. When we tell the
+        // opener to open/close, it will continue the action it had previously begun before stopping. Additionally, we always want to ensure we update TargetDoorState
+        // before updating CurrentDoorState in order to work around some notification sequencing quirks HomeKit occasionally has.
         if(this.status.door !== this.hap.Characteristic.CurrentDoorState.STOPPED) {
 
           garageDoorService?.updateCharacteristic(this.hap.Characteristic.TargetDoorState, this.doorTargetStateBias(this.status.door));
@@ -1516,14 +1518,19 @@ export class RatgdoAccessory {
 
           case "closed":
 
-            action = "close";
+            action = { position: 0.0 };
 
             break;
 
           case "open":
+
+            action = { position: 1.0 };
+
+            break;
+
           case "stop":
 
-            action = payload;
+            action = { stop: true };
 
             break;
 
@@ -1536,7 +1543,7 @@ export class RatgdoAccessory {
               return false;
             }
 
-            action = "set";
+            action = { position: position / 100 };
 
             break;
 
@@ -1547,18 +1554,8 @@ export class RatgdoAccessory {
             return false;
         }
 
-        // Set the door position to the requested percentage.
-        if(position !== undefined) {
-
-          this.platform.espHomeApi[this.device.mac].sendCoverCommand("cover-" + ((this.device.variant === RatgdoVariant.KONNECTED) ? "garage_door" : "door"),
-            { position: position / 100 });
-
-          return true;
-        }
-
         // Execute the command.
-        this.platform.espHomeApi[this.device.mac].sendCoverCommand("cover-" + ((this.device.variant === RatgdoVariant.KONNECTED) ? "garage_door" : "door"),
-          { command: (action as "open" | "close" | "stop") });
+        this.platform.espHomeApi[this.device.mac].sendCoverCommand("cover-" + ((this.device.variant === RatgdoVariant.KONNECTED) ? "garage_door" : "door"), action);
 
         break;
 
@@ -1750,7 +1747,7 @@ export class RatgdoAccessory {
     }
 
     // We use the garage door service as the natural proxy for the name.
-    let name = this.accessory.getService(this.hap.Service.GarageDoorOpener)?.getCharacteristic(this.hap.Characteristic.Name).value as string;
+    let name = this.accessory.getService(this.hap.Service.GarageDoorOpener)?.getCharacteristic(this.hap.Characteristic.Name).value as string | undefined;
 
     if(name?.length) {
 
@@ -1759,7 +1756,7 @@ export class RatgdoAccessory {
 
     name = this.accessory.displayName;
 
-    if(name?.length) {
+    if(name.length) {
 
       return name;
     }
@@ -1771,7 +1768,8 @@ export class RatgdoAccessory {
   // Utility function to return the current accessory name of this device.
   private get accessoryName(): string {
 
-    return (this.accessory.getService(this.hap.Service.AccessoryInformation)?.getCharacteristic(this.hap.Characteristic.Name).value as string) ?? this.device.name;
+    return (this.accessory.getService(this.hap.Service.AccessoryInformation)?.getCharacteristic(this.hap.Characteristic.Name).value as string | undefined) ??
+      this.device.name;
   }
 
   // Utility function to set the current accessory name of this device.
