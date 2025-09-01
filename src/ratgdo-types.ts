@@ -6,12 +6,12 @@
 // Ratgdo device settings.
 export interface RatgdoDevice {
 
-  address: string,
-  firmwareVersion: string,
-  mac: string,
-  model?: string,
-  name: string,
-  variant: string
+  address: string;
+  firmwareVersion: string;
+  mac: string;
+  model?: string;
+  name: string;
+  variant: string;
 }
 
 // Ratgdo reserved names.

@@ -2,6 +2,9 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 2.11.1 (2025-09-01)
+  * Housekeeping.
+
 ## 2.11.0 (2025-08-24)
   * Improvement: Ratgdo Disco battery status support now uses the native ESPHome API to derive the charging status of garage door opener backup batteries.
   * Fully retired the SSE API. HBR now only uses the native API.

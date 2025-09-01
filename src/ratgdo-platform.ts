@@ -439,7 +439,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   }
 
   // Heartbeat the Ratgdo.
-  private beat(ratgdo: RatgdoAccessory, options: Partial<{ encrypted: boolean, info: DeviceInfo, reconnecting: boolean, updateState: boolean }> = {}): void {
+  private beat(ratgdo: RatgdoAccessory, options: Partial<{ encrypted: boolean; info: DeviceInfo; reconnecting: boolean; updateState: boolean }> = {}): void {
 
     options.reconnecting ??= false;
     options.updateState ??= true;

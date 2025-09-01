@@ -8,10 +8,10 @@ import { RATGDO_OCCUPANCY_DURATION } from "./settings.js";
 // Plugin configuration options.
 export type RatgdoOptions = Partial<{
 
-  debug: boolean,
-  mqttTopic: string,
-  mqttUrl: string,
-  options: string[]
+  debug: boolean;
+  mqttTopic: string;
+  mqttUrl: string;
+  options: string[];
 }>;
 
 // Feature option categories.

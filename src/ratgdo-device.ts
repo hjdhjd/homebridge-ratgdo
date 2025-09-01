@@ -13,61 +13,61 @@ import util from "node:util";
 // ESPHome EventSource state messages.
 export interface EspHomeEvent {
 
-  current_operation?: string,
-  id: string,
-  name?: string,
-  position?: number,
-  state: string,
-  value?: string
+  current_operation?: string;
+  id: string;
+  name?: string;
+  position?: number;
+  state: string;
+  value?: string;
 }
 
 // Device-specific options and settings.
 interface RatgdoHints {
 
-  automationDimmer: boolean,
-  automationSwitch: boolean,
-  discoBattery: boolean,
-  discoLaserSwitch: boolean,
-  discoLedSwitch: boolean,
-  discoVehicleArriving: boolean,
-  discoVehicleLeaving: boolean,
-  discoVehiclePresence: boolean,
-  doorOpenOccupancyDuration: number,
-  doorOpenOccupancySensor: boolean,
-  konnectedPcwSwitch: boolean,
-  konnectedStrobeSwitch: boolean,
-  light: boolean,
-  lock: boolean,
-  lockoutSwitch: boolean,
-  logLight: boolean,
-  logMotion: boolean,
-  logObstruction: boolean,
-  logOpener: boolean,
-  logVehiclePresence: boolean,
-  motionOccupancyDuration: number,
-  motionOccupancySensor: boolean,
-  motionSensor: boolean,
-  readOnly: boolean,
-  showBatteryInfo: boolean
+  automationDimmer: boolean;
+  automationSwitch: boolean;
+  discoBattery: boolean;
+  discoLaserSwitch: boolean;
+  discoLedSwitch: boolean;
+  discoVehicleArriving: boolean;
+  discoVehicleLeaving: boolean;
+  discoVehiclePresence: boolean;
+  doorOpenOccupancyDuration: number;
+  doorOpenOccupancySensor: boolean;
+  konnectedPcwSwitch: boolean;
+  konnectedStrobeSwitch: boolean;
+  light: boolean;
+  lock: boolean;
+  lockoutSwitch: boolean;
+  logLight: boolean;
+  logMotion: boolean;
+  logObstruction: boolean;
+  logOpener: boolean;
+  logVehiclePresence: boolean;
+  motionOccupancyDuration: number;
+  motionOccupancySensor: boolean;
+  motionSensor: boolean;
+  readOnly: boolean;
+  showBatteryInfo: boolean;
 }
 
 // Ratgdo status information.
 interface RatgdoStatus {
 
-  availability: boolean,
-  discoLaser: boolean,
-  discoLed: boolean,
-  discoBatteryState: CharacteristicValue,
-  discoVehicleArriving: boolean,
-  discoVehicleLeaving: boolean,
-  discoVehiclePresence: boolean,
-  door: CharacteristicValue,
-  doorPosition: number,
-  konnectedStrobe: boolean,
-  light: boolean,
-  lock: CharacteristicValue,
-  motion: boolean,
-  obstruction: boolean
+  availability: boolean;
+  discoLaser: boolean;
+  discoLed: boolean;
+  discoBatteryState: CharacteristicValue;
+  discoVehicleArriving: boolean;
+  discoVehicleLeaving: boolean;
+  discoVehiclePresence: boolean;
+  door: CharacteristicValue;
+  doorPosition: number;
+  konnectedStrobe: boolean;
+  light: boolean;
+  lock: CharacteristicValue;
+  motion: boolean;
+  obstruction: boolean;
 }
 
 export class RatgdoAccessory {
