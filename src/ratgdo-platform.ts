@@ -380,7 +380,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       mac: mac.replace(/:/g, ""),
       model: deviceInfo.project_version,
       name: this.featureOptions.value("Device.LogName", mac.replace(/:/g, "")) ?? deviceInfo.friendly_name ?? "Ratgdo",
-      variant: (deviceInfo.project_name === "ratgdo.esphome") ? RatgdoVariant.RATGDO : RatgdoVariant.KONNECTED
+      variant: deviceInfo.project_name?.startsWith("ratgdo.") ? RatgdoVariant.RATGDO : RatgdoVariant.KONNECTED
     };
 
     // Inform the user that we've discovered a device.
