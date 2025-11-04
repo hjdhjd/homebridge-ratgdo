@@ -17,7 +17,7 @@ export const RATGDO_API_HEARTBEAT_DURATION = 100;
 export const RATGDO_AUTODISCOVERY_INTERVAL = 10;
 
 // mDNS TXT record project name associated with a Ratgdo device.
-export const RATGDO_AUTODISCOVERY_PROJECT_NAMES: RegExp[] = [ /^ratgdo\.esphome$/i, /^konnected.garage-door-gdov2.*$/i ];
+export const RATGDO_AUTODISCOVERY_PROJECT_NAMES: RegExp[] = [ /^ratgdo\..*$/i, /^konnected.garage-door-gdov2.*$/i ];
 
 // mDNS service types associated with a Ratgdo device.
 export const RATGDO_AUTODISCOVERY_TYPES = ["esphomelib"];
