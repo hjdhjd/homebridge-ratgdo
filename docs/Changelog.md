@@ -2,6 +2,9 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 2.12.2 (2025-11-04)
+  * Fix: address configuration changes from recent Ratgdo releases.
+
 ## 2.12.1 (2025-11-03)
   * Housekeeping.
 
