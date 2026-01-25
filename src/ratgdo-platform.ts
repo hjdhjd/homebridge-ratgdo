@@ -1,4 +1,4 @@
-/* Copyright(C) 2017-2025, HJD (https://github.com/hjdhjd). All rights reserved.
+/* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
  * ratgdo-platform.ts: homebridge-ratgdo platform class.
  */
@@ -461,7 +461,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
     if(options.updateState) {
 
-      ratgdo.updateState({ id: "availability", state: "online", ...(options.encrypted !== undefined && { value: options.encrypted ? "encrypted" : "unencrypted" }) });
+      ratgdo.updateState({ id: "availability", state: "online", ...((options.encrypted !== undefined) && { value: options.encrypted ? "encrypted" : "unencrypted" }) });
     } else if(options.reconnecting) {
 
       ratgdo.updateState({ id: "availability", state: "offline" });

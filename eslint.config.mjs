@@ -1,4 +1,4 @@
-/* Copyright(C) 2017-2025, HJD (https://github.com/hjdhjd). All rights reserved.
+/* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
  * eslint.config.mjs: Linting defaults for Homebridge plugins.
  */
@@ -42,7 +42,6 @@ export default ts.config(
       parserOptions: {
 
         ecmaVersion: "latest",
-        project: "./tsconfig.json",
 
         projectService: {
 
