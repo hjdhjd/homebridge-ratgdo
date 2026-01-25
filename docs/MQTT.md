@@ -1,7 +1,7 @@
 <SPAN ALIGN="CENTER" STYLE="text-align:center">
 <DIV ALIGN="CENTER" STYLE="text-align:center">
 
-[![homebridge-ratgdp: Native HomeKit support for Ratgdo](https://raw.githubusercontent.com/hjdhjd/homebridge-ratgdo/main/images/homebridge-ratgdo.svg)](https://github.com/hjdhjd/homebridge-ratgdo)
+[![homebridge-ratgdo: Native HomeKit support for Ratgdo](https://raw.githubusercontent.com/hjdhjd/homebridge-ratgdo/main/images/homebridge-ratgdo.svg)](https://github.com/hjdhjd/homebridge-ratgdo)
 
 # Homebridge Ratgdo
 
@@ -14,7 +14,7 @@
 </DIV>
 </SPAN>
 
-`homebridge-ratgdo` is a [Homebridge](https://homebridge.io) plugin that makes Chamberlain, Liftmaster, and other garage door openers that utilize the Ratgdo hardware control board available to [Apple's](https://www.apple.com) [HomeKit](https://www.apple.com/ios/home) smart home platform. You can determine if your garage door opener by checking the [Ratgdo website](https://paulwieland.github.io/ratgdo/).
+`homebridge-ratgdo` is a [Homebridge](https://homebridge.io) plugin that makes Chamberlain, Liftmaster, and other garage door openers that utilize the Ratgdo hardware control board available to [Apple's](https://www.apple.com) [HomeKit](https://www.apple.com/ios/home) smart home platform. You can determine if your garage door opener is compatible by checking the [Ratgdo website](https://paulwieland.github.io/ratgdo/).
 
 ### MQTT Support
 [MQTT](https://mqtt.org) is a popular Internet of Things (IoT) messaging protocol that can be used to weave together different smart devices and orchestrate or instrument them in an infinite number of ways. In short - it lets things that might not normally be able to talk to each other communicate across ecosystems, provided they can support MQTT.
@@ -78,6 +78,7 @@ The topics that `homebridge-ratgdo` subscribes to are:
 | `garagedoor/get`        | `true` will trigger a publish event of the current garage door opener state.
 | `garagedoor/set`        | One of `close` or `open`. This will send the respective command to the garage door opener. When using the ESPHome firmware, `open` takes an optional parameter between 0 and 100 to set the door position appropriately: `open 50` will set the garage door to the 50% open position.
 | `light/get`             | `true` will trigger a publish event of the current garage door opener light.
+| `lock/get`              | `true` will trigger a publish event of the current garage door opener wireless remote lock status.
 | `motion/get`            | `true` will trigger a publish event of the current garage door opener motion sensor.
 | `obstruction/get`       | `true` will trigger a publish event of the current garage door opener obstruction sensor.
 | `occupancy/get`         | `true` will trigger a publish event of the current garage door opener occupancy status.

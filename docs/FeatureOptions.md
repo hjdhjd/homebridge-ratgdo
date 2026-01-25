@@ -14,7 +14,7 @@
 </DIV>
 </SPAN>
 
-`homebridge-ratgdo` is a [Homebridge](https://homebridge.io) plugin that makes Chamberlain, Liftmaster, and other garage door openers that utilize the Ratgdo hardware control board available to [Apple's](https://www.apple.com) [HomeKit](https://www.apple.com/ios/home) smart home platform. You can determine if your garage door opener by checking the [Ratgdo website](https://paulwieland.github.io/ratgdo/).
+`homebridge-ratgdo` is a [Homebridge](https://homebridge.io) plugin that makes Chamberlain, Liftmaster, and other garage door openers that utilize the Ratgdo hardware control board available to [Apple's](https://www.apple.com) [HomeKit](https://www.apple.com/ios/home) smart home platform. You can determine if your garage door opener is compatible by checking the [Ratgdo website](https://paulwieland.github.io/ratgdo/).
 
 ### Feature Options
 
@@ -28,7 +28,7 @@ The priority given to these options works in the following order, from highest t
 All feature options can be set at any scope level, or at multiple scope levels. If an option isn't applicable to a particular category of device, it is ignored. If you want to override a global feature option you've set, you can override the global feature option for the individual device, if you choose.
 
 > [!IMPORTANT]
-> It's strongly recommended that you use the Homebridge webUI](https://github.com/homebridge/homebridge-config-ui-x) to configure this plugin - it's easier to use for most people, and will ensure you always have a valid configuration.**
+> It's strongly recommended that you use the [Homebridge webUI](https://github.com/homebridge/homebridge-config-ui-x) to configure this plugin - it's easier to use for most people, and will ensure you always have a valid configuration.
 
 ### <A NAME="reference"></A>Feature Options Reference
 Feature options provide a rich mechanism for tailoring your `homebridge-ratgdo` experience. The reference below is divided into functional category groups:
@@ -91,13 +91,13 @@ Feature options provide a rich mechanism for tailoring your `homebridge-ratgdo` 
 | `Disco.OccupancySensor.Vehicle.Presence`         | Add an occupancy sensor accessory for vehicle presence detection. **(default: disabled)**.
 | `Disco.ContactSensor.Vehicle.Arriving`           | Add a contact sensor accessory for vehicle arrival. **(default: disabled)**.
 | `Disco.ContactSensor.Vehicle.Leaving`            | Add a contact sensor accessory for vehicle departure. **(default: disabled)**.
-| `Disco.Switch.laser`                             | Add a switch accessory to control the park assistance laser feature. **(default: disabled)**.
-| `Disco.Switch.led`                               | Add a switch accessory to control the LED setting. **(default: disabled)**.
+| `Disco.Switch.Laser`                             | Add a switch accessory to control the park assistance laser feature. **(default: disabled)**.
+| `Disco.Switch.Led`                               | Add a switch accessory to control the LED setting. **(default: disabled)**.
 
 #### <A NAME="konnected"></A>Konnected device-specific feature options.
 
 | Option                                           | Description
 |--------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-| `Konnected.Switch.PCW`                           | Add a switch accessory to control the pre-close warning feature on Konnected openers. This can be useful in automation scenarios. **(default: disabled)**.
+| `Konnected.Switch.Pcw`                           | Add a switch accessory to control the pre-close warning feature on Konnected openers. This can be useful in automation scenarios. **(default: disabled)**.
 | `Konnected.Switch.Strobe`                        | Add a switch accessory to control the strobe setting on Konnected openers. **(default: disabled)**.
 
