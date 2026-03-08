@@ -961,7 +961,18 @@ export class RatgdoAccessory {
       return false;
     }
 
-    // If we are already opening or closing the garage door, we assume the user wants to stop the garage door opener at it's current location.
+    // If the door is already transitioning toward the requested state, ignore the duplicate command. This prevents a common issue with HomeKit automations where
+    // multiple triggers (e.g. two family members arriving home simultaneously) send rapid open commands, causing the second command to be misinterpreted as a stop.
+    if((this.status.door === this.hap.Characteristic.CurrentDoorState.OPENING && value === this.hap.Characteristic.TargetDoorState.OPEN) ||
+      (this.status.door === this.hap.Characteristic.CurrentDoorState.CLOSING && value === this.hap.Characteristic.TargetDoorState.CLOSED)) {
+
+      this.log.info("Ignoring duplicate %s command - door is already %s.", this.translateTargetDoorState(value),
+        this.status.door === this.hap.Characteristic.CurrentDoorState.OPENING ? "opening" : "closing");
+
+      return true;
+    }
+
+    // If we are already opening or closing the garage door in the opposite direction, we assume the user wants to stop the garage door opener at it's current location.
     if((this.status.door === this.hap.Characteristic.CurrentDoorState.OPENING) || (this.status.door === this.hap.Characteristic.CurrentDoorState.CLOSING)) {
 
       this.log.debug("User-initiated stop requested while transitioning between open and close states.");
