@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 3.0.0 (2026-07-14)
+  * Breaking change: since node 20 is now EOL, node 22.20 is now the minimum required version.
+  * Improvement: HBR has been modernized to take full advantage of modern Node features and idioms, leaving years of legacy compatibility behind.
+  * Fix: the vehicle presence occupancy sensor now reflects the vehicle's presence at startup.
+  * Fix: the garage door open occupancy sensor now clears correctly.
+  * Housekeeping.
+
 ## 2.12.4 (2026-01-24)
   * Housekeeping.
 
