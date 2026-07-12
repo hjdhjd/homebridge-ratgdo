@@ -2,9 +2,7 @@
  *
  * server.js: homebridge-ratgdo webUI server API.
  */
-"use strict";
-
-import { featureOptionCategories, featureOptions } from "../dist/ratgdo-options.js";
+import { featureOptionCategories, featureOptions } from "../dist/options.js";
 import { HomebridgePluginUiServer } from "@homebridge/plugin-ui-utils";
 
 class PluginUiServer extends HomebridgePluginUiServer {
@@ -13,11 +11,13 @@ class PluginUiServer extends HomebridgePluginUiServer {
 
     super();
 
-    // Register getOptions() with the Homebridge server API.
+    // Register the /getOptions request handler with the Homebridge server API.
     this.onRequest("/getOptions", () => ({ categories: featureOptionCategories, options: featureOptions }));
 
     this.ready();
   }
 }
 
-(() => new PluginUiServer())();
+// We construct the server at module load purely for its side effects: the constructor registers the request handler and calls ready(). The void operator marks the
+// construction as a deliberate statement-position expression whose return value we intentionally discard.
+void new PluginUiServer();

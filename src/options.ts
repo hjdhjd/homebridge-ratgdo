@@ -1,9 +1,10 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * ratgdo-options.ts: Feature option and type definitions for Ratgdo.
+ * options.ts: Feature option and type definitions for Ratgdo.
  */
 import type { FeatureOptionEntry } from "homebridge-plugin-utils";
-import { RATGDO_OCCUPANCY_DURATION } from "./settings.js";
+import type { PlatformConfig } from "homebridge";
+import { RATGDO_OCCUPANCY_DURATION } from "./settings.ts";
 
 // Plugin configuration options.
 export type RatgdoOptions = Partial<{
@@ -14,21 +15,47 @@ export type RatgdoOptions = Partial<{
   options: string[];
 }>;
 
+/* Normalize a Homebridge PlatformConfig into a typed RatgdoOptions. Homebridge passes plugin config through an open index-signature shape sourced from user JSON, so
+ * without this boundary narrowing every consumer has to reach in with bracket notation - and downstream code would silently accept whatever shape the user supplied.
+ * We perform the typeof-narrowing reads once here so the rest of the codebase consumes a typed result that actually reflects runtime guarantees, not just assertions.
+ */
+export function normalizeConfig(config: PlatformConfig | undefined): RatgdoOptions {
+
+  if(!config) {
+
+    return {};
+  }
+
+  // PlatformConfig has an index signature typed as `any`, which would silently propagate `any` through the rest of the function. We re-read each field as `unknown`
+  // so the typeof / Array.isArray guards below are forced to do real narrowing rather than rubber-stamping a type assertion.
+  const mqttTopic: unknown = config["mqttTopic"];
+  const mqttUrl: unknown = config["mqttUrl"];
+  const options: unknown = config["options"];
+
+  return {
+
+    debug: config["debug"] === true,
+    mqttTopic: (typeof mqttTopic === "string") ? mqttTopic : undefined,
+    mqttUrl: (typeof mqttUrl === "string") ? mqttUrl : undefined,
+    options: (Array.isArray(options) && options.every((entry): entry is string => typeof entry === "string")) ? options : undefined
+  };
+}
+
 // Feature option categories.
 export const featureOptionCategories = [
 
   { description: "Device", name: "Device" },
   { description: "Logging", name: "Log" },
   { description: "Opener", name: "Opener" },
-  { description: "Light", name: "Light" },
-  { description: "Motion", name: "Motion" },
-  { description: "Ratgdo (ESP32) Disco", name: "Disco" },
-  { description: "Konnected", name: "Konnected" }
+  { description: "Opener light", name: "Light" },
+  { description: "Opener motion", name: "Motion" },
+  { description: "Ratgdo (ESP32) Disco device-specific", name: "Disco" },
+  { description: "Konnected device-specific", name: "Konnected" }
 ];
 
 /* eslint-disable @stylistic/max-len */
 // Individual feature options, broken out by category.
-export const featureOptions: { [index: string]: FeatureOptionEntry[] } = {
+export const featureOptions: Record<string, FeatureOptionEntry[]> = {
 
   // Device options.
   "Device": [
@@ -45,14 +72,14 @@ export const featureOptions: { [index: string]: FeatureOptionEntry[] } = {
     { default: false, description: "Add an occupancy sensor accessory for vehicle presence detection.", name: "OccupancySensor.Vehicle.Presence" },
     { default: false, description: "Add a contact sensor accessory for vehicle arrival.", name: "ContactSensor.Vehicle.Arriving" },
     { default: false, description: "Add a contact sensor accessory for vehicle departure.", name: "ContactSensor.Vehicle.Leaving" },
-    { default: false, description: "Add a switch accessory to control the park assistance laser feature.", name: "Switch.laser" },
-    { default: false, description: "Add a switch accessory to control the LED setting.", name: "Switch.led" }
+    { default: false, description: "Add a switch accessory to control the park assistance laser feature.", name: "Switch.Laser" },
+    { default: false, description: "Add a switch accessory to control the LED setting.", name: "Switch.Led" }
   ],
 
   // Konnected options.
   "Konnected": [
 
-    { default: false, description: "Add a switch accessory to control the pre-close warning feature on Konnected openers. This can be useful in automation scenarios.", name: "Switch.PCW" },
+    { default: false, description: "Add a switch accessory to control the pre-close warning feature on Konnected openers. This can be useful in automation scenarios.", name: "Switch.Pcw" },
     { default: false, description: "Add a switch accessory to control the strobe setting on Konnected openers.", name: "Switch.Strobe" }
   ],
 
