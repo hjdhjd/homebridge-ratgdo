@@ -10,7 +10,7 @@ import { LockCommand, LockState } from "esphome-client";
 import { RATGDO_ENTITIES, idFor } from "./entities.ts";
 import { RATGDO_KONNECTED_PCW_DURATION, RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION, RATGDO_UI_REVERT_DELAY } from "./settings.ts";
 import { RatgdoService, RatgdoVariant } from "./types.ts";
-import { acquireService, guardedDispatch, validService } from "homebridge-plugin-utils";
+import { TimerRegistry, acquireService, guardedDispatch, validService } from "homebridge-plugin-utils";
 import type { RatgdoEntityRef } from "./entities.ts";
 import type { RatgdoPlatform } from "./platform.ts";
 import util from "node:util";
@@ -116,21 +116,19 @@ export class RatgdoAccessory {
   private readonly accessory: PlatformAccessory;
   private readonly api: API;
   public readonly device: RatgdoDevice;
-  private doorOccupancyTimer: Nullable<NodeJS.Timeout>;
   private readonly hap: HAP;
   public readonly hints: RatgdoHints;
   public readonly log: HomebridgePluginLogging;
   // The per-accessory abort controller composed into every MQTT subscription this accessory registers. Aborting it at disposal removes those subscriptions from the
   // shared MqttClient handler set in lockstep with the accessory's teardown, so no MQTT handler outlives the accessory.
   private readonly mqttAbort: AbortController;
-  private motionOccupancyTimer: Nullable<NodeJS.Timeout>;
-  private motionTimer: Nullable<NodeJS.Timeout>;
   private readonly platform: RatgdoPlatform;
   private readonly services: Partial<Record<RatgdoService, Service>>;
   private readonly status: RatgdoStatus;
-  // Single-source-of-truth set of every active setTimeout handle owned by this accessory. Self-removes on natural fire (via scheduleTimer) and on explicit cancel
-  // (via cancelTimer), so the set bound stays equal to the count of pending timers regardless of how often timers are reassigned. Drained on [Symbol.dispose].
-  private readonly timers: Set<NodeJS.Timeout>;
+  // The timer registry for this accessory: every deferred callback (the motion and occupancy resets, the Konnected pulse, the UI revert) arms through it, keyed for the
+  // timers whose newest intent should replace the prior one and anonymous for the fire-and-forget ones. Its dispose drains every pending timer in lockstep with the
+  // accessory's teardown. No lifetime signal is passed - the accessory's own [Symbol.dispose] is the only lifetime bound.
+  private readonly timers = new TimerRegistry();
 
   constructor(platform: RatgdoPlatform, accessory: PlatformAccessory, device: RatgdoDevice, initialState: ReadonlyMap<EntityId, TelemetryEvent>) {
 
@@ -173,11 +171,7 @@ export class RatgdoAccessory {
      */
     this.logFeature("Opener.ReadOnly", "Read-only mode");
 
-    this.doorOccupancyTimer = null;
-    this.motionOccupancyTimer = null;
-    this.motionTimer = null;
     this.mqttAbort = new AbortController();
-    this.timers = new Set();
     this.configureDevice();
   }
 
@@ -187,53 +181,13 @@ export class RatgdoAccessory {
     return this.accessory.UUID;
   }
 
-  /* Schedule a one-shot timer tracked in the accessory's timer set. The set self-cleans on natural fire (the wrapper deletes the handle before invoking the caller's
-   * callback) and on explicit cancellation through cancelTimer below. Use this in place of bare setTimeout for any timer whose lifetime should be bounded by the
-   * accessory's lifetime - which is every timer this class creates.
-   */
-  private scheduleTimer(callback: () => void, delay: number): NodeJS.Timeout {
-
-    const handle: NodeJS.Timeout = setTimeout(() => {
-
-      this.timers.delete(handle);
-      callback();
-    }, delay);
-
-    this.timers.add(handle);
-
-    return handle;
-  }
-
-  /* Cancel a tracked timer. Removes the handle from the set in addition to clearing the underlying timer, so the set never accumulates stale handles from cancelled
-   * timers. Safe to call with null - matches the existing nullable timer-field pattern.
-   */
-  private cancelTimer(handle: Nullable<NodeJS.Timeout>): void {
-
-    if(handle === null) {
-
-      return;
-    }
-
-    clearTimeout(handle);
-    this.timers.delete(handle);
-  }
-
-  /* Synchronous disposal hook. Tears down every resource this accessory owns: pending one-shot timers, and the per-accessory MQTT subscriptions composed onto
+  /* Synchronous disposal hook. Tears down every resource this accessory owns: the pending timers in the registry, and the per-accessory MQTT subscriptions composed onto
    * `mqttAbort`. The platform invokes this at shutdown so no pending timer or MQTT subscription outlives the accessory.
    */
   public [Symbol.dispose](): void {
 
     this.mqttAbort.abort();
-
-    for(const handle of this.timers) {
-
-      clearTimeout(handle);
-    }
-
-    this.timers.clear();
-    this.doorOccupancyTimer = null;
-    this.motionOccupancyTimer = null;
-    this.motionTimer = null;
+    this.timers.dispose();
   }
 
   // Configure a garage door accessory for HomeKit.
@@ -1003,7 +957,7 @@ export class RatgdoAccessory {
 
       if(this.command("konnected-pcw")) {
 
-        this.scheduleTimer(() => service.updateCharacteristic(this.hap.Characteristic.On, !value), RATGDO_KONNECTED_PCW_DURATION * 1000);
+        this.timers.schedule(() => service.updateCharacteristic(this.hap.Characteristic.On, !value), RATGDO_KONNECTED_PCW_DURATION * 1000);
 
         return;
       }
@@ -1300,14 +1254,9 @@ export class RatgdoAccessory {
           motionService?.updateCharacteristic(this.hap.Characteristic.MotionDetected, this.status.motion);
         }
 
-        // If we already have an inflight motion sensor timer, clear it out since we're restarting the timer. Also, if it's our first time detecting motion for this event
-        // cycle, let the user know. The explicit null after cancelTimer pairs with the same pattern at the motionOccupancyTimer and doorOccupancyTimer cancel sites,
-        // even though the next statement reassigns motionTimer immediately - the consistency makes the cancel+clear-pointer intent legible at every cancel site.
-        if(this.motionTimer) {
-
-          this.cancelTimer(this.motionTimer);
-          this.motionTimer = null;
-        } else {
+        // If it is our first time detecting motion for this event cycle - no motion timer is currently armed - let the user know and publish the leading edge. A second
+        // motion event while the timer is still armed re-arms it below without re-announcing, so the leading-edge story fires exactly once per cycle.
+        if(!this.timers.has("motion")) {
 
           if(this.hints.logMotion) {
 
@@ -1317,10 +1266,9 @@ export class RatgdoAccessory {
           this.publishStatus("motion", this.status.motion.toString());
         }
 
-        // Set a timer for the motion event.
-        this.motionTimer = this.scheduleTimer(() => {
+        // Arm (or re-arm) the motion reset timer. Registering under "motion" clears any prior motion timer first, so a fresh motion event restarts the window from now.
+        this.timers.setTimeout("motion", () => {
 
-          this.motionTimer = null;
           this.status.motion = false;
           motionService?.updateCharacteristic(this.hap.Characteristic.MotionDetected, this.status.motion);
 
@@ -1333,13 +1281,6 @@ export class RatgdoAccessory {
           break;
         }
 
-        // Kill any inflight occupancy sensor.
-        if(this.motionOccupancyTimer) {
-
-          this.cancelTimer(this.motionOccupancyTimer);
-          this.motionOccupancyTimer = null;
-        }
-
         // If the motion occupancy sensor isn't already triggered, raise it now. Status drives the gate so MQTT subscribeGet and HomeKit stay aligned through one boolean
         // instead of fanning out to a HAP characteristic read; setOccupancy owns the status + characteristic + log + MQTT write.
         if(!this.status.motionOccupancy) {
@@ -1347,10 +1288,10 @@ export class RatgdoAccessory {
           this.setOccupancy("motion", true);
         }
 
-        // Reset our occupancy state after occupancyDuration; setOccupancy owns the status + characteristic + log + MQTT write.
-        this.motionOccupancyTimer = this.scheduleTimer(() => {
+        // Reset our occupancy state after occupancyDuration; setOccupancy owns the status + characteristic + log + MQTT write. Registering under "motionOccupancy" clears
+        // any prior occupancy timer first, so a repeated motion event restarts the release window from now.
+        this.timers.setTimeout("motionOccupancy", () => {
 
-          this.motionOccupancyTimer = null;
           this.setOccupancy("motion", false);
         }, this.hints.motionOccupancyDuration * 1000);
 
@@ -1463,13 +1404,14 @@ export class RatgdoAccessory {
             this.status.door = this.hap.Characteristic.CurrentDoorState.OPEN;
 
             // Trigger our occupancy timer, if configured to do so and we don't have one yet. The timer is what flips status.doorOpenOccupancy true after the configured
-            // duration, so a transient open does not raise occupancy - only a continuously-open door for the full duration does.
-            if(this.hints.doorOpenOccupancySensor && !this.doorOccupancyTimer) {
+            // duration, so a transient open does not raise occupancy - only a continuously-open door for the full duration does. The has() guard is defensive: the state
+            // short-circuit above already swallows a repeated open before it reaches this case, so the guard matters only if a future event path re-enters the open case
+            // with the window already running - the dwell window must never restart partway.
+            if(this.hints.doorOpenOccupancySensor && !this.timers.has("doorOccupancy")) {
 
-              this.doorOccupancyTimer = this.scheduleTimer(() => {
+              this.timers.setTimeout("doorOccupancy", () => {
 
-                // The timer firing both releases its own handle and raises occupancy; setOccupancy owns the status + characteristic + log + MQTT write.
-                this.doorOccupancyTimer = null;
+                // The timer firing raises occupancy; setOccupancy owns the status + characteristic + log + MQTT write.
                 this.setOccupancy("doorOpen", true);
               }, this.hints.doorOpenOccupancyDuration * 1000);
             }
@@ -1514,18 +1456,14 @@ export class RatgdoAccessory {
           this.log.info("%s.", this.capitalize(this.translateCurrentDoorState(this.status.door)));
         }
 
-        /* When the door is no longer open, tear down door-open occupancy. The pending-timer cancel and the raised-indicator clear are INDEPENDENT concerns: the occupancy
+        /* When the door is no longer open, tear down door-open occupancy. The pending-timer clear and the raised-indicator clear are INDEPENDENT concerns: the occupancy
          * timer releases its own handle the instant it fires (and raises occupancy), so a clear gated on the timer handle would be unreachable exactly when occupancy is
-         * raised - the stuck-on bug. We cancel a still-pending timer and clear an already-raised indicator separately, each on its own real condition. We read occupancy
-         * from status rather than the HAP characteristic so MQTT and HomeKit stay aligned on one source of truth.
+         * raised - the stuck-on bug. We clear a still-pending timer (a no-op when none is armed) and clear an already-raised indicator separately, each on its own real
+         * condition. We read occupancy from status rather than the HAP characteristic so MQTT and HomeKit stay aligned on one source of truth.
          */
         if(this.hints.doorOpenOccupancySensor && (this.status.door !== this.hap.Characteristic.CurrentDoorState.OPEN)) {
 
-          if(this.doorOccupancyTimer) {
-
-            this.cancelTimer(this.doorOccupancyTimer);
-            this.doorOccupancyTimer = null;
-          }
+          this.timers.clear("doorOccupancy");
 
           if(this.status.doorOpenOccupancy) {
 
@@ -1949,11 +1887,11 @@ export class RatgdoAccessory {
   }
 
   // Schedule a HomeKit UI revert that fires after the active onSet handler returns. HomeKit drops characteristic updates issued synchronously inside an onSet
-  // handler, so we defer through scheduleTimer to let the handler acknowledge first. Used by command-failure paths that need to put the UI back where the user found
-  // it. Routes through scheduleTimer so the pending revert is cancelled cleanly on shutdown rather than firing into a torn-down accessory.
+  // handler, so we defer through the timer registry to let the handler acknowledge first. Used by command-failure paths that need to put the UI back where the user
+  // found it. Routes through the registry so the pending revert is cancelled cleanly on shutdown rather than firing into a torn-down accessory.
   private scheduleUiRevert(revert: () => void): void {
 
-    this.scheduleTimer(revert, RATGDO_UI_REVERT_DELAY);
+    this.timers.schedule(revert, RATGDO_UI_REVERT_DELAY);
   }
 
   // Utility for checking feature options on a device.

@@ -11,17 +11,26 @@
 import { Characteristic, Service, buildRatgdoAccessory } from "./testing.helpers.ts";
 import { RATGDO_MOTION_DURATION, RATGDO_UI_REVERT_DELAY } from "./settings.ts";
 import { afterEach, beforeEach, describe, mock, test } from "node:test";
+import type { EspHomeEvent } from "./types.ts";
+import { RatgdoService } from "./types.ts";
 import assert from "node:assert/strict";
 
 // The motion timer is armed for RATGDO_MOTION_DURATION seconds; the production code multiplies the seconds constant by 1000 to reach the setTimeout delay, so the tests
 // mirror that conversion exactly rather than hardcoding a magic millisecond literal.
 const MOTION_DURATION_MS = RATGDO_MOTION_DURATION * 1000;
 
+/* Build a cover EspHomeEvent in the exact shape updateState() consumes (id / state / current_operation / position). Properties are alphabetical per the house style; the
+ * current_operation field mirrors the snake_case ESPHome wire shape EspHomeEvent declares, so the camelcase rule is scoped off for this one literal.
+ */
+// eslint-disable-next-line camelcase
+const coverEvent = (id: string, currentOperation: string, state: string, position?: number): EspHomeEvent => ({ current_operation: currentOperation, id, position,
+  state });
+
 describe("RatgdoAccessory timers", () => {
 
-  // Enable the fake setTimeout before every test so the accessory's scheduleTimer / cancelTimer / dispose machinery runs against a controllable clock. mock.timers ties
-  // clearTimeout into the same fake registry whenever setTimeout is enabled - it is not a separately-selectable api - so cancellations and the dispose drain are mocked
-  // alongside the scheduling. We tear the fake timers down after every test so no mocked clock state leaks across cases.
+  // Enable the fake setTimeout before every test so the accessory's timer registry (its keyed and anonymous timers and the dispose drain) runs against a controllable
+  // clock. mock.timers ties clearTimeout into the same fake registry whenever setTimeout is enabled - it is not a separately-selectable api - so cancellations and the
+  // dispose drain are mocked alongside the scheduling. We tear the fake timers down after every test so no mocked clock state leaks across cases.
   beforeEach(() => {
 
     mock.timers.enable({ apis: ["setTimeout"] });
@@ -108,6 +117,68 @@ describe("RatgdoAccessory timers", () => {
       mock.timers.tick(MOTION_DURATION_MS - 2000);
 
       assert.equal(motionService.getCharacteristic(Characteristic.MotionDetected).value, false, "the restarted timer fires exactly once at its own due instant");
+    });
+  });
+
+  describe("the motion occupancy timer", () => {
+
+    test("restarts the occupancy timer on a repeated motion event rather than firing at the original due instant", () => {
+
+      const { accessory, ratgdo } = buildRatgdoAccessory({ mqtt: true, userOptions: ["Enable.Motion.OccupancySensor"] });
+      const occupancy = accessory.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_SENSOR_MOTION);
+
+      assert.ok(occupancy, "the motion occupancy sensor materializes when Enable.Motion.OccupancySensor is set");
+
+      const occupancyMs = ratgdo.hints.motionOccupancyDuration * 1000;
+
+      // Arm the occupancy timer at t=0: a motion event raises motion occupancy immediately and schedules its release for occupancyMs.
+      ratgdo.updateState({ id: "binary_sensor-motion", state: "ON" });
+
+      assert.equal(occupancy.getCharacteristic(Characteristic.OccupancyDetected).value, true, "the leading motion event raises motion occupancy immediately");
+
+      // Advance partway, then deliver a second motion event. The occupancy timer restarts from this point rather than firing at its original instant.
+      mock.timers.tick(occupancyMs - 2000);
+      ratgdo.updateState({ id: "binary_sensor-motion", state: "ON" });
+
+      // Cross the moment the ORIGINAL occupancy timer would have fired. Because it was restarted, occupancy must still be raised here.
+      mock.timers.tick(2000);
+
+      assert.equal(occupancy.getCharacteristic(Characteristic.OccupancyDetected).value, true,
+        "the original occupancy timer was restarted, so occupancy remains raised past its would-be fire instant");
+
+      // Advance to the restarted timer's due instant. The single surviving timer fires exactly once, releasing occupancy.
+      mock.timers.tick(occupancyMs - 2000);
+
+      assert.equal(occupancy.getCharacteristic(Characteristic.OccupancyDetected).value, false,
+        "the restarted occupancy timer fires exactly once at its own due instant, releasing occupancy");
+    });
+  });
+
+  describe("the door-open occupancy timer", () => {
+
+    test("arms once - a repeated door-open event does not restart the occupancy timer", () => {
+
+      const { accessory, ratgdo } = buildRatgdoAccessory({ userOptions: ["Enable.Opener.OccupancySensor"] });
+      const occupancy = accessory.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_SENSOR_DOOR_OPEN);
+
+      assert.ok(occupancy, "the door-open occupancy sensor materializes when Enable.Opener.OccupancySensor is set");
+
+      const doorMs = ratgdo.hints.doorOpenOccupancyDuration * 1000;
+
+      // Open the door at t=0: the occupancy timer schedules for doorMs.
+      ratgdo.updateState(coverEvent("cover-door", "IDLE", "OPEN", 1));
+
+      // Advance partway, then deliver a second open event. A repeated open must NOT restart the dwell - the door-state short-circuit swallows the duplicate before the
+      // open case re-runs, and the defensive has() guard backs it up should a future event path re-enter the case with the window running. Either way the observable
+      // contract is the same: a continuously-open door keeps its original deadline.
+      mock.timers.tick(doorMs - 2000);
+      ratgdo.updateState(coverEvent("cover-door", "IDLE", "OPEN", 1));
+
+      // Cross the ORIGINAL due instant. Because the window was never restarted, the timer fires here and raises occupancy.
+      mock.timers.tick(2000);
+
+      assert.equal(occupancy.getCharacteristic(Characteristic.OccupancyDetected).value, true,
+        "the door-open occupancy timer armed once and fired at its original deadline despite the repeated open");
     });
   });
 
