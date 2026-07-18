@@ -64,6 +64,7 @@
         {
           "blurb": "changes and release history of this plugin.",
           "file": "docs/Changelog.md",
+          "footer": false,
           "kind": "doc",
           "masthead": false,
           "title": "Changelog"
