@@ -10,7 +10,7 @@ import { LockCommand, LockState } from "esphome-client";
 import { RATGDO_ENTITIES, idFor } from "./entities.ts";
 import { RATGDO_KONNECTED_PCW_DURATION, RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION, RATGDO_UI_REVERT_DELAY } from "./settings.ts";
 import { RatgdoService, RatgdoVariant } from "./types.ts";
-import { acquireService, validService } from "homebridge-plugin-utils";
+import { acquireService, guardedDispatch, validService } from "homebridge-plugin-utils";
 import type { RatgdoEntityRef } from "./entities.ts";
 import type { RatgdoPlatform } from "./platform.ts";
 import util from "node:util";
@@ -486,6 +486,15 @@ export class RatgdoAccessory {
   private mqttTopic(suffix: string): string {
 
     return this.device.mac + "/" + suffix;
+  }
+
+  // Publish a status update to MQTT through guardedDispatch, so a rejected publish - the broker vanishing mid-write, a teardown race - lands in the log instead of
+  // floating as an unhandled rejection. Publishing is fire-and-forget by design; the guard is about making the rare failure visible, not about awaiting delivery.
+  private publishStatus(topicSuffix: string, message: string): void {
+
+    const label = "MQTT publish (" + topicSuffix + ")";
+
+    guardedDispatch({ handler: async (): Promise<void> => { await this.platform.mqtt?.publish(this.mqttTopic(topicSuffix), message); }, label, log: this.log });
   }
 
   // Configure MQTT services. Every subscribe* call passes the per-accessory `mqttAbort.signal` so the MqttClient removes our handlers when this accessory disposes -
@@ -1305,7 +1314,7 @@ export class RatgdoAccessory {
             this.log.info("Motion detected.");
           }
 
-          void this.platform.mqtt?.publish(this.mqttTopic("motion"), this.status.motion.toString());
+          this.publishStatus("motion", this.status.motion.toString());
         }
 
         // Set a timer for the motion event.
@@ -1315,7 +1324,7 @@ export class RatgdoAccessory {
           this.status.motion = false;
           motionService?.updateCharacteristic(this.hap.Characteristic.MotionDetected, this.status.motion);
 
-          void this.platform.mqtt?.publish(this.mqttTopic("motion"), this.status.motion.toString());
+          this.publishStatus("motion", this.status.motion.toString());
         }, RATGDO_MOTION_DURATION * 1000);
 
         // If we don't have occupancy sensor support configured, we're done.
@@ -1361,7 +1370,7 @@ export class RatgdoAccessory {
             this.log.info("Obstruction %sdetected.", this.status.obstruction ? "" : "no longer ");
           }
 
-          void this.platform.mqtt?.publish(this.mqttTopic("obstruction"), this.status.obstruction.toString());
+          this.publishStatus("obstruction", this.status.obstruction.toString());
         }
 
         break;
@@ -1524,7 +1533,7 @@ export class RatgdoAccessory {
           }
         }
 
-        void this.platform.mqtt?.publish(this.mqttTopic("garagedoor"), this.translateCurrentDoorState(this.status.door));
+        this.publishStatus("garagedoor", this.translateCurrentDoorState(this.status.door));
 
         break;
       }
@@ -1543,7 +1552,7 @@ export class RatgdoAccessory {
             this.log.info("Light %s.", event.state.toLowerCase());
           }
 
-          void this.platform.mqtt?.publish(this.mqttTopic("light"), this.status.light.toString());
+          this.publishStatus("light", this.status.light.toString());
         }
 
         break;
@@ -1582,7 +1591,7 @@ export class RatgdoAccessory {
 
         this.log.info("Wireless remotes are %s.", (event.state === "LOCKED") ? "locked out" : "permitted");
 
-        void this.platform.mqtt?.publish(this.mqttTopic("lock"), this.status.lock.toString());
+        this.publishStatus("lock", this.status.lock.toString());
 
         break;
 
@@ -1887,7 +1896,7 @@ export class RatgdoAccessory {
 
       service?.updateCharacteristic(this.hap.Characteristic.On, newState);
 
-      void this.platform.mqtt?.publish(this.mqttTopic(topicSuffix), newState.toString());
+      this.publishStatus(topicSuffix, newState.toString());
     }
 
     return newState;
@@ -1906,7 +1915,7 @@ export class RatgdoAccessory {
         this.log.info("%s %sdetected.", logPrefix, newState ? "" : "no longer ");
       }
 
-      void this.platform.mqtt?.publish(this.mqttTopic(topicSuffix), newState.toString());
+      this.publishStatus(topicSuffix, newState.toString());
     }
 
     return newState;
@@ -1929,7 +1938,7 @@ export class RatgdoAccessory {
       this.log.info("%s %sdetected.", descriptor.label, detected ? "" : "no longer ");
     }
 
-    void this.platform.mqtt?.publish(this.mqttTopic(descriptor.topic), detected.toString());
+    this.publishStatus(descriptor.topic, detected.toString());
   }
 
   // Utility function to capitalize the first character of a string. Indexed access returns string | undefined under noUncheckedIndexedAccess - the optional-chain

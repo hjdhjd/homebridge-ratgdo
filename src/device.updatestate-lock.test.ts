@@ -185,4 +185,39 @@ describe("RatgdoAccessory.updateState() lock and availability", () => {
         "an online availability event refreshes the Model characteristic from the device model");
     });
   });
+
+  describe("the guarded publish failure path", () => {
+
+    test("a rejected publish surfaces the guard's publish-specific label and floats no unhandled rejection", async () => {
+
+      const { entries, mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true });
+
+      // The recording MQTT double is installed with mqtt: true; narrow the nullable before arming its rejection lever.
+      assert.ok(mqtt, "the recording MQTT double is installed with mqtt: true");
+
+      // Arm the rejection lever so the lock-state publish rejects, driving the guarded-dispatch failure path rather than recording the message.
+      mqtt.publishRejection = new Error("the broker connection dropped");
+
+      // Capture any unhandled rejection the guarded publish might float, proving the guard consumed the rejection rather than logging alongside a float.
+      const floats: unknown[] = [];
+      const onFloat = (reason: unknown): void => { floats.push(reason); };
+
+      process.on("unhandledRejection", onFloat);
+
+      try {
+
+        // A LOCKED lock event drives a lock-state publish through the guarded publishStatus helper.
+        ratgdo.updateState({ id: "lock-lock_remotes", state: "LOCKED" });
+
+        // Drain the guarded dispatch's async failure path so its log line lands before we assert.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      } finally {
+
+        process.off("unhandledRejection", onFloat);
+      }
+
+      assert.equal(floats.length, 0, "the rejected publish did not float an unhandled rejection");
+      assert.equal(loggedAt(entries, "error", "MQTT publish (lock)"), true, "the guard reported the rejection under its publish-specific label naming the topic");
+    });
+  });
 });

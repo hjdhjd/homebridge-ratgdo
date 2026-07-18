@@ -577,6 +577,9 @@ export class TestMqttClient {
 
   public readonly gets: RecordedMqttGet[] = [];
   public readonly publishes: RecordedMqttPublish[] = [];
+  // When set, publish() rejects with this error instead of recording, so a test can drive the guarded-publish failure path. Persistent for the double's per-test
+  // lifetime; every test builds a fresh client, so there is no reset machinery.
+  public publishRejection: Nullable<Error> = null;
   public readonly sets: RecordedMqttSet[] = [];
 
   public subscribeGet(topic: string, type: string, getValue: () => string): void {
@@ -590,6 +593,11 @@ export class TestMqttClient {
   }
 
   public async publish(topic: string, payload: string): Promise<void> {
+
+    if(this.publishRejection) {
+
+      throw this.publishRejection;
+    }
 
     this.publishes.push({ payload, topic });
   }
