@@ -59,3 +59,12 @@ export const RATGDO_OCCUPANCY_DURATION = 300;
 // onSet acknowledgment.
 export const RATGDO_UI_REVERT_DELAY = 50;
 
+// Duration, in seconds, of the per-device budget between a mac entering the webUI status warm set and its mDNS discovery. When the budget elapses with the device still
+// undiscovered, the pool classifies that device not-found and surfaces the verdict to the panel. The settings modal is a foreground, user-initiated context, so a bounded
+// wait keeps the panel responsive rather than waiting indefinitely on a device that is powered down or off the network.
+export const RATGDO_WEBUI_DISCOVERY_TIMEOUT = 10;
+
+// Interval, in seconds, between the webUI status browser's re-issued mDNS queries. A single mDNS query can lose its packet, so the browser re-queries on this cadence
+// while the modal is open. The cadence is modal-scoped and short-lived, so a fixed interval is sufficient where the platform runs a warmup-plus-steady-state schedule.
+export const RATGDO_WEBUI_MDNS_REQUERY_INTERVAL = 15;
+

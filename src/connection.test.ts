@@ -126,7 +126,7 @@ describe("openConnection", () => {
     const openClient = makeFakeOpenClient(client);
     const { entries, result } = await run(openClient, { psk: "test-psk" });
 
-    assert.ok(result, "a connected client with a complete snapshot yields a result");
+    assert.ok(result.ok, "a connected client with a complete snapshot yields a success outcome");
     assert.equal(result.client, client, "the resolved client is returned");
     assert.equal(result.initialState, client.snapshot(), "the captured initial state is the client's populated cache");
     assert.equal(client.disposed, false, "a successful open does not dispose the client");
@@ -141,11 +141,30 @@ describe("openConnection", () => {
     assert.equal(openClient.calls[0]?.psk, "test-psk", "the resolved psk threads through openConnection to the factory unchanged");
   });
 
-  test("encryption error: returns null and logs the encryption-configuration diagnostic", async () => {
+  test("encryption error (mismatched key): returns the encryption-invalid outcome and logs the encryption-configuration diagnostic", async () => {
 
     const { entries, result } = await run(makeFakeOpenClient(new EncryptionKeyInvalidError("bad key")));
 
-    assert.equal(result, null, "an encryption failure skips the discovery attempt");
+    assert.ok(!result.ok, "an encryption failure skips the discovery attempt");
+    assert.equal(result.reason, "encryption-invalid", "a mismatched key carries the encryption-invalid reason token");
+    assert.ok(loggedAt(entries, "error", "Encryption configuration error"), "the user sees the encryption-key diagnostic");
+  });
+
+  test("encryption error (missing key): returns the encryption-missing outcome and logs the encryption-configuration diagnostic", async () => {
+
+    const { entries, result } = await run(makeFakeOpenClient(new EncryptionKeyMissingError("missing key")));
+
+    assert.ok(!result.ok, "an encryption failure skips the discovery attempt");
+    assert.equal(result.reason, "encryption-missing", "an absent key carries the encryption-missing reason token");
+    assert.ok(loggedAt(entries, "error", "Encryption configuration error"), "the user sees the encryption-key diagnostic");
+  });
+
+  test("encryption error (key required): returns the encryption-missing outcome and logs the encryption-configuration diagnostic", async () => {
+
+    const { entries, result } = await run(makeFakeOpenClient(new EncryptionRequiredError("key required")));
+
+    assert.ok(!result.ok, "an encryption failure skips the discovery attempt");
+    assert.equal(result.reason, "encryption-missing", "a device that requires but lacks a key carries the encryption-missing reason token");
     assert.ok(loggedAt(entries, "error", "Encryption configuration error"), "the user sees the encryption-key diagnostic");
   });
 
@@ -153,7 +172,8 @@ describe("openConnection", () => {
 
     const { entries, result } = await run(makeFakeOpenClient(new AuthenticationError("auth failed")));
 
-    assert.equal(result, null, "a permanent error skips the discovery attempt");
+    assert.ok(!result.ok, "a permanent error skips the discovery attempt");
+    assert.equal(result.reason, "permanent", "the failure outcome carries the permanent reason token");
     assert.ok(loggedAt(entries, "error", "Permanent connection error"), "the user sees the permanent-connection diagnostic");
   });
 
@@ -162,7 +182,8 @@ describe("openConnection", () => {
     // A transient error that is neither an encryption misconfiguration, a PermanentError, nor a state-capture timeout falls through to the generic else branch.
     const { entries, result } = await run(makeFakeOpenClient(new Error("connection refused")));
 
-    assert.equal(result, null, "an unclassified failure skips the discovery attempt");
+    assert.ok(!result.ok, "an unclassified failure skips the discovery attempt");
+    assert.equal(result.reason, "unknown", "the failure outcome carries the unknown reason token");
     assert.ok(loggedAt(entries, "error", "Failed to establish connection"), "the user sees the catch-all connection diagnostic");
   });
 
@@ -171,7 +192,8 @@ describe("openConnection", () => {
     const client = pendingClient();
     const { entries, result } = await run(makeFakeOpenClient(client), { timeoutSeconds: 0.02 });
 
-    assert.equal(result, null, "a state-capture timeout skips the discovery attempt");
+    assert.ok(!result.ok, "a state-capture timeout skips the discovery attempt");
+    assert.equal(result.reason, "timeout", "the failure outcome carries the timeout reason token");
     assert.ok(loggedAt(entries, "error", "Initial-state capture timed out"), "the user sees the timeout diagnostic");
     assert.equal(client.disposed, true, "the partially-constructed client is torn down");
   });
@@ -181,7 +203,8 @@ describe("openConnection", () => {
     const client = pendingClient();
     const { entries, result } = await run(makeFakeOpenClient(client), { shutdownSignal: AbortSignal.abort("shutdown"), timeoutSeconds: 1 });
 
-    assert.equal(result, null, "an in-flight discovery interrupted by shutdown is abandoned");
+    assert.ok(!result.ok, "an in-flight discovery interrupted by shutdown is abandoned");
+    assert.equal(result.reason, "shutdown", "the failure outcome carries the shutdown reason token");
     assert.equal(entries.filter((entry) => entry.level === "error").length, 0, "shutdown is not a failure, so nothing is logged at error level");
     assert.equal(client.disposed, true, "the client opened before the shutdown abort is torn down");
   });

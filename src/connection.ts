@@ -10,10 +10,11 @@
  * Feature-option resolution stays at the platform: the caller resolves the device's encryption key and passes the concrete `psk` in, so this module's only external
  * dependency is the client-factory port. That keeps the seam single-purpose and the functions trivially testable.
  */
-import { EncryptionKeyInvalidError, EncryptionKeyMissingError, EncryptionRequiredError, PermanentError, entityId, openEspHomeClient } from "esphome-client";
+import { EncryptionKeyInvalidError, EncryptionKeyMissingError, EncryptionRequiredError, PermanentError, openEspHomeClient } from "esphome-client";
 import type { EntityId, EspHomeClient, TelemetryEvent } from "esphome-client";
 import type { HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
 import { RATGDO_INITIAL_STATE_TIMEOUT } from "./settings.ts";
+import { presentEntityIds } from "./entities.ts";
 import util from "node:util";
 
 /* The injectable ESPHome client-factory port. Aliased to the real factory's type so the seam stays bound to esphome-client's signature: if `openEspHomeClient`'s shape
@@ -22,14 +23,28 @@ import util from "node:util";
  */
 export type OpenEspHomeClient = typeof openEspHomeClient;
 
-/* The result of a successful `openConnection`: the live, connected client plus the initial-state snapshot `captureInitialState` waited for. `null` is the failure
- * signal for every branch (shutdown, encryption, permanent, timeout, generic), so the caller branches on truthiness rather than catching.
+/* The success payload of `openConnection`: the live, connected client plus the initial-state snapshot `captureInitialState` waited for. It rides inside the `ok: true`
+ * arm of the `ConnectionOutcome` union; the failure arms carry a typed `ConnectionFailureReason` instead, so a caller branches on `outcome.ok` and, on failure, acts on
+ * the classified reason without parsing log output.
  */
 export interface ConnectionResult {
 
   client: EspHomeClient;
   initialState: ReadonlyMap<EntityId, TelemetryEvent>;
 }
+
+/* The classification of every way `openConnection` can fail. `shutdown` is not a fault - the platform is tearing down - and a caller acts on it by standing down
+ * silently; `encryption-invalid` marks a configured key that does not match the device and `encryption-missing` marks a device that requires an API key that was not
+ * supplied; `permanent` and `unknown` mark a device that is unreachable or failed for an unclassified reason; `timeout` marks a device that opened the connection but did
+ * not push its initial state in the budget. This is the typed sentinel a second consumer branches on in place of scraping the log line each branch emits.
+ */
+export type ConnectionFailureReason = "encryption-invalid" | "encryption-missing" | "permanent" | "shutdown" | "timeout" | "unknown";
+
+/* `openConnection`'s outcome, a discriminated union on `ok`: `ok: true` carries the connected client and its captured initial state, `ok: false` carries the classified
+ * failure reason. Every failure branch has already logged its diagnostic and disposed the partially-constructed client, so a caller reads the outcome purely to decide
+ * what to do next - construct the accessory, surface an error to the user, or stand down on shutdown.
+ */
+export type ConnectionOutcome = ({ ok: true } & ConnectionResult) | { ok: false; reason: ConnectionFailureReason };
 
 /* Options for `captureInitialState`. The caller supplies the connected client, the wait-list of entities that must appear in the cache before construction proceeds,
  * the platform-wide shutdown signal (independent cancellation), and an optional per-call state-capture budget. `timeoutSeconds` is injectable so the timeout branch is
@@ -72,8 +87,9 @@ export interface OpenConnectionOptions {
 
 /* Establish the ESPHome client connection AND wait for the LatestStateCache to populate with initial state for every stateful entity. The dual await is wrapped
  * in one try/catch so error logging and cleanup are consistent regardless of which phase failed: any failure tears down the partially-constructed client and
- * returns null, signalling the caller to skip this discovery attempt (the next mDNS refresh will retry). The platformAccessory (if any) stays registered with
- * Homebridge - acquireService() is safe to call more than once and reuses existing service objects on the retry's RatgdoAccessory construction.
+ * returns a failure outcome carrying the classified `ConnectionFailureReason`, signalling the caller to skip this discovery attempt (the next mDNS refresh will retry).
+ * The platformAccessory (if any) stays registered with Homebridge - acquireService() is safe to call more than once and reuses existing service objects on the retry's
+ * RatgdoAccessory construction.
  *
  * The factory's `logger` field accepts the EspHomeLogging shape; the caller passes a static-prefix adapter built from device.name so client-internal messages (connect
  * retries, heartbeat, encryption fallback) carry device context. The adapter is permanent for the client's lifetime, so a HomeKit rename later does not retitle
@@ -85,7 +101,7 @@ export interface OpenConnectionOptions {
  * sees a focused diagnostic instead of a wrapped stack trace. Everything else falls through to the generic else with the unfiltered util.inspect output.
  */
 export async function openConnection({ expected, host, log, openClient = openEspHomeClient, psk, shutdownSignal, timeoutSeconds = RATGDO_INITIAL_STATE_TIMEOUT }:
-OpenConnectionOptions): Promise<Nullable<ConnectionResult>> {
+OpenConnectionOptions): Promise<ConnectionOutcome> {
 
   /* Client is a plain, manually-disposed variable rather than a `using` declaration. A `using` binding runs its disposal on any scope exit, including the
    * success-path `return { client, initialState }` below, which would tear down the freshly-connected client before the caller ever receives it. Manual
@@ -105,7 +121,7 @@ OpenConnectionOptions): Promise<Nullable<ConnectionResult>> {
 
     const initialState = await captureInitialState({ client, expected, shutdownSignal, timeoutSeconds });
 
-    return { client, initialState };
+    return { client, initialState, ok: true };
   } catch(error) {
 
     // Shutdown is not a failure - the platform is tearing down and this in-flight discovery is no longer interesting. Silent cleanup so the log is not filled
@@ -114,26 +130,37 @@ OpenConnectionOptions): Promise<Nullable<ConnectionResult>> {
 
       client?.[Symbol.dispose]();
 
-      return null;
+      return { ok: false, reason: "shutdown" };
     }
+
+    // Classify the fault into the typed reason the caller acts on, keeping each branch's user-facing diagnostic. The shared teardown-and-return below then disposes the
+    // partially-constructed client exactly once, regardless of which branch classified the failure.
+    let reason: ConnectionFailureReason;
 
     if(isEncryptionError(error)) {
 
       log.error("Encryption configuration error - check the device's API encryption key: %s", error.message);
+
+      // Split the encryption fault so a caller acts on which kind it is without re-inspecting the error: a mismatched key (EncryptionKeyInvalidError) reads as
+      // "encryption-invalid", while an absent-but-required key (EncryptionKeyMissingError or EncryptionRequiredError) reads as "encryption-missing".
+      reason = (error instanceof EncryptionKeyInvalidError) ? "encryption-invalid" : "encryption-missing";
     } else if(error instanceof PermanentError) {
 
       log.error("Permanent connection error: %s", util.inspect(error, { depth: null }));
+      reason = "permanent";
     } else if((error instanceof DOMException) && (error.name === "TimeoutError")) {
 
       log.error("Initial-state capture timed out after %s seconds. The device opened the connection but failed to push entity state.", timeoutSeconds);
+      reason = "timeout";
     } else {
 
       log.error("Failed to establish connection: %s", util.inspect(error, { depth: null }));
+      reason = "unknown";
     }
 
     client?.[Symbol.dispose]();
 
-    return null;
+    return { ok: false, reason };
   }
 }
 
@@ -163,10 +190,9 @@ Promise<ReadonlyMap<EntityId, TelemetryEvent>> {
 
   const cache = client.snapshot();
 
-  // Intersect the caller's "what we care about" list with the device's "what's actually here" list. Set membership for the exposed ids gives O(1) per-entry filter
-  // and the resulting `required` list is what every completeness check below operates on.
-  const exposed = new Set(client.entitiesByDevice(0).map((entity) => entityId(entity.type, entity.objectId)));
-  const required = expected.filter((id) => exposed.has(id));
+  // Intersect the caller's "what we care about" list with the device's "what's actually here" list. presentEntityIds owns that intersection (Set membership over the
+  // advertised ids, wanted order preserved); the resulting `required` list is what every completeness check below operates on.
+  const required = presentEntityIds(client, expected);
 
   // Nothing to wait for. Either the caller declared no required entities or the device exposes none of them - in both cases construction can proceed immediately
   // with whatever the cache currently holds (the readers' defaults will fill in any gaps).

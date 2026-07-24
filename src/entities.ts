@@ -2,7 +2,7 @@
  *
  * entities.ts: The single source of truth for the ESPHome entity identities ratgdo addresses, plus the derived initial-state wait set.
  */
-import type { EntityId } from "esphome-client";
+import type { EntityId, EspHomeClient } from "esphome-client";
 import { RatgdoVariant } from "./types.ts";
 import { entityId } from "esphome-client";
 
@@ -26,8 +26,9 @@ export interface RatgdoEntityRef<T extends RatgdoEntityType = RatgdoEntityType> 
  * statically guaranteed to be defined. Adding a new required field fails compilation at the `RATGDO_ENTITIES` literal (and at any consumer that already requires
  * that field); adding a new variant fails compilation only at the sites that already switch exhaustively over `RatgdoVariant`.
  *
- * The momentary binary sensors (motion, vehicle_arriving, vehicle_leaving) intentionally do not appear here: they are not used for command dispatch or initial-state
- * extraction, and their absent-pushes-on-SUBSCRIBE behavior must not block construction. Adding them here would imply a wait-set membership that would be incorrect.
+ * A momentary binary sensor joins the registry only when a consumer addresses it by entity id; membership here is driven by "does something resolve this by id",
+ * nothing more. Even when present, a momentary sensor stays out of the initial-state wait lists (ratgdoInitialStateEntityIds): it pushes no state on SUBSCRIBE until it
+ * next fires, so waiting on it would stall construction indefinitely.
  */
 interface BaseEntities {
 
@@ -42,6 +43,7 @@ interface RatgdoEntities extends BaseEntities {
 
   readonly laser: RatgdoEntityRef<"switch">;
   readonly led: RatgdoEntityRef<"switch">;
+  readonly motion: RatgdoEntityRef<"binary_sensor">;
   readonly vehicleDetected: RatgdoEntityRef<"binary_sensor">;
 }
 
@@ -80,6 +82,7 @@ export const RATGDO_ENTITIES: RatgdoEntityRegistry = {
     led: { objectId: "led", type: "switch" },
     light: { objectId: "light", type: "light" },
     lock: { objectId: "lock_remotes", type: "lock" },
+    motion: { objectId: "motion", type: "binary_sensor" },
     obstruction: { objectId: "obstruction", type: "binary_sensor" },
     refresh: { objectId: "query_status", type: "button" },
     vehicleDetected: { objectId: "vehicle_detected", type: "binary_sensor" }
@@ -130,4 +133,53 @@ export function ratgdoInitialStateEntityIds(variant: RatgdoVariant): readonly En
       ];
     }
   }
+}
+
+/* The status row universe for a variant: the set of entity ids the live-status panel can render a row for. A consumer intersects it with the device's advertised
+ * entities (see presentEntityIds), so a firmware that lacks one of these entities simply has no row for it. The switch is exhaustive over RatgdoVariant, so adding a
+ * variant fails compilation here until its row set is declared, keeping this list from drifting out of sync with the variant taxonomy. Konnected firmware advertises no
+ * motion entity, so motion belongs to the ratgdo row set only - the same placement logic the registry itself uses.
+ */
+export function ratgdoStatusEntityIds(variant: RatgdoVariant): readonly EntityId[] {
+
+  switch(variant) {
+
+    case RatgdoVariant.KONNECTED: {
+
+      const entities = RATGDO_ENTITIES[RatgdoVariant.KONNECTED];
+
+      return [
+
+        idFor(entities.cover),
+        idFor(entities.light),
+        idFor(entities.lock),
+        idFor(entities.obstruction)
+      ];
+    }
+
+    case RatgdoVariant.RATGDO: {
+
+      const entities = RATGDO_ENTITIES[RatgdoVariant.RATGDO];
+
+      return [
+
+        idFor(entities.cover),
+        idFor(entities.light),
+        idFor(entities.lock),
+        idFor(entities.motion),
+        idFor(entities.obstruction)
+      ];
+    }
+  }
+}
+
+/* Intersect a caller's wanted entity-id list with the entities the connected client advertises for device 0, preserving the wanted order. A Set over the advertised ids
+ * gives an O(1) per-entry filter. This separates "what the caller cares about" from "what this firmware actually exposes", so a wait-list or a row set never references
+ * an entity the device does not advertise: a firmware that omits an optional entity yields a shorter list rather than an indefinite wait or a phantom row.
+ */
+export function presentEntityIds(client: EspHomeClient, wanted: readonly EntityId[]): EntityId[] {
+
+  const exposed = new Set(client.entitiesByDevice(0).map((entity) => entityId(entity.type, entity.objectId)));
+
+  return wanted.filter((id) => exposed.has(id));
 }

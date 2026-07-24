@@ -333,7 +333,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       shutdownSignal: this.shutdownController.signal
     });
 
-    if(!connection) {
+    if(!connection.ok) {
 
       return;
     }
