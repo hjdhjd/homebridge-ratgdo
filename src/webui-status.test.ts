@@ -42,10 +42,13 @@ const ADVERTISED = [
   { objectId: "obstruction", type: "binary_sensor" }
 ];
 
-// Build a mDNS service double that parseRatgdoService classifies as a ratgdo device with the given stripped mac and address.
-const makeService = (mac = MAC, address = ADDR): Service => {
+// Build a mDNS service double that parseRatgdoService classifies as a ratgdo device with the given stripped mac and address. The overrides record replaces individual
+// TXT fields on the well-formed base - passing friendly_name as undefined or an empty string models a device that advertises no usable name - so the TXT vocabulary
+// stays in this one fixture rather than being restated as record literals inside the tests that need a variant.
+const makeService = (mac = MAC, address = ADDR, overrides: Record<string, string | undefined> = {}): Service => {
 
-  return makeMdnsService({ esphome_version: "2.0.0", friendly_name: "Test Ratgdo", mac, project_name: "ratgdo.esp32", project_version: "1.0.0" }, [address]);
+  return makeMdnsService({ esphome_version: "2.0.0", friendly_name: "Test Ratgdo", mac, project_name: "ratgdo.esp32", project_version: "1.0.0", ...overrides },
+    [address]);
 };
 
 // Key a list of telemetry events into a latest-state cache the same way the ESPHome client does, so a fake client's snapshot mirrors the wire cache.
@@ -1182,6 +1185,139 @@ describe("StatusFeed connection failures", () => {
 
       process.off("unhandledRejection", onUnhandled);
     }
+  });
+});
+
+describe("StatusFeed connection logging", () => {
+
+  test("prefixes every level of the connection's logger with the device's advertised name", async () => {
+
+    // openConnection forwards this adapter to the client factory as its logger, so the client's own lines - connect retries, heartbeat, the encryption diagnostic that
+    // sent us looking for this identity in the first place - reach the feed's log carrying the device they belong to.
+    const openClient = makeOpenClient(async () => new FakeClient({ cache: restingCache() }));
+    const { browse, entries, feed } = makeFeed({ openClient });
+
+    browse.queue(makeService());
+    feed.startDiscovery();
+    feed.warm({ devices: [{ mac: MAC }] });
+
+    await flush();
+
+    const call = openClient.calls[0];
+
+    assert.ok(call, "the device connects, recording the logger openConnection forwarded to the client factory");
+
+    const levels = [
+
+      { level: "debug", message: "A debug line." },
+      { level: "error", message: "An error line." },
+      { level: "info", message: "An info line." },
+      { level: "warn", message: "A warning line." }
+    ] as const;
+
+    for(const { level, message } of levels) {
+
+      call.logger[level](message);
+    }
+
+    for(const { level, message } of levels) {
+
+      assert.ok(entries.some((entry) => (entry.level === level) && (entry.parameters[0] === ("Test Ratgdo: " + message))),
+        "the " + level + " level arrives at the feed's log under the device's advertised name");
+    }
+  });
+
+  test("falls back to the dialed address for a device advertising no usable name", async () => {
+
+    // An absent friendly_name and an advertised-but-empty one are equally unusable as an identity, so each falls through to the address the connection dials. Both arms
+    // run the same assertion against a freshly built feed, so the check lives in one local helper rather than being written out twice.
+    const assertAddressIsTheIdentity = async (overrides: Record<string, string | undefined>): Promise<void> => {
+
+      const openClient = makeOpenClient(async () => new FakeClient({ cache: restingCache() }));
+      const { browse, entries, feed } = makeFeed({ openClient });
+
+      browse.queue(makeService(MAC, ADDR, overrides));
+      feed.startDiscovery();
+      feed.warm({ devices: [{ mac: MAC }] });
+
+      await flush();
+
+      const call = openClient.calls[0];
+
+      assert.ok(call, "the unnamed device still connects");
+
+      call.logger.info("A line.");
+
+      assert.ok(entries.some((entry) => (entry.level === "info") && (entry.parameters[0] === (ADDR + ": A line."))),
+        "the dialed address stands in as the device's identity");
+    };
+
+    await assertAddressIsTheIdentity({ friendly_name: undefined });
+    await assertAddressIsTheIdentity({ friendly_name: "" });
+  });
+
+  test("keeps the feed-level delivery error free of any device identity", async () => {
+
+    // The #emit containment sits below every per-device session and has no device in scope, so its message stays exactly the feed-level string. The equality is exact
+    // rather than a substring match, so a device prefix leaking down into feed-scope messages fails here instead of passing unnoticed.
+    const throwingPush = (): void => {
+
+      throw new Error("the settings panel channel is closed");
+    };
+    const { browse, entries, feed } = makeFeed({ openClient: makeOpenClient(async () => new FakeClient({ cache: restingCache() })), push: throwingPush });
+
+    browse.queue(makeService());
+    feed.startDiscovery();
+    feed.warm({ devices: [{ mac: MAC }] });
+
+    await flush();
+
+    assert.ok(entries.some((entry) => (entry.level === "error") && (entry.parameters[0] === "A live-status update could not be delivered to the settings panel.")),
+      "the feed-level delivery error carries no device prefix");
+  });
+
+  test("gives each of two concurrent connects its own device identity", async () => {
+
+    // The adapter is minted per connect inside the connect body, so two connects in flight together cannot share one adapter or overwrite one another's identity.
+    const openClient = makeOpenClient(async () => new FakeClient({ cache: restingCache() }));
+    const { browse, entries, feed } = makeFeed({ openClient });
+
+    browse.queue(makeService(MAC, ADDR, { friendly_name: "Garage Door North" }));
+    browse.queue(makeService(MAC_TWO, ADDR_TWO, { friendly_name: "Garage Door South" }));
+    feed.startDiscovery();
+    feed.warm({ devices: [ { mac: MAC }, { mac: MAC_TWO } ] });
+
+    await flush();
+
+    const north = callsForHost(openClient, ADDR)[0];
+    const south = callsForHost(openClient, ADDR_TWO)[0];
+
+    assert.ok(north, "the first device recorded its own factory call");
+    assert.ok(south, "the second device recorded its own factory call");
+
+    north.logger.info("A north line.");
+    south.logger.info("A south line.");
+
+    assert.ok(entries.some((entry) => (entry.level === "info") && (entry.parameters[0] === "Garage Door North: A north line.")),
+      "the first device's adapter carries only its own name");
+    assert.ok(entries.some((entry) => (entry.level === "info") && (entry.parameters[0] === "Garage Door South: A south line.")),
+      "the second device's adapter carries only its own name");
+  });
+
+  test("attributes an unexpected connect-body failure to its device", async () => {
+
+    // The connect body's totality catch runs with the device still in scope, so its line carries the same identity every other line of this connection does. A client
+    // whose listener registration throws lands in exactly that catch.
+    const { browse, entries, feed } = makeFeed({ openClient: makeOpenClient(async () => new FakeClient({ cache: restingCache(), throwOnListen: true })) });
+
+    browse.queue(makeService());
+    feed.startDiscovery();
+    feed.warm({ devices: [{ mac: MAC }] });
+
+    await flush();
+
+    assert.ok(entries.some((entry) => (entry.level === "error") && (entry.parameters[0] === "Test Ratgdo: The live-status connection failed unexpectedly.")),
+      "the connect body's catch logs under the device's identity");
   });
 });
 

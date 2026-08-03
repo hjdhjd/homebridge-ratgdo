@@ -753,21 +753,23 @@ export function asEspHomeClient(client: TestEspHomeClient): EspHomeClient {
   return client as unknown as EspHomeClient;
 }
 
-/* One recorded factory invocation, narrowed to the open-options fields a connection test asserts on: the static clientId, the host, and the resolved psk the platform
- * threads through openConnection. Recording these is what lets a test prove openConnection forwarded the right values across the injected seam (the headline of the
- * client-factory port), rather than merely that the call returned a result.
+/* One recorded factory invocation, narrowed to the open-options fields a connection test asserts on: the static clientId, the host, the resolved psk the platform
+ * threads through openConnection, and the logger it forwards. Recording these is what lets a test prove openConnection forwarded the right values across the injected
+ * seam (the headline of the client-factory port), rather than merely that the call returned a result. The logger is required rather than optional because
+ * openConnection forwards its own log argument unconditionally, so a recorded invocation always carries one and optionality would misstate the contract.
  */
 export interface RecordedOpenOptions {
 
   clientId?: Nullable<string>;
   host: string;
+  logger: HomebridgePluginLogging;
   psk?: Nullable<string>;
 }
 
 /* Build a fake `openEspHomeClient` factory for openConnection tests. Pass a TestEspHomeClient to model a successful open (the factory resolves it), or an Error to
  * model a failed open (the factory rejects with it - an EncryptionKeyInvalidError, a PermanentError subclass, etc.). The returned function matches openEspHomeClient's
  * port type through the one construction-seam cast a connection test needs, so the test body itself stays cast-free, and it carries a `calls` array recording the
- * options each invocation received so a test can assert what openConnection forwarded across the seam (host, clientId, and the resolved psk).
+ * options each invocation received so a test can assert what openConnection forwarded across the seam (every recorded field, the logger adapter included).
  */
 export function makeFakeOpenClient(result: Error | TestEspHomeClient): OpenEspHomeClient & { calls: RecordedOpenOptions[] } {
 

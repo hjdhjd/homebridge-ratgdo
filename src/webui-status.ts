@@ -39,6 +39,7 @@ import { RatgdoVariant } from "./types.ts";
 import type { Service } from "bonjour-service";
 import { openConnection } from "./connection.ts";
 import { parseRatgdoService } from "./discovery.ts";
+import { prefixedLog } from "homebridge-plugin-utils";
 import { translateTelemetry } from "./protocol/telemetry.ts";
 
 // The onRequest route the warm extension registers - ratgdo's addition to the shared status protocol. It carries the whole warm set (every known device plus its
@@ -584,6 +585,14 @@ export class StatusFeed {
       return;
     }
 
+    // The feed logs this connection's lifecycle under the device's own identity - the mDNS-advertised name, or the dialed address for a device advertising no usable
+    // name - so a connection failure in a multi-device install is attributable from the log line alone. HomeKit-side logging resolves the user's Device.LogName option
+    // at the platform instead (platform.ts, resolveLogName); the feed speaks mDNS identity because that is the truth it discovers and dials. The empty-string guard is
+    // deliberate, and it is why the fallback defaults with a logical or rather than a nullish coalesce: a device advertising an empty name is as unusable an identity as
+    // one advertising none, and nullish coalescing would let that empty string through as the prefix.
+    // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing
+    const log = prefixedLog(this.#log, () => device.friendlyName || device.address);
+
     // The key backs both the session record and the openConnection argument from this one read, so a later warm-set replacement cannot make the two disagree for this
     // connect.
     const psk = this.#warmKeys.get(mac);
@@ -599,7 +608,7 @@ export class StatusFeed {
       this.#sessions.set(mac, session);
       this.#pushForSession(session, { kind: "connecting", serialNumber: mac, session: session.token });
 
-      const outcome = await openConnection({ expected: ratgdoInitialStateEntityIds(device.variant), host: device.address, log: this.#log, openClient: this.#openClient,
+      const outcome = await openConnection({ expected: ratgdoInitialStateEntityIds(device.variant), host: device.address, log, openClient: this.#openClient,
         psk, shutdownSignal: session.controller.signal });
 
       if(!outcome.ok) {
@@ -733,7 +742,7 @@ export class StatusFeed {
       this.#pushSnapshot(session, initialState);
     } catch(error) {
 
-      this.#log.error("The live-status connection failed unexpectedly.", error);
+      log.error("The live-status connection failed unexpectedly.", error);
       this.#recordFailure(session, "unreachable");
     }
   }
