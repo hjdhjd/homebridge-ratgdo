@@ -98,8 +98,9 @@ const refreshAddresses = async () => {
   }
 };
 
-/* Recompute the warm set from the live device list and feature-option edits, and re-send it to the server when it would change. This is the single send path, reached
- * three ways - the initial warm, the onOptionsEdited hook, and the configChanged belt - so the diff-and-send logic lives in exactly one place. The whole body is guarded:
+/* Recompute the warm set from the live device list and feature-option edits, and re-send it to the server when it would change. Every warm send funnels through this one
+ * function, which gates on config-view establishment and epoch liveness before it sends, so the diff-and-send logic and the integrity conditions that guard it live in
+ * exactly one place rather than being restated per trigger; the address-refresh request is a read and is deliberately outside this funnel. The whole body is guarded:
  * a failed lookup logs to the console and keeps the last-sent set rather than throwing out of a callback. The device list comes from the public HBPU device-list source
  * (never a hand-parse of the cached accessories), and each device's effective key comes from one FeatureOptions engine rebuilt from the live editedConfig against the
  * once-fetched catalog, so encryption-key inheritance resolves entirely through the engine. The remembered set records every mac explicitly with undefined meaning "no
@@ -114,8 +115,29 @@ const recomputeWarmSet = async () => {
 
     const result = await ui.featureOptions.getHomebridgeDevices();
     const devices = result?.devices ?? [];
-    const block = ui.featureOptions.editedConfig.find((entry) => entry.platform === "Ratgdo");
-    const featureOptions = new FeatureOptions(optionsCatalog.categories, optionsCatalog.options, block?.options ?? []);
+
+    /* The primary config block, read by position, whose absence is the establishment gate. The plugin-config session pins config[0] as the primary platform entry and the
+     * editedConfig getter hands that entry back first on every read, and the array it reads is Ratgdo-only by the host's own construction - the server filters plugin
+     * config by platform tag before it ever reaches the browser - so position is the durable identity for this plugin's block. Matching by the platform tag instead is
+     * fragile against the host UI: its schema-driven Settings form emits only schema-declared keys and strips every undeclared key, the platform tag included, from the
+     * in-memory config block, so a tag match can miss against a fully keyed configuration after a Settings-tab visit and compute every encrypted device keyless.
+     *
+     * The getter answers with an empty array exactly until show() has supplied the session - a failed launch included, because the shell's show() reports a launch
+     * failure to the user and resolves rather than rejecting - so an absent block gates establishment for every caller of this function alike: the initial warm, the
+     * debounced triggers, and the forced re-sends. The gate keys on the block being absent and never on its options being empty, so an established session that has
+     * configured no options passes it and computes an honest keyless set for devices that need no key. A failed launch heals when the menu's re-launch recovery supplies
+     * the session, and the bound that healing carries is taken deliberately: the recovery transition itself fires no warm, so the first warm after a failed launch rides
+     * the next trigger - a config change, an option edit, a helper hello, a visibility return, or a resume - rather than firing at the moment of establishment, which is
+     * the trade against re-introducing a boot-shaped send that could race establishment. The panel's own feed machinery keeps the user's view honest in that window.
+     */
+    const block = ui.featureOptions.editedConfig[0];
+
+    if(!block) {
+
+      return;
+    }
+
+    const featureOptions = new FeatureOptions(optionsCatalog.categories, optionsCatalog.options, block.options ?? []);
     const warm = [];
     const nextKeys = new Map();
 
@@ -142,9 +164,8 @@ const recomputeWarmSet = async () => {
     }
 
     // Send-suppression: re-send only when the warm set would change. A size difference covers a device added to or removed from the list; the per-mac scan covers a new
-    // mac or a changed key at constant size. This premise - that an unchanged set needs no re-send - holds only against a living server that still holds the set; the
-    // forced-resend paths (the restart-recovery hello and the foreground-visibility belt) clear the remembered keys first, so a helper restart or a lost send is healed
-    // by the next forced trigger rather than staying suppressed.
+    // mac or a changed key at constant size. This premise - that an unchanged set needs no re-send - holds only against a living server that still holds the set; every
+    // forced-resend path clears the remembered keys first, so a helper restart or a lost send is healed by the next forced trigger rather than staying suppressed.
     let changed = (nextKeys.size !== rememberedKeys.size);
 
     if(!changed) {
@@ -161,6 +182,17 @@ const recomputeWarmSet = async () => {
     }
 
     if(!changed) {
+
+      return;
+    }
+
+    /* The epoch check, the last integrity condition on the send path. The debounce timer and this function's own awaits can outlive the module copy that armed them: a
+     * panel reopen mints a successor and aborts this copy's epoch mid-flight, and nothing cancels an armed setTimeout or an in-flight recompute. Testing the epoch here,
+     * as the last act before the request, retires the whole zombie class at the one place it becomes observable instead of enumerating a cleanup per resource. Everything
+     * above this line is read-only, so a late-firing recompute that bails here costs nothing beyond its own computation, and the check sits ahead of the remembered-key
+     * assignment so a refused send leaves the retired copy's module state untouched entirely.
+     */
+    if(ui.epochSignal.aborted) {
 
       return;
     }
@@ -197,9 +229,9 @@ const scheduleRecompute = () => {
   }, WARM_DEBOUNCE_MS);
 };
 
-/* Force a warm re-send: the recovery chokepoint both restart-recovery paths ride. It clears the send-suppression cache before scheduling the debounced recompute, because
- * that cache's premise - a re-send with an unchanged set is a no-op at the server - is false across a helper restart: a fresh server process starts with an empty warm
- * set, so a suppressed re-send would leave it starved. Clearing the remembered keys forces the next recompute to send. Routing through the debounced recompute
+/* Force a warm re-send: the recovery chokepoint every restart-recovery path rides. It clears the send-suppression cache before scheduling the debounced recompute,
+ * because that cache's premise - a re-send with an unchanged set is a no-op at the server - is false across a helper restart: a fresh server process starts with an empty
+ * warm set, so a suppressed re-send would leave it starved. Clearing the remembered keys forces the next recompute to send. Routing through the debounced recompute
  * rather than an immediate one makes the debounce the serializer: a hello landing mid-keystroke coalesces with the typing burst instead of racing it with a
  * half-typed key, concurrent triggers (a hello and a foreground return together) collapse into one send, and the 300ms trailing delay is imperceptible beside the
  * roughly one-second connect floor. One honest bound: the boot-time initial warm bypasses this debounce, so a boot hello's debounced recompute can overlap the
@@ -211,40 +243,6 @@ const forceWarmResend = () => {
   rememberedKeys = new Map();
   scheduleRecompute();
 };
-
-// The schema-form belt: a config edit made through Homebridge's own settings form (rather than the feature-options UI) surfaces only as configChanged, so it feeds the
-// same debounced recompute the option-edit hook does, keeping the warm set current regardless of which surface changed a key.
-homebridge.addEventListener("configChanged", scheduleRecompute);
-
-/* The address-refresh trigger. ui.mjs registers its own page-lifetime STATUS_EVENT listener beside the configChanged belt - the same broadcast the shared panel consumes,
- * and multiple listeners are the host relay's natural fan-out, so this sibling consumer neither stops the event's propagation nor touches the panel's own handling; it
- * reads event.data and refreshes only. On every "connecting" push it refreshes the address cache. The timing argument that makes this sufficient: every device connects
- * fresh after page load, because the helper's connection pool dies with the page's socket, so a "connecting" push proves the server has just discovered that device's
- * address, and the helper-local round trip resolves well inside the device's own connect time - so the cache holds the address before the snapshot rebuild re-invokes the
- * identity fields. Refreshing on every "connecting" event, not only uncached macs, keeps a reconnect cycle's address current across a DHCP change at negligible cost.
- */
-homebridge.addEventListener(STATUS_EVENT, (event) => {
-
-  if(event.data?.kind === "connecting") {
-
-    void refreshAddresses();
-  }
-});
-
-/* The visibility belt: an iPad app switch kills and respawns the helper process, and the fresh process's hello may race the page's socket reattach, so a return to the
- * foreground forces a warm re-send directly. This is the deterministic cover for the suspend/resume path the hello relay alone cannot guarantee. Honest bounds: a forced
- * resend fired during the old helper's death window may be lost with its process - the next trigger heals it, since the triggers repeat and the posture is
- * fire-and-forget - and the cross-generation stale-token handoff bound the shared status union documents is inherited here: a belt resend racing a two-process handoff
- * can interleave old-generation pushes after a fresh adoption, a window that needs both processes alive across the resume, with the per-event generation field the
- * protocol's additive escape and field reports the tripwire.
- */
-document.addEventListener("visibilitychange", () => {
-
-  if(document.visibilityState === "visible") {
-
-    forceWarmResend();
-  }
-});
 
 /* The feature-options parameters. The statusPanel configuration supplies exactly the parts ratgdo owns and inherits the shared homebridge-plugin-utils panel around them:
  * the error-copy overrides for the reasons whose ratgdo wording differs from the component's credential-neutral defaults, the identity cells (Model, plus the monospace
@@ -283,8 +281,60 @@ const featureOptionsParams = {
 
 const ui = new webUi({ featureOptions: featureOptionsParams, name: "Ratgdo" });
 
-// Await show() before the first warm: editedConfig returns [] until show() has supplied the session, so warming before it would send every encrypted device a keyless
-// entry and fail them all spuriously. Once show() has resolved, the initial warm sends immediately, bypassing the debounce that only the burst-prone hook and belt need.
+/* The trigger registrations, every one of them scoped to this module copy's claim on the window. Each subscription belongs to the module rather than to a panel, so it
+ * must outlive any single panel mount and end only when a successor webUi construction claims the window; handing each registration the epoch signal is what ties it to
+ * that lifetime, so a retired copy stops receiving events at all rather than driving the live copy's state from a stale closure. They register after construction because
+ * the signal is read at registration time, and before show() because a trigger arriving during the launch is answered honestly by the recompute's own establishment gate.
+ * One bounded caveat: the { signal } option rides the native EventTarget, which every browser the Homebridge UI supports provides, while the bridge library carries a
+ * legacy constructor polyfill whose listener registration drops its options argument - on that path a retired copy's listeners survive, and the recompute's pre-send
+ * epoch check is the correctness backstop, degrading the hazard from a wrong send to a wasted recompute.
+ */
+
+// The schema-form belt: a config edit made through Homebridge's own settings form (rather than the feature-options UI) surfaces only as configChanged, so it feeds the
+// same debounced recompute the option-edit hook does, keeping the warm set current regardless of which surface changed a key.
+homebridge.addEventListener("configChanged", scheduleRecompute, { signal: ui.epochSignal });
+
+/* The address-refresh trigger. ui.mjs registers its own STATUS_EVENT listener beside the configChanged belt - the same broadcast the shared panel consumes, and multiple
+ * listeners are the host relay's natural fan-out, so this sibling consumer neither stops the event's propagation nor touches the panel's own handling; it reads
+ * event.data and refreshes only. The listener lives for this module copy's claim on the window, and a successor's construction retires it. On every "connecting" push it
+ * refreshes the address cache. The timing argument that makes this sufficient: every device connects fresh after page load, because the helper's connection pool dies
+ * with the page's socket, so a "connecting" push proves the server has just discovered that device's address, and the helper-local round trip resolves well inside the
+ * device's own connect time - so the cache holds the address before the snapshot rebuild re-invokes the identity fields. Refreshing on every "connecting" event, not only
+ * uncached macs, keeps a reconnect cycle's address current across a DHCP change at negligible cost.
+ */
+homebridge.addEventListener(STATUS_EVENT, (event) => {
+
+  if(event.data?.kind === "connecting") {
+
+    void refreshAddresses();
+  }
+}, { signal: ui.epochSignal });
+
+/* The visibility belt: a helper process can die while the page sits in the background, leaving the panel holding a warm set no living server has, so a return to the
+ * foreground forces a warm re-send directly. Its reach is exactly what the environment delivers to this embedded frame: desktop tab switches and window minimize deliver
+ * visibilitychange here, while an iPad app switch does not, and there the server hello relay and the resume trigger carry recovery instead. Honest bounds: a forced
+ * resend fired during the old helper's death window may be lost with its process - the next trigger heals it, since the triggers repeat and the posture is
+ * fire-and-forget - and the cross-generation stale-token handoff bound the shared status union documents is inherited here: a belt resend racing a two-process handoff
+ * can interleave old-generation pushes after a fresh adoption, a window that needs both processes alive across the resume, with the per-event generation field the
+ * protocol's additive escape and field reports the tripwire.
+ */
+document.addEventListener("visibilitychange", () => {
+
+  if(document.visibilityState === "visible") {
+
+    forceWarmResend();
+  }
+}, { signal: ui.epochSignal });
+
+/* The resume trigger: the framework's clock-gap detector fires on a page that froze and woke - the iPad app-switch case the belt cannot see - and a wake is exactly when
+ * the helper process may have been replaced, so the whole-pool re-send rides it. The framework bounds this subscription by the epoch itself, and the send chokepoint's
+ * establishment and epoch gates bound what it produces exactly as they bound every other trigger.
+ */
+ui.liveness.onResume(forceWarmResend);
+
+// Await show() before the first warm: it is the sanctioned first send, and it sends immediately rather than through the debounce that only the burst-prone trigger paths
+// need. The establishment gate inside the recompute is what makes every invocation that lands earlier, or after a failed launch, a silent no-op, so this await orders the
+// boot send behind the session rather than carrying correctness on its own.
 await ui.show();
 
 void recomputeWarmSet();
