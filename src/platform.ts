@@ -4,8 +4,7 @@
  */
 import type { API, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
 import type { EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
-import { FeatureOptions, MqttClient, sanitizeName } from "homebridge-plugin-utils";
-import type { HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
+import { FeatureOptions, MqttClient, prefixedLog, sanitizeName } from "homebridge-plugin-utils";
 import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_AUTODISCOVERY_INTERVAL, RATGDO_AUTODISCOVERY_TYPES, RATGDO_AUTODISCOVERY_WARMUP_OFFSETS,
   RATGDO_MQTT_TOPIC } from "./settings.ts";
 import { featureOptionCategories, featureOptions, normalizeConfig } from "./options.ts";
@@ -13,6 +12,7 @@ import { isEncryptionError, openConnection } from "./connection.ts";
 import { setInterval as setIntervalAsync, setTimeout as setTimeoutAsync } from "node:timers/promises";
 import { Bonjour } from "bonjour-service";
 import { LogLevel } from "esphome-client";
+import type { Nullable } from "homebridge-plugin-utils";
 import { RatgdoAccessory } from "./device.ts";
 import type { RatgdoDevice } from "./types.ts";
 import type { RatgdoOptions } from "./options.ts";
@@ -322,7 +322,11 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
      * there is currently no type-level check that would catch a future divergence, so any change to what buildInitialStatus reads must be mirrored in
      * ratgdoInitialStateEntityIds.
      */
-    const connectLog = this.buildConnectLog(device.name);
+    // The client's own log adapter. The plain platform log is the right base: the constructor redirects `this.log.debug` through the plugin's gated debug(), so
+    // client-internal debug lines honor the config.debug opt-in without a second wrapper. The name read is live in form but static in practice - RatgdoDevice.name is
+    // readonly, fixed at discovery - which keeps client-internal messages (handshake, retries, heartbeat) titled by the mDNS-discovered name even after a HomeKit
+    // rename; per-accessory logging routes through RatgdoAccessory's dynamic-name channel instead.
+    const connectLog = prefixedLog(this.log, () => device.name);
     const expected = ratgdoInitialStateEntityIds(device.variant);
     const connection = await openConnection({
 
@@ -392,20 +396,6 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.connections.set(strippedMac, { client, subscriptions });
     this.configuredDevices.set(uuid, ratgdo);
     this.api.updatePlatformAccessories([accessory]);
-  }
-
-  // Build a static-prefix log adapter bound to a device name. Used as the ESPHome client's `logger` parameter so client-internal messages (handshake, retries, heartbeat)
-  // carry the device's mDNS-discovered name; the adapter persists for the client's lifetime. Per-accessory logging (info, warn, error, debug) for everything outside
-  // the client's internals routes through the dynamic-name channel on RatgdoAccessory instead.
-  private buildConnectLog(name: string): HomebridgePluginLogging {
-
-    return {
-
-      debug: (message: string, ...parameters: unknown[]): void => this.debug(name + ": " + message, ...parameters),
-      error: (message: string, ...parameters: unknown[]): void => this.log.error(name + ": " + message, ...parameters),
-      info: (message: string, ...parameters: unknown[]): void => this.log.info(name + ": " + message, ...parameters),
-      warn: (message: string, ...parameters: unknown[]): void => this.log.warn(name + ": " + message, ...parameters)
-    };
   }
 
   /* Lifecycle subscription. The lifecycle event is a discriminated union over connect/disconnect transitions. Switching on `kind` with a never-typed default gives
