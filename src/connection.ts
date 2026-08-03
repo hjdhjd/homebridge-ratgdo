@@ -71,7 +71,7 @@ export interface CaptureInitialStateOptions {
  * @property log            - The static-prefix logging adapter the client uses for connect-internal messages.
  * @property openClient     - The injectable client-factory port. Defaults to the real `openEspHomeClient`.
  * @property psk            - The resolved base64 pre-shared key for Noise encryption, or null/undefined for an unencrypted device.
- * @property shutdownSignal - The platform-wide shutdown signal, forwarded to `captureInitialState`.
+ * @property shutdownSignal - The platform-wide shutdown signal. Cancels the client-factory call and is forwarded to `captureInitialState`.
  * @property timeoutSeconds - Per-call state-capture budget, in seconds. Defaults to `RATGDO_INITIAL_STATE_TIMEOUT`.
  */
 export interface OpenConnectionOptions {
@@ -111,12 +111,18 @@ OpenConnectionOptions): Promise<ConnectionOutcome> {
 
   try {
 
+    /* The caller's shutdown signal cancels the factory call itself, not just the state capture that follows it. The factory applies the signal to its initial
+     * attempt and to every construction retry, rejecting with the signal's reason, so an abandoned connect settles within its current attempt or backoff cycle
+     * instead of running out the whole retry budget. The composed capture-timeout signal stays out of this call by design: that budget covers state capture, not
+     * the handshake, and the factory owns its own construction-retry budget.
+     */
     client = await openClient({
 
       clientId: "homebridge-ratgdo",
       host: host,
       logger: log,
-      psk: psk
+      psk: psk,
+      signal: shutdownSignal
     });
 
     const initialState = await captureInitialState({ client, expected, shutdownSignal, timeoutSeconds });

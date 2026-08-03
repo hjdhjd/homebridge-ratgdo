@@ -10,6 +10,8 @@ import { TestEspHomeClient, asEspHomeClient, loggedAt, makeCapturingLog, makeCov
 import { captureInitialState, isEncryptionError, openConnection } from "./connection.ts";
 import { describe, test } from "node:test";
 import type { EntityId } from "esphome-client";
+import type { OpenEspHomeClient } from "./connection.ts";
+import type { RecordedOpenOptions } from "./testing.helpers.ts";
 import assert from "node:assert/strict";
 
 describe("captureInitialState", () => {
@@ -124,7 +126,8 @@ describe("openConnection", () => {
 
     const client = connectedClient();
     const openClient = makeFakeOpenClient(client);
-    const { entries, result } = await run(openClient, { psk: "test-psk" });
+    const shutdownSignal = new AbortController().signal;
+    const { entries, result } = await run(openClient, { psk: "test-psk", shutdownSignal });
 
     assert.ok(result.ok, "a connected client with a complete snapshot yields a success outcome");
     assert.equal(result.client, client, "the resolved client is returned");
@@ -133,12 +136,14 @@ describe("openConnection", () => {
     assert.equal(entries.filter((entry) => entry.level === "error").length, 0, "the success path logs nothing at error level");
 
     // The headline of the client-factory port: the platform resolves the encryption key and threads a concrete psk through openConnection into the factory. Pin that the
-    // factory received exactly what openConnection forwards - the static clientId, the host, and the resolved psk unchanged - since 100% line coverage alone would not
-    // catch openConnection passing the wrong host or dropping the psk.
+    // factory received exactly what openConnection forwards - the static clientId, the host, the resolved psk unchanged, and the caller's own shutdown signal by
+    // reference - since 100% line coverage alone would not catch openConnection passing the wrong host, dropping the psk, or handing the factory a different signal
+    // than the one that cancels the call.
     assert.equal(openClient.calls.length, 1, "openConnection invokes the factory exactly once");
     assert.equal(openClient.calls[0]?.clientId, "homebridge-ratgdo", "the static clientId is forwarded to the factory");
     assert.equal(openClient.calls[0]?.host, "192.0.2.10", "the host is forwarded to the factory");
     assert.equal(openClient.calls[0]?.psk, "test-psk", "the resolved psk threads through openConnection to the factory unchanged");
+    assert.equal(openClient.calls[0]?.signal, shutdownSignal, "the caller's shutdown signal reaches the factory by reference, so an abort cancels the call itself");
   });
 
   test("encryption error (mismatched key): returns the encryption-invalid outcome and logs the encryption-configuration diagnostic", async () => {
@@ -207,6 +212,35 @@ describe("openConnection", () => {
     assert.equal(result.reason, "shutdown", "the failure outcome carries the shutdown reason token");
     assert.equal(entries.filter((entry) => entry.level === "error").length, 0, "shutdown is not a failure, so nothing is logged at error level");
     assert.equal(client.disposed, true, "the client opened before the shutdown abort is torn down");
+  });
+
+  test("shutdown mid-connect: a factory call cancelled by the shutdown signal stands down silently", async () => {
+
+    const controller = new AbortController();
+
+    /* Model the factory's documented cancellation contract without its retry loop: the call stays pending until the caller's signal aborts, then rejects with that
+     * signal's reason. That is the shape esphome-client presents to openConnection when a shutdown lands mid-handshake, so this pins the classification of an
+     * abort-driven factory rejection end to end. It deliberately measures no latency - the real factory's attempt-and-backoff loop is bypassed here.
+     */
+    const openClient = ((options: RecordedOpenOptions): Promise<never> => {
+
+      const { promise, reject } = Promise.withResolvers<never>();
+
+      options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+
+      return promise;
+    }) as unknown as OpenEspHomeClient;
+
+    const { entries, log } = makeCapturingLog();
+    const pending = openConnection({ expected: [coverId], host: "192.0.2.10", log, openClient, shutdownSignal: controller.signal });
+
+    controller.abort("shutdown");
+
+    const result = await pending;
+
+    assert.ok(!result.ok, "a connect cancelled mid-flight by shutdown is abandoned");
+    assert.equal(result.reason, "shutdown", "a factory rejection that lands while the shutdown signal is aborted carries the shutdown reason token");
+    assert.equal(entries.filter((entry) => entry.level === "error").length, 0, "the silent stand-down branch logs nothing at error level");
   });
 });
 

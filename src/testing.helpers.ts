@@ -754,9 +754,10 @@ export function asEspHomeClient(client: TestEspHomeClient): EspHomeClient {
 }
 
 /* One recorded factory invocation, narrowed to the open-options fields a connection test asserts on: the static clientId, the host, the resolved psk the platform
- * threads through openConnection, and the logger it forwards. Recording these is what lets a test prove openConnection forwarded the right values across the injected
- * seam (the headline of the client-factory port), rather than merely that the call returned a result. The logger is required rather than optional because
- * openConnection forwards its own log argument unconditionally, so a recorded invocation always carries one and optionality would misstate the contract.
+ * threads through openConnection, and the logger and cancellation signal it forwards. Recording these is what lets a test prove openConnection forwarded the right
+ * values across the injected seam (the headline of the client-factory port), rather than merely that the call returned a result. The logger and the signal are
+ * required rather than optional because openConnection forwards its own log argument and the caller's shutdown signal unconditionally, so a recorded invocation
+ * always carries both and optionality would misstate the contract.
  */
 export interface RecordedOpenOptions {
 
@@ -764,6 +765,7 @@ export interface RecordedOpenOptions {
   host: string;
   logger: HomebridgePluginLogging;
   psk?: Nullable<string>;
+  signal: AbortSignal;
 }
 
 /* Build a fake `openEspHomeClient` factory for openConnection tests. Pass a TestEspHomeClient to model a successful open (the factory resolves it), or an Error to
