@@ -27,15 +27,19 @@
 
 This documentation assumes you know what MQTT is, what an MQTT broker does, and how to configure it. Setting up an MQTT broker will not be covered here. There are plenty of guides available on how to do so just a search away.
 
-You can configure MQTT settings in the plugin webUI. The settings are:
+You configure MQTT through the plugin's feature options. The settings are:
 
-| Configuration Setting | Description
-|-----------------------|----------------------------------
-| **mqttUrl**           | The URL of your MQTT broker. **This must be in URL form**, e.g.: `mqtt://user:password@1.2.3.4`.
-| **mqttTopic**         | The base topic to publish to. The default is: `ratgdo`.
+| Feature Option  | Description
+|-----------------|----------------------------------
+| **Mqtt.Url**    | The URL of your MQTT broker. **This must be in URL form**, e.g.: `mqtt://user:password@1.2.3.4`. Configuring it is what turns MQTT on.
+| **Mqtt.Topic**  | The base topic to publish to. The default is: `ratgdo`.
+
+Set both in the plugin's Settings tab, where they apply globally. If you prefer to edit your configuration directly, they are entries in the plugin's `options` array, written as `Enable.Mqtt.Url=mqtt://1.2.3.4` and `Enable.Mqtt.Topic=garage`.
 
 > [!IMPORTANT]
-> **mqttUrl** must be a valid URL. Just entering a hostname will result in an error. The URL can use any of these protocols: `mqtt`, `mqtts`, `tcp`, `tls`, `ws`, `wss`.
+> **Mqtt.Url** must be a valid URL. Just entering a hostname will result in an error. The URL can use any of these protocols: `mqtt`, `mqtts`, `tcp`, `tls`, `ws`, `wss`.
+
+If your configuration carries the `mqttUrl` and `mqttTopic` settings from an earlier release, it keeps working exactly as it is. Those settings are migrated to the feature options above automatically the next time the plugin's settings are opened in the Homebridge webUI, with nothing for you to do.
 
 When events are published, by default, the topics look like:
 

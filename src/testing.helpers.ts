@@ -26,6 +26,7 @@ import type { Service as MdnsService } from "bonjour-service";
 import type { OpenEspHomeClient } from "./connection.ts";
 import { RatgdoAccessory } from "./device.ts";
 import type { RatgdoDevice } from "./types.ts";
+import type { RatgdoResolvedConfig } from "./options.ts";
 import { RatgdoVariant } from "./types.ts";
 
 // One captured log line. The device's log wrapper formats every call through util.format into a single string parameter prefixed with the device name (for example
@@ -919,7 +920,9 @@ export function makeMdnsService(txt: unknown, addresses: string[] = ["192.0.2.10
 export interface TestPlatform {
 
   api: { hap: TestHap };
-  config: { debug?: boolean; mqttTopic?: string; mqttUrl?: string; options?: string[] };
+  // The double's config is the platform's RESOLVED shape, not the raw configuration properties, so a test can never seed a legacy property the accessory would never
+  // have seen: the platform resolves those into this shape before any accessory is built.
+  config: RatgdoResolvedConfig;
   debug: (message: string, ...parameters: unknown[]) => void;
   featureOptions: FeatureOptions;
   getEspHomeClient: (mac: string) => TestEspHomeClient | undefined;
@@ -971,7 +974,7 @@ export function makeTestPlatform(options: MakeTestPlatformOptions = {}): MakeTes
   const platform: TestPlatform = {
 
     api: { hap },
-    config: options.config ?? { debug: false },
+    config: options.config ?? { debug: false, mqttTopic: undefined, mqttUrl: undefined, options: undefined },
     debug: (message: string, ...parameters: unknown[]): void => {
 
       entries.push({ level: "debug", parameters: [ message, ...parameters ] });

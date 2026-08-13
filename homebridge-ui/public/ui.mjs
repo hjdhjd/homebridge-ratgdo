@@ -3,8 +3,11 @@
  * ui.mjs: Homebridge Ratgdo webUI.
  */
 import { FeatureOptions } from "homebridge-plugin-utils/featureOptions.js";
+import { PluginConfigSession } from "homebridge-plugin-utils/pluginConfigSession.mjs";
 import { STATUS_EVENT } from "homebridge-plugin-utils/webui-status.js";
+import { makeRatgdoConfig } from "./ratgdo-config.mjs";
 import { webUi } from "homebridge-plugin-utils/webUi.mjs";
+import { withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
 
 // The warm-route literal, ratgdo's extension to the shared status protocol. It must stay in step with STATUS_WARM_ROUTE in src/webui-status.ts, the owner of the warm
 // extension, because browser code cannot import from dist/. The warm route carries the whole sidebar's device list plus each device's effective key; the shared push
@@ -27,15 +30,47 @@ const MOTION_LATCH_FALLBACK_SECONDS = 5;
 // device against a half-typed key. The debounce coalesces the burst into one warm carrying the settled value. The initial warm bypasses this and sends immediately.
 const WARM_DEBOUNCE_MS = 300;
 
-/* The warm-set recompute state. optionsCatalog caches the /getOptions catalog for the session - the FeatureOptions engine is rebuilt from live editedConfig on every
- * recompute, but the catalog's categories and option definitions are static, so it is fetched once. rememberedKeys is the warm set the server last received, keyed by mac
- * with the value being that mac's effective key (undefined recorded explicitly, so a tracked-keyless device is distinct from an untracked one); a recompute re-sends only
- * when this set would change, a send-suppression optimization over the server's authoritative diff. warmDebounceTimer is the trailing-debounce handle for the hook and
- * belt recompute paths.
+/* The bound in seconds on the shared option-catalog fetch below. The bound exists so a bridge call that never settles rejects rather than wedging the cached promise for
+ * the life of the page, and it binds every consumer of that one fetch alike - the load-time wiring and the post-boot warm-path triggers. The trade it carries: a fetch
+ * that is legitimately slow but would eventually have settled costs a retry cycle rather than resolving, which is cheap beside the permanent wedge the bound prevents,
+ * because the cache clears on rejection and the warm-path triggers repeat, so the next trigger refetches fresh.
  */
-let optionsCatalog = null;
+const CATALOG_DEADLINE = 5;
+
+/* The warm-set recompute state. rememberedKeys is the warm set the server last received, keyed by mac with the value being that mac's effective key (undefined recorded
+ * explicitly, so a tracked-keyless device is distinct from an untracked one); a recompute re-sends only when this set would change, a send-suppression optimization over
+ * the server's authoritative diff. warmDebounceTimer is the trailing-debounce handle for the hook and belt recompute paths.
+ */
 let rememberedKeys = new Map();
 let warmDebounceTimer = null;
+
+/* The option catalog, fetched once per page from the plugin's own UI server (a local IPC to /getOptions, never a cloud call) and shared by the load-time configuration
+ * wiring and the warm-set recompute. The FeatureOptions engine is rebuilt from live editedConfig on every recompute, but the catalog's categories and option definitions
+ * are static, so one fetch serves both consumers. The cached promise is cleared on failure so a later read retries rather than pinning a transient fault for the page.
+ */
+let catalogPromise = null;
+
+const getCatalog = () => {
+
+  catalogPromise ??= withDeadline({ promise: homebridge.request("/getOptions"), seconds: CATALOG_DEADLINE }).then((response) => {
+
+    // A response without the catalog shape the server publishes is a failure, not a default. Shaping it into an empty catalog would make the engine resolve every
+    // device's encryption key as absent and connect the whole sidebar keyless, so a malformed response throws and the guarded callers surface it instead.
+    if(!Array.isArray(response?.categories) || !response.categories.length || (typeof response?.options !== "object") || !response.options) {
+
+      throw new Error("Received a malformed response from the plugin option catalog.");
+    }
+
+    return { categories: response.categories, options: response.options };
+  }).catch((error) => {
+
+    catalogPromise = null;
+
+    throw error;
+  });
+
+  return catalogPromise;
+};
 
 /* The identity-strip address cache. deviceAddresses maps each device's mac - device.serialNumber, the same key the status pushes carry - to that device's live discovery
  * address, so the strip's address row reads the very address the status connection dials. It starts empty and is replaced wholesale by refreshAddresses on every resolved
@@ -111,8 +146,7 @@ const recomputeWarmSet = async () => {
 
   try {
 
-    optionsCatalog ??= await homebridge.request("/getOptions");
-
+    const catalog = await getCatalog();
     const result = await ui.featureOptions.getHomebridgeDevices();
     const devices = result?.devices ?? [];
 
@@ -137,7 +171,7 @@ const recomputeWarmSet = async () => {
       return;
     }
 
-    const featureOptions = new FeatureOptions(optionsCatalog.categories, optionsCatalog.options, block.options ?? []);
+    const featureOptions = new FeatureOptions(catalog.categories, catalog.options, block.options ?? []);
     const warm = [];
     const nextKeys = new Map();
 
@@ -281,18 +315,26 @@ const featureOptionsParams = {
 
 const ui = new webUi({ featureOptions: featureOptionsParams, name: "Ratgdo" });
 
+/* Adopt the framework's theming for this page - the design tokens, the themed canvas, the dark-mode corrections, and the host's own accent - with one call that holds for
+ * as long as this module copy owns the window. The registration is memoized by the framework, and the feature-options view routes through this same call when it shows,
+ * so what registering here settles is when the theme arrives: at module load rather than at the settings view's first show, which is what keeps the support view and a
+ * launch-failure recovery shell wearing it too. The promise is voided rather than awaited because the framework owns its rejection posture - a failed initial
+ * lighting-mode read still leaves the sheets adopted and the host's theme signals followed, so the next announcement the host makes brings the page into step.
+ */
+void ui.registerTheming();
+
 /* The trigger registrations, every one of them scoped to this module copy's claim on the window. Each subscription belongs to the module rather than to a panel, so it
- * must outlive any single panel mount and end only when a successor webUi construction claims the window; handing each registration the epoch signal is what ties it to
- * that lifetime, so a retired copy stops receiving events at all rather than driving the live copy's state from a stale closure. They register after construction because
- * the signal is read at registration time, and before show() because a trigger arriving during the launch is answered honestly by the recompute's own establishment gate.
- * One bounded caveat: the { signal } option rides the native EventTarget, which every browser the Homebridge UI supports provides, while the bridge library carries a
- * legacy constructor polyfill whose listener registration drops its options argument - on that path a retired copy's listeners survive, and the recompute's pre-send
- * epoch check is the correctness backstop, degrading the hazard from a wrong send to a wasted recompute.
+ * must outlive any single panel mount and end only when a successor webUi construction claims the window; they ride the framework's ui.on, which composes the page epoch
+ * into every registration it makes, so a retired copy stops receiving events at all rather than driving the live copy's state from a stale closure. They register after
+ * construction because the facade that makes the registration must exist first, and before show() because a trigger arriving during the launch is answered honestly by
+ * the recompute's own establishment gate. One bounded caveat: the composed { signal } option rides the native EventTarget, which every browser the Homebridge UI supports
+ * provides, while the bridge library carries a legacy constructor polyfill whose listener registration drops its options argument - on that path a retired copy's
+ * listeners survive, and the recompute's pre-send epoch check is the correctness backstop, degrading the hazard from a wrong send to a wasted recompute.
  */
 
 // The schema-form belt: a config edit made through Homebridge's own settings form (rather than the feature-options UI) surfaces only as configChanged, so it feeds the
 // same debounced recompute the option-edit hook does, keeping the warm set current regardless of which surface changed a key.
-homebridge.addEventListener("configChanged", scheduleRecompute, { signal: ui.epochSignal });
+ui.on(homebridge, "configChanged", scheduleRecompute);
 
 /* The address-refresh trigger. ui.mjs registers its own STATUS_EVENT listener beside the configChanged belt - the same broadcast the shared panel consumes, and multiple
  * listeners are the host relay's natural fan-out, so this sibling consumer neither stops the event's propagation nor touches the panel's own handling; it reads
@@ -302,13 +344,13 @@ homebridge.addEventListener("configChanged", scheduleRecompute, { signal: ui.epo
  * device's own connect time - so the cache holds the address before the snapshot rebuild re-invokes the identity fields. Refreshing on every "connecting" event, not only
  * uncached macs, keeps a reconnect cycle's address current across a DHCP change at negligible cost.
  */
-homebridge.addEventListener(STATUS_EVENT, (event) => {
+ui.on(homebridge, STATUS_EVENT, (event) => {
 
   if(event.data?.kind === "connecting") {
 
     void refreshAddresses();
   }
-}, { signal: ui.epochSignal });
+});
 
 /* The visibility belt: a helper process can die while the page sits in the background, leaving the panel holding a warm set no living server has, so a return to the
  * foreground forces a warm re-send directly. Its reach is exactly what the environment delivers to this embedded frame: desktop tab switches and window minimize deliver
@@ -318,19 +360,94 @@ homebridge.addEventListener(STATUS_EVENT, (event) => {
  * can interleave old-generation pushes after a fresh adoption, a window that needs both processes alive across the resume, with the per-event generation field the
  * protocol's additive escape and field reports the tripwire.
  */
-document.addEventListener("visibilitychange", () => {
+ui.on(document, "visibilitychange", () => {
 
   if(document.visibilityState === "visible") {
 
     forceWarmResend();
   }
-}, { signal: ui.epochSignal });
+});
 
 /* The resume trigger: the framework's clock-gap detector fires on a page that froze and woke - the iPad app-switch case the belt cannot see - and a wake is exactly when
  * the helper process may have been replaced, so the whole-pool re-send rides it. The framework bounds this subscription by the epoch itself, and the send chokepoint's
  * establishment and epoch gates bound what it produces exactly as they bound every other trigger.
  */
 ui.liveness.onResume(forceWarmResend);
+
+/* The bound in seconds on the configuration wiring below. Five seconds settles the envelope provably inside the page boot monitor's ten-second watchdog, so a wiring
+ * step that hangs against an unresponsive host can never be what makes the settings panel look broken.
+ */
+const WIRING_DEADLINE = 5;
+
+// The configuration wiring's own lifecycle. Aborting it is how an envelope that failed or expired tells a continuation still running underneath it that it must not
+// stage anything after the fact.
+const wiringController = new AbortController();
+
+/* The signal the wiring's cancellation points read: the envelope's own controller bounded by this module copy's claim on the window, through the facade's one
+ * epoch-composition rule - the same rule every listener registration rides. The epoch half matters because a reopened settings panel mints a successor copy and
+ * retires this one: bounding the envelope aborts a superseded copy's wiring at the same chokepoints the deadline uses, rather than letting a retired copy write
+ * config underneath the copy the user is looking at.
+ */
+const wiringSignal = ui.epochBounded(wiringController.signal);
+
+/* Run the legacy-settings migration, once, at load.
+ *
+ * A migration that composes a patch persists it to disk itself, without waiting for the user to press Save. Most people never open this panel to save anything, so a
+ * migration that waited for one would leave a fleet split between two configuration shapes indefinitely, and the plumbing that reconciles them could never retire. The
+ * write is gated on there being a patch, which is what bounds it: only a session that actually found legacy settings writes, so a migrated install's every later open
+ * reads, finds nothing to do, and touches the disk not at all. The host's restart indicator therefore appears at most once per install, in the single session that
+ * converts it.
+ *
+ * The weaker outcomes are deliberate. A save the deadline overtakes, and a save the host rejects, both leave the migration sitting in the modal's pending
+ * configuration, where the user's own Save picks it up.
+ *
+ * Reopening the panel is convergent rather than racing. The settings frame is reused and each open imports a fresh copy of this module whose wiring runs independently,
+ * but a second copy reads the saved configuration, finds no legacy keys in it, and so composes nothing and writes nothing. Two genuinely simultaneous wirings read the
+ * same configuration and compose identical patches, so either ordering of their commits and saves leaves the same disk state.
+ *
+ * One bound stated honestly: the check before the commit is the LAST cancellation point. A commit whose bridge round trip is already in flight cannot be recalled - the
+ * session takes no signal, and the deadline bounds only the await - so composing the epoch into the signal narrows the stale-write window to that in-flight instant
+ * rather than closing it. It is harmful only if a successor commits a differing edit inside the same instant, and two migration wirings are convergent regardless.
+ */
+const wireRatgdoConfig = async () => {
+
+  const ratgdoConfig = makeRatgdoConfig({ FeatureOptions, catalog: await getCatalog() });
+
+  // The library's session is the single conduit the framework's own writes use, so the patch merges onto a replica synced just now rather than onto a snapshot taken
+  // before the page opened.
+  const session = await PluginConfigSession.open({ host: homebridge, name: "Ratgdo" });
+  const patch = ratgdoConfig.migrate(session.platform);
+
+  // The signal is read immediately before the write, so an envelope that expired - or a copy the window has retired - cannot stage a patch after the fact.
+  if(patch && !wiringSignal.aborted) {
+
+    await session.commit(patch);
+
+    // The signal is read a second time, because the commit itself was an await and the envelope may have expired across it. A save the deadline overtakes is skipped
+    // rather than forced, which leaves the migration staged for the user's own save - the weaker outcome, and the honest one.
+    if(!wiringSignal.aborted) {
+
+      await homebridge.savePluginConfig();
+    }
+  }
+};
+
+/* Await the wiring envelope here rather than at module top, so the page's chrome and every trigger above arm immediately instead of waiting on a bridge round trip.
+ * show() still waits on it, which is the ordering that matters: the framework opens its own configuration session inside the launch path show() starts, so every
+ * replica it hands to a hook is read after the migration has settled and none of them can commit a pre-migration snapshot over it.
+ */
+try {
+
+  await withDeadline({ promise: wireRatgdoConfig(), seconds: WIRING_DEADLINE, signal: wiringSignal });
+} catch(error) {
+
+  wiringController.abort(error);
+
+  // console is the browser panel's diagnostic transport; a migration that did not settle is a diagnostic, since the settings page loads either way and the next healthy
+  // session migrates the configuration forward on its own.
+  // eslint-disable-next-line no-console
+  console.error("The configuration migration did not complete.", error);
+}
 
 // Await show() before the first warm: it is the sanctioned first send, and it sends immediately rather than through the debounce that only the burst-prone trigger paths
 // need. The establishment gate inside the recompute is what makes every invocation that lands earlier, or after a failed launch, a silent no-op, so this await orders the

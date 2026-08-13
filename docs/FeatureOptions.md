@@ -41,72 +41,81 @@ Feature options provide a rich mechanism for tailoring your `homebridge-ratgdo` 
  * [Opener](#opener): Opener
  * [Light](#light): Opener light
  * [Motion](#motion): Opener motion
+ * [Mqtt](#mqtt): MQTT
  * [Disco](#disco): Ratgdo (ESP32) Disco device-specific
  * [Konnected](#konnected): Konnected device-specific
 
-Options whose key ends in `.<value>` take a value - replace `.<value>` with your setting; all other options are simple on/off toggles. The default shown for each option is what applies when you leave it unset.
+Options whose key ends in `=<value>` take a value - replace `=<value>` with your setting; all other options are simple on/off toggles. The default shown for each option is what applies when you leave it unset.
 
 #### <A NAME="device"></A>Device
 
 | Option                                                               | Description
 |----------------------------------------------------------------------|-------------------------------------------------------------
-| <A NAME="Device"></A>`Device`                                        | Make this device available in HomeKit. **(default: enabled)**.
-| <A NAME="Device.LogName"></A>`Device.LogName.<value>`                | Name to use for logging purposes. Defaults to the name the Ratgdo device advertises. **(default: none)**.
-| <A NAME="Device.Encryption.Key"></A>`Device.Encryption.Key.<value>`  | Base64-encoded encryption key to use for the ESPHome API as specified in your YAML configuration. **(default: none)**.
+| <A NAME="Device"></A>`Device`                                        | Make this device available in HomeKit. **(default: enabled)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Device.LogName"></A>`Device.LogName=<value>`                | Name to use for logging purposes. Defaults to the name the Ratgdo device advertises. **(default: none)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Device.Encryption.Key"></A>`Device.Encryption.Key=<value>`  | Base64-encoded encryption key to use for the ESPHome API as specified in your YAML configuration. **(default: none)**.<BR>This option may be applied globally or on individual devices.
 
 #### <A NAME="log"></A>Logging
 
 | Option                                                   | Description
 |----------------------------------------------------------|-------------------------------------------------------------
-| <A NAME="Log.Opener"></A>`Log.Opener`                    | Log opener events in Homebridge. **(default: enabled)**.
-| <A NAME="Log.Light"></A>`Log.Light`                      | Log light events in Homebridge. **(default: enabled)**.
-| <A NAME="Log.Motion"></A>`Log.Motion`                    | Log motion-related events in Homebridge. **(default: enabled)**.
-| <A NAME="Log.Obstruction"></A>`Log.Obstruction`          | Log obstruction events in Homebridge. **(default: enabled)**.
-| <A NAME="Log.VehiclePresence"></A>`Log.VehiclePresence`  | Log vehicle presence-related events in Homebridge. This is only valid on Ratgdo (ESP32) Disco openers. **(default: enabled)**.
+| <A NAME="Log.Debug"></A>`Log.Debug`                      | Enable debug logging. **(default: disabled)**.<BR>This option may only be applied globally.
+| <A NAME="Log.Opener"></A>`Log.Opener`                    | Log opener events in Homebridge. **(default: enabled)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Log.Light"></A>`Log.Light`                      | Log light events in Homebridge. **(default: enabled)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Log.Motion"></A>`Log.Motion`                    | Log motion-related events in Homebridge. **(default: enabled)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Log.Obstruction"></A>`Log.Obstruction`          | Log obstruction events in Homebridge. **(default: enabled)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Log.VehiclePresence"></A>`Log.VehiclePresence`  | Log vehicle presence-related events in Homebridge. This is only valid on Ratgdo (ESP32) Disco openers. **(default: enabled)**.<BR>This option may be applied globally or on individual devices.
 
 #### <A NAME="opener"></A>Opener
 
 | Option                                                                                   | Description
 |------------------------------------------------------------------------------------------|-------------------------------------------------------------
-| <A NAME="Opener.Lock"></A>`Opener.Lock`                                                  | Make the wireless remote lock on the opener available in HomeKit. **(default: enabled)**.
-| <A NAME="Opener.ReadOnly"></A>`Opener.ReadOnly`                                          | Make this opener read-only by ignoring open and close requests from HomeKit. **(default: disabled)**.
-| <A NAME="Opener.Dimmer"></A>`Opener.Dimmer`                                              | Add a dimmer accessory to control the opener. This can be useful in automation scenarios where you want to set the door to a specific percentage. **(default: disabled)**.
-| <A NAME="Opener.Switch"></A>`Opener.Switch`                                              | Add a switch accessory to control the opener. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling garage door openers. **(default: disabled)**.
-| <A NAME="Opener.OccupancySensor"></A>`Opener.OccupancySensor`                            | Add an occupancy sensor accessory using the open state of the opener to determine occupancy. This can be useful in automation scenarios where you want to trigger an action based on the opener being open for an extended period of time. **(default: disabled)**.
-| <A NAME="Opener.OccupancySensor.Duration"></A>`Opener.OccupancySensor.Duration.<value>`  | Duration, in seconds, to wait once the opener has reached the open state before indicating occupancy. **(default: 300)**.
-| <A NAME="Opener.Switch.RemoteLockout"></A>`Opener.Switch.RemoteLockout`                  | Add a switch accessory to control the wireless remote lockout feature (if present) on your opener. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling the lock state of garage door openers. **(default: disabled)**.
+| <A NAME="Opener.Lock"></A>`Opener.Lock`                                                  | Make the wireless remote lock on the opener available in HomeKit. **(default: enabled)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Opener.ReadOnly"></A>`Opener.ReadOnly`                                          | Make this opener read-only by ignoring open and close requests from HomeKit. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Opener.Dimmer"></A>`Opener.Dimmer`                                              | Add a dimmer accessory to control the opener. This can be useful in automation scenarios where you want to set the door to a specific percentage. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Opener.Switch"></A>`Opener.Switch`                                              | Add a switch accessory to control the opener. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling garage door openers. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Opener.OccupancySensor"></A>`Opener.OccupancySensor`                            | Add an occupancy sensor accessory using the open state of the opener to determine occupancy. This can be useful in automation scenarios where you want to trigger an action based on the opener being open for an extended period of time. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Opener.OccupancySensor.Duration"></A>`Opener.OccupancySensor.Duration=<value>`  | Duration, in seconds, to wait once the opener has reached the open state before indicating occupancy. **(default: 300)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Opener.Switch.RemoteLockout"></A>`Opener.Switch.RemoteLockout`                  | Add a switch accessory to control the wireless remote lockout feature (if present) on your opener. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling the lock state of garage door openers. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
 
 #### <A NAME="light"></A>Opener light
 
 | Option                       | Description
 |------------------------------|-------------------------------------------------------------
-| <A NAME="Light"></A>`Light`  | Make the light on the opener available in HomeKit. **(default: enabled)**.
+| <A NAME="Light"></A>`Light`  | Make the light on the opener available in HomeKit. **(default: enabled)**.<BR>This option may be applied globally or on individual devices.
 
 #### <A NAME="motion"></A>Opener motion
 
 | Option                                                                                   | Description
 |------------------------------------------------------------------------------------------|-------------------------------------------------------------
-| <A NAME="Motion"></A>`Motion`                                                            | Make the motion sensor on the opener available in HomeKit. **(default: enabled)**.
-| <A NAME="Motion.OccupancySensor"></A>`Motion.OccupancySensor`                            | Add an occupancy sensor accessory using motion sensor activity to determine occupancy. **(default: disabled)**.
-| <A NAME="Motion.OccupancySensor.Duration"></A>`Motion.OccupancySensor.Duration.<value>`  | Duration, in seconds, to wait without receiving a motion event to determine when occupancy is no longer detected. **(default: 300)**.
+| <A NAME="Motion"></A>`Motion`                                                            | Make the motion sensor on the opener available in HomeKit. **(default: enabled)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Motion.OccupancySensor"></A>`Motion.OccupancySensor`                            | Add an occupancy sensor accessory using motion sensor activity to determine occupancy. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Motion.OccupancySensor.Duration"></A>`Motion.OccupancySensor.Duration=<value>`  | Duration, in seconds, to wait without receiving a motion event to determine when occupancy is no longer detected. **(default: 300)**.<BR>This option may be applied globally or on individual devices.
+
+#### <A NAME="mqtt"></A>MQTT
+
+| Option                                         | Description
+|------------------------------------------------|-------------------------------------------------------------
+| <A NAME="Mqtt.Url"></A>`Mqtt.Url=<value>`      | URL of the MQTT broker to connect to (e.g. mqtt://1.2.3.4). **(default: none)**.<BR>This option may only be applied globally.
+| <A NAME="Mqtt.Topic"></A>`Mqtt.Topic=<value>`  | Topic prefix for published and subscribed MQTT messages. **(default: ratgdo)**.<BR>This option may only be applied globally.
 
 #### <A NAME="disco"></A>Ratgdo (ESP32) Disco device-specific
 
 | Option                                                                                         | Description
 |------------------------------------------------------------------------------------------------|-------------------------------------------------------------
-| <A NAME="Disco.Battery"></A>`Disco.Battery`                                                    | Show the state of the backup battery in HomeKit. This requires ensuring the Ratgdo (ESP32) Disco is connected directly to the backup battery. **(default: disabled)**.
-| <A NAME="Disco.OccupancySensor.Vehicle.Presence"></A>`Disco.OccupancySensor.Vehicle.Presence`  | Add an occupancy sensor accessory for vehicle presence detection. **(default: disabled)**.
-| <A NAME="Disco.ContactSensor.Vehicle.Arriving"></A>`Disco.ContactSensor.Vehicle.Arriving`      | Add a contact sensor accessory for vehicle arrival. **(default: disabled)**.
-| <A NAME="Disco.ContactSensor.Vehicle.Leaving"></A>`Disco.ContactSensor.Vehicle.Leaving`        | Add a contact sensor accessory for vehicle departure. **(default: disabled)**.
-| <A NAME="Disco.Switch.Laser"></A>`Disco.Switch.Laser`                                          | Add a switch accessory to control the park assistance laser feature. **(default: disabled)**.
-| <A NAME="Disco.Switch.Led"></A>`Disco.Switch.Led`                                              | Add a switch accessory to control the LED setting. **(default: disabled)**.
+| <A NAME="Disco.Battery"></A>`Disco.Battery`                                                    | Show the state of the backup battery in HomeKit. This requires ensuring the Ratgdo (ESP32) Disco is connected directly to the backup battery. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Disco.OccupancySensor.Vehicle.Presence"></A>`Disco.OccupancySensor.Vehicle.Presence`  | Add an occupancy sensor accessory for vehicle presence detection. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Disco.ContactSensor.Vehicle.Arriving"></A>`Disco.ContactSensor.Vehicle.Arriving`      | Add a contact sensor accessory for vehicle arrival. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Disco.ContactSensor.Vehicle.Leaving"></A>`Disco.ContactSensor.Vehicle.Leaving`        | Add a contact sensor accessory for vehicle departure. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Disco.Switch.Laser"></A>`Disco.Switch.Laser`                                          | Add a switch accessory to control the park assistance laser feature. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Disco.Switch.Led"></A>`Disco.Switch.Led`                                              | Add a switch accessory to control the LED setting. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
 
 #### <A NAME="konnected"></A>Konnected device-specific
 
 | Option                                                           | Description
 |------------------------------------------------------------------|-------------------------------------------------------------
-| <A NAME="Konnected.Switch.Pcw"></A>`Konnected.Switch.Pcw`        | Add a switch accessory to control the pre-close warning feature on Konnected openers. This can be useful in automation scenarios. **(default: disabled)**.
-| <A NAME="Konnected.Switch.Strobe"></A>`Konnected.Switch.Strobe`  | Add a switch accessory to control the strobe setting on Konnected openers. **(default: disabled)**.
+| <A NAME="Konnected.Switch.Pcw"></A>`Konnected.Switch.Pcw`        | Add a switch accessory to control the pre-close warning feature on Konnected openers. This can be useful in automation scenarios. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Konnected.Switch.Strobe"></A>`Konnected.Switch.Strobe`  | Add a switch accessory to control the strobe setting on Konnected openers. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
 
 <!-- FEATURE OPTIONS:END -->
 

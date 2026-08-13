@@ -4,18 +4,18 @@
  */
 import type { API, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
 import type { EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
-import { FeatureOptions, MqttClient, prefixedLog, sanitizeName } from "homebridge-plugin-utils";
-import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_AUTODISCOVERY_INTERVAL, RATGDO_AUTODISCOVERY_TYPES, RATGDO_AUTODISCOVERY_WARMUP_OFFSETS,
-  RATGDO_MQTT_TOPIC } from "./settings.ts";
-import { featureOptionCategories, featureOptions, normalizeConfig } from "./options.ts";
+import { FeatureOptions, createMqttClient, prefixedLog, sanitizeName } from "homebridge-plugin-utils";
+import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_AUTODISCOVERY_INTERVAL, RATGDO_AUTODISCOVERY_TYPES, RATGDO_AUTODISCOVERY_WARMUP_OFFSETS } from "./settings.ts";
+import { consolidatedFlag, consolidatedValue, featureOptionCategories, featureOptions, normalizeConfig } from "./options.ts";
 import { isEncryptionError, openConnection } from "./connection.ts";
 import { setInterval as setIntervalAsync, setTimeout as setTimeoutAsync } from "node:timers/promises";
 import { Bonjour } from "bonjour-service";
 import { LogLevel } from "esphome-client";
+import type { MqttClient } from "homebridge-plugin-utils";
 import type { Nullable } from "homebridge-plugin-utils";
 import { RatgdoAccessory } from "./device.ts";
 import type { RatgdoDevice } from "./types.ts";
-import type { RatgdoOptions } from "./options.ts";
+import type { RatgdoResolvedConfig } from "./options.ts";
 import type { Service } from "bonjour-service";
 import { parseBatteryState } from "./protocol/battery.ts";
 import { parseRatgdoService } from "./discovery.ts";
@@ -43,7 +43,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   // lookup at discoverRatgdoDevice's "have we seen this UUID before?" check.
   private readonly accessories: Map<string, PlatformAccessory>;
   public readonly api: API;
-  public readonly config: RatgdoOptions;
+  public readonly config: RatgdoResolvedConfig;
   public readonly configuredDevices: Map<string, RatgdoAccessory>;
   private readonly connections: Map<string, RatgdoConnection>;
   private readonly discoveredDevices: Set<string>;
@@ -62,11 +62,25 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
     this.accessories = new Map();
     this.api = api;
-    this.config = normalizeConfig(config);
+
+    const legacy = normalizeConfig(config);
+
     this.configuredDevices = new Map();
     this.connections = new Map();
     this.discoveredDevices = new Set();
-    this.featureOptions = new FeatureOptions(featureOptionCategories, featureOptions, this.config.options);
+    this.featureOptions = new FeatureOptions(featureOptionCategories, featureOptions, legacy.options);
+
+    /* Assemble the effective configuration. This is the one place a raw configuration property and a configured feature option meet: every consolidated setting
+     * resolves through the same precedence here, so no reader downstream has to know that a setting has two possible homes.
+     */
+    this.config = {
+
+      debug: consolidatedFlag(this.featureOptions, "Log.Debug", legacy.debug),
+      mqttTopic: consolidatedValue(this.featureOptions, "Mqtt.Topic", legacy.mqttTopic),
+      mqttUrl: consolidatedValue(this.featureOptions, "Mqtt.Url", legacy.mqttUrl),
+      options: legacy.options
+    };
+
     this.hap = api.hap;
     this.log = log;
     // In-place override: this redirects the injected Homebridge Logging instance's own debug() method through the plugin's debug() method below, which gates
@@ -82,22 +96,12 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       return;
     }
 
-    // Initialize MQTT, if needed. The HBPU MqttClient throws synchronously on an invalid broker URL, so we wrap construction in a try/catch and degrade gracefully -
-    // a single bad MQTT entry should not block the rest of the plugin from loading. The composed shutdown signal ties the client's lifetime to ours so we never have
-    // to imperatively disconnect it.
-    if(this.config.mqttUrl) {
-
-      try {
-
-        this.mqtt = new MqttClient({ brokerUrl: this.config.mqttUrl, log: this.log, topicPrefix: this.config.mqttTopic ?? RATGDO_MQTT_TOPIC },
-          { signal: this.shutdownController.signal });
-      } catch(error) {
-
-        // We use util.inspect to preserve the full error chain. HBPU attaches the underlying mqtt.js failure as `cause`, which has the actual diagnostic detail
-        // (invalid URL, ENOTFOUND, etc.). A plain `error.message` log would surface only the HBPU wrapper text and discard the root cause.
-        this.log.error("Unable to initialize MQTT client: %s", util.inspect(error, { depth: null }));
-      }
-    }
+    /* Initialize MQTT, if needed. The guarded factory answers null for both of the ways MQTT can fail to start - a broker URL or topic prefix that resolves to
+     * nothing, and a URL the client cannot parse - so a mistyped MQTT setting degrades to MQTT being off rather than keeping the rest of the plugin from loading.
+     * An unusable URL is reported once at error level, with the URL itself redacted so a broker password embedded in it never reaches the log. The platform's
+     * shutdown signal ties the client's lifetime to ours, so we never have to imperatively disconnect it.
+     */
+    this.mqtt = createMqttClient({ brokerUrl: this.config.mqttUrl, log: this.log, topicPrefix: this.config.mqttTopic }, { signal: this.shutdownController.signal });
 
     this.log.debug("Debug logging on. Expect a lot of data.");
 

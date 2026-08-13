@@ -4,8 +4,11 @@
  * PlatformConfig into a typed RatgdoOptions, plus a catalog shape audit over featureOptionCategories and featureOptions that pins the structural contract every
  * feature-option consumer (the FeatureOptions engine, the WebUI, the docs renderer) depends on.
  */
+import type { FeatureCategoryEntry, FeatureOptionEntry } from "homebridge-plugin-utils";
+import { consolidatedFlag, consolidatedValue, describeCategoryScope, describeOptionScope, featureOptionCategories, featureOptions,
+  normalizeConfig } from "./options.ts";
 import { describe, test } from "node:test";
-import { featureOptionCategories, featureOptions, normalizeConfig } from "./options.ts";
+import { FeatureOptions } from "homebridge-plugin-utils";
 import type { PlatformConfig } from "homebridge";
 import assert from "node:assert/strict";
 
@@ -13,6 +16,38 @@ import assert from "node:assert/strict";
  * PlatformConfig, exactly as the production boundary receives them, so each test exercises the real typeof / Array.isArray narrowing rather than a pre-typed shape.
  */
 const asConfig = (shape: Record<string, unknown>): PlatformConfig => shape as unknown as PlatformConfig;
+
+// The scope levels this catalog's entries are allowed to name. The audit below holds every entry to this vocabulary, so an entry reaching for a level the plugin has
+// no surface for fails here rather than rendering nowhere.
+const SCOPE_VOCABULARY: string[] = [ "device", "global" ];
+
+/* Locate one catalog entry by its category and option name. A miss throws rather than answering undefined, so a pin naming an entry the catalog does not carry fails
+ * as a missing entry instead of quietly asserting against nothing.
+ */
+function entryFor(category: string, name: string): FeatureOptionEntry {
+
+  const entry = featureOptions[category]?.find((candidate) => candidate.name === name);
+
+  if(!entry) {
+
+    throw new Error("The catalog carries no " + category + " entry named \"" + name + "\".");
+  }
+
+  return entry;
+}
+
+// Locate one catalog category by name, throwing on a miss for the same reason entryFor does.
+function categoryFor(name: string): FeatureCategoryEntry {
+
+  const category = featureOptionCategories.find((candidate) => candidate.name === name);
+
+  if(!category) {
+
+    throw new Error("The catalog carries no category named \"" + name + "\".");
+  }
+
+  return category;
+}
 
 describe("normalizeConfig", () => {
 
@@ -25,11 +60,11 @@ describe("normalizeConfig", () => {
       assert.deepEqual(result, {}, "an undefined config short-circuits to an empty RatgdoOptions with no fields populated");
     });
 
-    test("returns all-undefined fields with debug false for a bare config", () => {
+    test("returns all-undefined fields for a bare config", () => {
 
       const result = normalizeConfig(asConfig({ name: "Ratgdo", platform: "Ratgdo" }));
 
-      assert.equal(result.debug, false, "an absent debug field narrows to a strict false rather than undefined");
+      assert.equal(result.debug, undefined, "an absent debug field stays undefined, which is what lets the resolver fall through to the catalog default");
       assert.equal(result.mqttTopic, undefined, "an absent mqttTopic field stays undefined");
       assert.equal(result.mqttUrl, undefined, "an absent mqttUrl field stays undefined");
       assert.equal(result.options, undefined, "an absent options field stays undefined");
@@ -52,18 +87,18 @@ describe("normalizeConfig", () => {
       assert.equal(result.debug, false, "a boolean-false debug input narrows to false");
     });
 
-    test("is false for a truthy non-true debug value", () => {
+    test("is undefined for a truthy non-boolean debug value", () => {
 
       const result = normalizeConfig(asConfig({ debug: 1 }));
 
-      assert.equal(result.debug, false, "a truthy-but-not-true debug value (1) is rejected by the strict === true guard and yields false");
+      assert.equal(result.debug, undefined, "a truthy-but-non-boolean debug value (1) fails the typeof boolean guard and collapses to undefined");
     });
 
-    test("is false for the truthy string \"true\"", () => {
+    test("is undefined for the truthy string \"true\"", () => {
 
       const result = normalizeConfig(asConfig({ debug: "true" }));
 
-      assert.equal(result.debug, false, "the string \"true\" is truthy but not the boolean true, so the strict === true guard yields false");
+      assert.equal(result.debug, undefined, "the string \"true\" is truthy but not a boolean, so the typeof guard collapses it to undefined");
     });
   });
 
@@ -173,8 +208,8 @@ describe("the feature-option catalog", () => {
 
       const names = featureOptionCategories.map((category) => category.name).sort();
 
-      assert.deepEqual(names, [ "Device", "Disco", "Konnected", "Light", "Log", "Motion", "Opener" ].sort(),
-        "the category roster is the seven device-facing concerns the plugin exposes");
+      assert.deepEqual(names, [ "Device", "Disco", "Konnected", "Light", "Log", "Motion", "Mqtt", "Opener" ].sort(),
+        "the category roster is every concern the plugin exposes, the library's MQTT group included");
     });
   });
 
@@ -214,6 +249,152 @@ describe("the feature-option catalog", () => {
       const optionKeys = Object.keys(featureOptions).sort();
 
       assert.deepEqual(optionKeys, categoryNames, "every option-map key is a declared category and every declared category has an option-map entry");
+    });
+  });
+
+  describe("the scope declarations", () => {
+
+    test("every entry declares a nonempty scopes array drawn from the plugin's own vocabulary", () => {
+
+      for(const [ category, entries ] of Object.entries(featureOptions)) {
+
+        for(const entry of entries) {
+
+          // The declaration is read once and defaulted to an empty array so the two assertions below stand on their own: an entry that declares nothing fails the
+          // length check rather than throwing, which names the offending entry in the failure.
+          const scopes = entry.scopes ?? [];
+          const label = category + (entry.name.length ? ("." + entry.name) : "");
+
+          assert.ok(scopes.length > 0, label + " declares at least one scope level, so it renders and resolves somewhere");
+          assert.ok(scopes.every((scope) => SCOPE_VOCABULARY.includes(scope)), label + " declares only levels this plugin has a surface for");
+        }
+      }
+    });
+
+    test("the platform-wide entries declare the global level alone", () => {
+
+      for(const [ category, name ] of [ [ "Log", "Debug" ], [ "Mqtt", "Topic" ], [ "Mqtt", "Url" ] ] as [ string, string ][]) {
+
+        assert.deepEqual(entryFor(category, name).scopes, ["global"], category + "." + name + " is a platform-wide fact, so it has exactly one home");
+      }
+    });
+
+    test("the device-facing entries declare both the device and the global level", () => {
+
+      for(const [ category, name ] of [ [ "Device", "Encryption.Key" ], [ "Device", "LogName" ], [ "Log", "Opener" ], [ "Opener", "ReadOnly" ] ] as
+        [ string, string ][]) {
+
+        assert.deepEqual(entryFor(category, name).scopes, [ "device", "global" ], category + "." + name + " is settable globally or on one device");
+      }
+    });
+
+    test("the option-scope documentation hook renders the sentence each declared shape carries", () => {
+
+      const log = categoryFor("Log");
+
+      assert.equal(describeOptionScope(entryFor("Log", "Debug"), log), "<BR>This option may only be applied globally.",
+        "a global-only entry states that it has the one home");
+      assert.equal(describeOptionScope(entryFor("Log", "Opener"), log), "<BR>This option may be applied globally or on individual devices.",
+        "a device-facing entry states both levels");
+      assert.equal(describeOptionScope({ default: true, description: "An entry declaring no scope.", name: "Undeclared" }, log), undefined,
+        "an entry declaring no scope contributes no sentence, which is the guard the renderer's own entry type requires");
+    });
+
+    test("the category-scope documentation hook contributes no sentence", () => {
+
+      for(const category of featureOptionCategories) {
+
+        assert.equal(describeCategoryScope(category), undefined, category.name + " carries no category-level scope sentence of its own");
+      }
+    });
+  });
+});
+
+/* The consolidated-setting resolvers, driven through every arm against a REAL engine over the REAL catalog, so the pins bind to the same grammar the platform
+ * constructor resolves against. Each row carries distinct values on its option side and its property side, so an implementation that transposed the two arms - or
+ * that reached for the property first - fails rather than agreeing with itself.
+ */
+describe("the consolidated setting resolvers", () => {
+
+  // The two broker URLs the precedence rows tell apart: one carried by a configured option, one by the configuration property.
+  const LEGACY_URL = "mqtt://legacy.example:1883";
+  const OPTION_URL = "mqtt://option.example:1883";
+
+  // A real engine over the real catalog and the supplied entries, built exactly as the platform constructor builds its own.
+  const engineFor = (entries: string[]): FeatureOptions => new FeatureOptions(featureOptionCategories, featureOptions, entries);
+
+  /* A synthetic catalog whose only flag defaults ON. Log.Debug's own default is off, so against the real catalog a correct implementation, one that hardcoded false,
+   * and one that wrote `||` where `??` belongs all answer identically - the catalog-default arm is only observable through a flag whose default is on. The resolvers
+   * take their engine as a parameter, so any catalog can drive them.
+   */
+  const defaultOnEngine = (entries: string[]): FeatureOptions => new FeatureOptions([{ description: "Logging", name: "Log" }],
+    { "Log": [{ default: true, description: "Enable debug logging.", name: "Debug", scopes: ["global"] }] }, entries);
+
+  describe("consolidatedValue", () => {
+
+    test("an option enabled with a value rules over a differing configuration property", () => {
+
+      assert.equal(consolidatedValue(engineFor(["Enable.Mqtt.Url=" + OPTION_URL]), "Mqtt.Url", LEGACY_URL), OPTION_URL,
+        "configuring the option is the user saying what they want, so it outranks the property");
+    });
+
+    test("an explicitly disabled option answers null beside a lingering configuration property", () => {
+
+      assert.equal(consolidatedValue(engineFor(["Disable.Mqtt.Url"]), "Mqtt.Url", LEGACY_URL), null,
+        "an explicit disable is a configured state, so the property does not resurrect the setting");
+    });
+
+    test("an enabled option carrying no value answers undefined beside a differing configuration property", () => {
+
+      assert.equal(consolidatedValue(engineFor(["Enable.Mqtt.Url"]), "Mqtt.Url", LEGACY_URL), undefined,
+        "a valueless entry is still a configured entry, so undefined wins rather than falling through to the property");
+    });
+
+    test("a configuration property answers when no entry exists", () => {
+
+      assert.equal(consolidatedValue(engineFor([]), "Mqtt.Url", LEGACY_URL), LEGACY_URL,
+        "a configuration nobody has opened the webUI on keeps running on its own properties");
+      assert.equal(consolidatedValue(engineFor([]), "Mqtt.Topic", "garage"), "garage", "the topic property answers the same way the broker URL does");
+    });
+
+    test("an empty-string configuration property is a value, not an absence", () => {
+
+      assert.equal(consolidatedValue(engineFor([]), "Mqtt.Url", ""), "",
+        "the fallback is nullish, not truthy, so an empty string the user actually wrote survives to the consumer");
+    });
+
+    test("the catalog default answers when neither an entry nor a property exists", () => {
+
+      assert.equal(consolidatedValue(engineFor([]), "Mqtt.Topic", undefined), "ratgdo", "the topic falls back to the default the catalog registers");
+      assert.equal(consolidatedValue(engineFor([]), "Mqtt.Url", undefined), null, "the broker URL defaults to off, which the engine answers as null");
+    });
+  });
+
+  describe("consolidatedFlag", () => {
+
+    test("an explicitly configured option rules over the configuration property in both directions", () => {
+
+      assert.equal(consolidatedFlag(engineFor(["Enable.Log.Debug"]), "Log.Debug", false), true, "an enabled option outranks a property that says off");
+      assert.equal(consolidatedFlag(engineFor(["Disable.Log.Debug"]), "Log.Debug", true), false, "a disabled option outranks a property that says on");
+    });
+
+    test("the configuration property decides when no entry exists", () => {
+
+      assert.equal(consolidatedFlag(engineFor([]), "Log.Debug", true), true, "a property carrying true turns the flag on");
+      assert.equal(consolidatedFlag(engineFor([]), "Log.Debug", false), false, "a property carrying false turns the flag off");
+    });
+
+    test("the catalog default closes the chain when neither an entry nor a property exists", () => {
+
+      assert.equal(consolidatedFlag(engineFor([]), "Log.Debug", undefined), false, "debug logging is off until something asks for it");
+    });
+
+    test("a flag whose catalog default is on resolves on, and a property that says off still overrides it", () => {
+
+      assert.equal(consolidatedFlag(defaultOnEngine([]), "Log.Debug", undefined), true,
+        "the default arm reads the catalog's own declared state rather than answering a hardcoded false");
+      assert.equal(consolidatedFlag(defaultOnEngine([]), "Log.Debug", false), false,
+        "a property carrying false decides, which a truthy fallback would discard in favor of the default");
     });
   });
 });
