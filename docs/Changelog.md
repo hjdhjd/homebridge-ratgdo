@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 3.1.0 (2026-08-16)
+  * New feature: live device status in the HBR webUI. The settings panel now shows each of your Ratgdo and Konnected devices and its connection status in real time, so you can see at a glance whether HBR can reach your devices, as well as individual statuses of the garage door state.
+  * Fix: MQTT publish failures are now contained and reported instead of escaping as unhandled errors.
+  * Housekeeping.
+
 ## 3.0.0 (2026-07-14)
   * Breaking change: since node 20 is now EOL, node 22.20 is now the minimum required version.
   * Improvement: HBR has been modernized to take full advantage of modern Node features and idioms, leaving years of legacy compatibility behind.
