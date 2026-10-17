@@ -96,8 +96,9 @@ export const loadUi = async ({ addresses = {}, catalog = null, config = defaultC
   const host = makeHost({ addresses, config, probe });
 
   // The double the page is about to construct. It arrives through the fixture's own callback, because the page constructs it inside its module body where no caller
-  // can reach the instance.
-  let double: Nullable<webUi> = null;
+  // can reach the instance. The initializer is cast to the full type because TypeScript cannot see an assignment made inside a callback: a variable initialized to
+  // null reads as null for the rest of this function even under a type annotation, which would make the guard below look like it always throws.
+  let double = null as Nullable<webUi>;
 
   stageFixture({ catalog, config, devices, failNextShow, host, onConstructed: (constructed) => {
 

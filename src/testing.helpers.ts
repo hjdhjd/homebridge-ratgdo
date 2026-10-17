@@ -242,12 +242,14 @@ export class TestCharacteristic {
  * unmodified against the double: characteristics is a PUBLIC ARRAY view (acquireService's getCharacteristicConstructor destructures the first element to recover the
  * Characteristic constructor, and throws when none exists - which is why the constructible service markers seed one characteristic), and displayName is MUTABLE
  * (setServiceName assigns it on every acquire). UUID mirrors the marker's static and is never empty, keeping the real helpers' name-set predicates honestly false against
- * markers that carry no name statics.
+ * markers that carry no name statics. linkedServices mirrors HAP's Service.linkedServices because acquireService's make-room reads the link list of every service on the
+ * accessory and restores each one in place, so the binding is readonly and its contents are not.
  */
 export class TestService {
 
   public displayName: string;
   public isPrimary = false;
+  public readonly linkedServices: TestService[] = [];
   public readonly subtype: string | undefined;
   public readonly type: ServiceType;
   private readonly characteristicsByType = new Map<CharacteristicType, TestCharacteristic>();
@@ -455,9 +457,9 @@ export const Service = {
 /* One accessory. Carries an AccessoryInformation service from construction (every HomeKit accessory has one); subsequent addService calls append more. addService
  * and getService mirror HAP's own rule and HAP's own lookup: HAP refuses a service of a type the accessory already carries unless the new one has a subtype no
  * service of that type shares, and HAP's getService matches by type alone, whatever the subtype. The double carries both because the suite must see what the runtime
- * would do - a configure order that adds a service HAP refuses throws here as it throws in the field, and a lookup that leans on getService skipping a subtyped
- * sibling fails here as it would there. getServiceById is the lookup that matches type and subtype together. The mutable context and displayName are the fields the
- * production accessory path reads; the _associatedHAPAccessory mirror is retained for HAP-shape parity.
+ * would do - the double refuses an add as HAP's own addService does, which is the refusal the library's make-room works around, and a lookup that leans on getService
+ * skipping a subtyped sibling fails here as it would there. getServiceById is the lookup that matches type and subtype together. The mutable context and displayName
+ * are the fields the production accessory path reads; the _associatedHAPAccessory mirror is retained for HAP-shape parity.
  */
 export class TestAccessory {
 

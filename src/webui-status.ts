@@ -1240,9 +1240,11 @@ export class StatusFeed implements Disposable {
    * what is at that place is the question the dial asks. So the identity comes back from the device-info record rather than from an advertisement, and it comes back
    * fresh on every dial - which is what serves a swapped opener under its own mac instead of under the mac that used to answer there.
    *
-   * TOTAL by contract, like `#connectDevice`: the body sits in one try/catch/finally so no fault escapes this fire-and-forget call, and the `finally` is what
-   * guarantees no exit - a throw included - leaves the address recorded as still dialing. The `dialing` record is installed synchronously before the first await and
-   * IS the guard against a second concurrent dial of one address, so a re-warm landing mid-dial adds nothing.
+   * TOTAL by contract, like `#connectDevice`: the body sits in one try/catch so no fault escapes this fire-and-forget call. The `dialing` record is installed
+   * synchronously before the first await and IS the guard against a second concurrent dial of one address, so a re-warm landing mid-dial adds nothing. Every exit
+   * after the install releases that guard by writing the address's outcome over it - `resolved` once the device is identified, `failed` from a classified failure
+   * or as the catch's first statement - except the exit that finds the record no longer its own after the open. That exit writes nothing: a departure or the
+   * pool's disposal has deleted the record, or a later dial has installed its own, and either way the address is not this dial's to write.
    *
    * What becomes of the opened connection depends on the sidebar. A mac the sidebar lists takes the connection as its session, replacing a session it holds at some
    * other address and keeping the one it already holds at this one. A mac the sidebar does not list has its identity remembered and its connection closed at once:
@@ -1368,31 +1370,23 @@ export class StatusFeed implements Disposable {
       this.#adoptConnection({ client: outcome.client, initialState: outcome.initialState, session, variant: identity.variant });
     } catch(error) {
 
+      /* The address's record is the in-flight guard, and writing the failure over it is what releases the guard. That is why the write comes first: nothing that
+       * follows in the catch can leave the address recorded as still dialing.
+       */
+      this.#addresses.set(address, { offered, reason: "unknown", state: "failed" });
+
       log.error("The live-status connection failed unexpectedly.", error);
 
       /* A session whose installation threw still holds the device's slot, and left there it makes the next warm's redial read the device as already connected at
        * this address, which closes the fresh connection and serves nothing. So the session this dial installed is torn down, releasing the client its stack holds,
-       * before the failure is recorded, and only while it is still the one installed, because a session that has taken its place is not this failure's to remove.
+       * before the failure is reported, and only while it is still the one installed, because a session that has taken its place is not this failure's to remove.
        */
       if((session !== null) && (this.#sessions.get(session.mac) === session)) {
 
         this.#teardownSession(session.mac);
       }
 
-      this.#addresses.set(address, { offered, reason: "unknown", state: "failed" });
       this.#reportAddressFailure(address, "unknown", onBehalfOf, offered);
-    } finally {
-
-      /* Whatever happened above, this address is not dialing any more. The guard is only ever released against THIS dial's own record: a departure that aborted this
-       * dial has already deleted the entry, and a later warm may have installed a dial of its own, so releasing blindly would clear a guard that belongs to someone
-       * else and let two dials run at one address.
-       */
-      const record = this.#addresses.get(address);
-
-      if((record?.state === "dialing") && (record.controller === controller)) {
-
-        this.#addresses.delete(address);
-      }
     }
   }
 

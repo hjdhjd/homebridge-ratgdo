@@ -695,21 +695,22 @@ export class webUi {
     this.name = name;
     this.params = params;
 
-    this.liveness = { onResume: (handler) => {
+    this.liveness = { onResume: (handler): void => {
 
       this.resumeHandlers.push(handler);
     } };
 
     this.featureOptions = {
 
-      catalog: () => {
+      catalog: (): Promise<FakeCatalog> => {
 
-        this.#catalogPromise ??= (fixture.catalog ?? (async () => (await fixture.host.request("/getOptions")) as FakeCatalog))().catch((error: unknown) => {
+        this.#catalogPromise ??= (fixture.catalog ?? (async (): Promise<FakeCatalog> => (await fixture.host.request("/getOptions")) as FakeCatalog))()
+          .catch((error: unknown) => {
 
-          this.#catalogPromise = null;
+            this.#catalogPromise = null;
 
-          throw error;
-        });
+            throw error;
+          });
 
         return this.#catalogPromise;
       },
@@ -718,7 +719,7 @@ export class webUi {
        * live entry - and whatever it composes is merged onto that entry, so a later read by the page sees the write exactly as it would after a real commit. The
        * composed patch and the answer are both recorded, which is what lets a test assert the call count and the resulting options in one place.
        */
-      commitConfig: async (compose) => {
+      commitConfig: async (compose): Promise<CommitResult> => {
 
         const primary = this.featureOptions.editedConfig[0];
 
@@ -742,16 +743,16 @@ export class webUi {
       },
       commits: [],
       editedConfig: fixture.config,
-      getHomebridgeDevices: async () => ({ devices: fixture.devices.map((device) => ({ ...device })), error: "" }),
+      getHomebridgeDevices: async (): Promise<DeviceListResult> => ({ devices: fixture.devices.map((device) => ({ ...device })), error: "" }),
       nextCommit: { kind: "committed" },
       statusPanel: {
 
-        resetStaleGuards: () => {
+        resetStaleGuards: (): void => {
 
           this.featureOptions.statusPanel.resets += 1;
         },
         resets: 0,
-        watchRequest: (request) => {
+        watchRequest: (request): void => {
 
           this.featureOptions.statusPanel.watched.push(request);
         },
@@ -763,7 +764,7 @@ export class webUi {
        * own document - read off the global scope, where the framework reads it too - carrying `data-fo-takeover` and inserted immediately ahead of
        * `#deviceStatsContainer`. The handle's release does nothing once its signal has aborted, and otherwise ends the takeover.
        */
-      takeover: (element) => {
+      takeover: (element): ReturnType<FeatureOptionsDouble["takeover"]> => {
 
         const pageDocument = (globalThis as unknown as { document: FakeDocument }).document;
         const anchor = pageDocument.getElementById("deviceStatsContainer");

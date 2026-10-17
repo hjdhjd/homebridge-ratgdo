@@ -80,7 +80,7 @@ describe("RatgdoAccessory.updateState() motion and obstruction handling", () => 
       // Advance the remaining 2s to reach the full duration measured from the second delivery.
       clock.advance(2000);
 
-      assert.equal(motion?.getCharacteristic(Characteristic.MotionDetected).value, false, "the restarted timer clears motion 5s after the re-delivered event");
+      assert.equal(motion.getCharacteristic(Characteristic.MotionDetected).value, false, "the restarted timer clears motion 5s after the re-delivered event");
       assert.deepEqual(motionPayloads(), [ "true", "false" ], "the restarted timer publishes exactly one 'false' when it finally fires");
     });
 

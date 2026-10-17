@@ -483,7 +483,7 @@ describe("asEspHomeClient and makeFakeOpenClient", () => {
 
     assert.equal(open.calls.length, 1, "every invocation is recorded");
     assert.equal(open.calls[0]?.host, "192.0.2.10", "the recorded options carry the host openConnection forwards");
-    assert.equal(open.calls[0]?.psk, resolver, "the recorded options carry the key resolver, so a test can read what the connection core handed the client");
+    assert.equal(open.calls[0].psk, resolver, "the recorded options carry the key resolver, so a test can read what the connection core handed the client");
   });
 
   test("resolverOf answers the resolver a recorded invocation carried, and refuses one that carried none", async () => {

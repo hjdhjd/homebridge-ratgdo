@@ -220,7 +220,7 @@ describe("RatgdoAccessory command dispatch", () => {
       // The failed onSet scheduled a deferred revert; advancing past the revert delay must put the characteristic back to its prior off state.
       clock.advance(RATGDO_UI_REVERT_DELAY);
 
-      assert.equal(on?.value, false, "after the revert delay elapses the On characteristic reverts to its prior off value");
+      assert.equal(on.value, false, "after the revert delay elapses the On characteristic reverts to its prior off value");
     });
   });
 
@@ -241,7 +241,7 @@ describe("RatgdoAccessory command dispatch", () => {
       // The momentary switch auto-reverts to off after the pre-close warning duration elapses.
       clock.advance(RATGDO_KONNECTED_PCW_DURATION * 1000);
 
-      assert.equal(on?.value, false, "after the pre-close warning duration the momentary switch reverts to off");
+      assert.equal(on.value, false, "after the pre-close warning duration the momentary switch reverts to off");
     });
   });
 });

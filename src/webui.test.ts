@@ -9,15 +9,15 @@
  * is therefore the page's behavior rather than a restatement of it - the host's request log, the listener records each fake keeps for what the page registered on
  * it, the double's counters, and the fake document's state.
  */
-import type { FakeCatalog, FakeConfigEntry, FakeDevice, FakeElement, RecordedLog } from "./webui-double.helpers.ts";
+import type { CommitResult, DeviceListResult, FakeCatalog, FakeConfigEntry, FakeDevice, FakeElement, RecordedLog } from "./webui-double.helpers.ts";
 import { LIBRARY_UI_DIR, loadUi } from "./webui.helpers.ts";
 import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE, STATUS_WARM_ROUTE, defaultConfig, defaultDevices, fire, webUi } from "./webui-double.helpers.ts";
 import { describe, test } from "node:test";
+import { expectAt, settle } from "homebridge-plugin-utils/testing";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import type { LoadedUi } from "./webui.helpers.ts";
 import { RATGDO_VARIANT_LABELS } from "./types.ts";
 import assert from "node:assert/strict";
-import { settle } from "homebridge-plugin-utils/testing";
 
 // The two fixture devices' macs, and the key configured against the first of them.
 const MAC = "AABBCCDDEEFF";
@@ -129,7 +129,7 @@ describe("the ratgdo settings page", () => {
       const devices = page.double.featureOptions.getHomebridgeDevices;
 
       // The read fails for as long as the override stands, and the edit guarantees the recovered read has something new to send.
-      page.double.featureOptions.getHomebridgeDevices = async () => {
+      page.double.featureOptions.getHomebridgeDevices = async (): Promise<never> => {
 
         throw new Error("The device list could not be read.");
       };
@@ -224,7 +224,7 @@ describe("the ratgdo settings page", () => {
       const before = warmSends(page).length;
       const devices = page.double.featureOptions.getHomebridgeDevices;
 
-      page.double.featureOptions.getHomebridgeDevices = async () => {
+      page.double.featureOptions.getHomebridgeDevices = async (): Promise<DeviceListResult> => {
 
         const result = await devices();
 
@@ -436,7 +436,7 @@ describe("the ratgdo settings page", () => {
       assert.match(panel?.errorMessages?.["unsupported"]?.message ?? "", /firmware/,
         "the unsupported copy tells an opener's user which side to update rather than naming the protocol");
       assert.equal(page.double.params.sidebar?.deviceLabel, "Ratgdo Devices", "the sidebar names the devices the way an opener's user reads them");
-      assert.ok(page.double.params.sidebar?.groupOrder, "the sidebar carries the comparator that orders its variant groups");
+      assert.ok(page.double.params.sidebar.groupOrder, "the sidebar carries the comparator that orders its variant groups");
       assert.deepEqual(panel?.placeholderRows?.map((row) => row.id), [ "door", "lock", "motion", "light", "obstruction" ],
         "the placeholder skeleton carries a row per status the panel renders");
 
@@ -551,7 +551,7 @@ describe("the ratgdo settings page", () => {
       using page = await loadUi();
 
       assert.ok(page.double.params.ui?.validOption, "the page declares the option visibility hook");
-      assert.ok(page.double.params.ui?.validOptionCategory, "the page declares the category visibility hook");
+      assert.ok(page.double.params.ui.validOptionCategory, "the page declares the category visibility hook");
     });
 
     test("offers a Ratgdo device its own hardware sections and withholds the other variant's", async () => {
@@ -684,6 +684,15 @@ describe("the ratgdo settings page's Add Device card", () => {
 
   // The diagnostics a failed connection test writes to the console. A retired test has no failure to report, so a row about one reads this as empty.
   const probeDiagnostics = (page: LoadedUi): RecordedLog[] => page.console.errors.filter((entry) => (entry.message === "The device connection test failed."));
+
+  // The option entries the page's first commit wrote. The commit itself is asserted present, so a save that never committed fails under its own description rather
+  // than reading as an empty list.
+  const committedOptions = (page: LoadedUi, description: string): readonly string[] => {
+
+    const patch = expectAt(page.double.featureOptions.commits, 0, description).patch as { options?: string[] };
+
+    return patch.options ?? [];
+  };
 
   describe("mounting", () => {
 
@@ -1046,7 +1055,7 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       assert.equal(page.double.featureOptions.commits.length, 1, "a save is ONE coordinated write, never one per entry");
 
-      const options = (page.double.featureOptions.commits[0]?.patch as { options?: string[] })?.options ?? [];
+      const options = committedOptions(page, "the save's commit");
 
       assert.ok(options.some((entry) => (entry === "Enable.Device.Address=10.0.0.20")), "the one patch lists the address");
       assert.ok(options.some((entry) => (entry === keyEntry(MAC, KEY))), "and carries its key at the MAC of the device that answered");
@@ -1171,7 +1180,7 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       assert.deepEqual(probe?.body, { address: "2001:db8::5", psk: KEY }, "the address tested is the bare, trimmed, lower-cased literal");
 
-      const options = (page.double.featureOptions.commits[0]?.patch as { options?: string[] })?.options ?? [];
+      const options = committedOptions(page, "the save's commit");
 
       assert.ok(options.includes("Enable.Device.Address=2001:db8::5"), "and the address saved is the same one that was tested, not the spelling that was typed");
       assert.ok(options.includes(keyEntry(MAC, KEY)), "with the key stored at the MAC of the device that answered there");
@@ -1219,7 +1228,7 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       await settle();
 
-      const options = (page.double.featureOptions.commits[0]?.patch as { options?: string[] })?.options ?? [];
+      const options = committedOptions(page, "the first save's commit");
 
       assert.ok(options.includes("Enable.Device.Encryption.Key." + MAC + "=" + KEY), "the key is committed at the answered device's MAC");
 
@@ -1233,7 +1242,7 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       await settle();
 
-      const written = (inherited.double.featureOptions.commits[0]?.patch as { options?: string[] })?.options ?? [];
+      const written = committedOptions(inherited, "the second save's commit");
 
       assert.ok(written.includes("Enable.Device.Address=10.0.0.20"), "the address is still listed");
       assert.ok(!written.some((entry) => entry.startsWith("Enable.Device.Encryption.Key." + MAC)), "and no key entry is written where the key already resolves");
@@ -1409,7 +1418,7 @@ describe("the ratgdo settings page's Add Device card", () => {
       const original = page.double.featureOptions.commitConfig;
 
       // The commit is held open so the card can be closed across it, then released.
-      page.double.featureOptions.commitConfig = async (compose) => {
+      page.double.featureOptions.commitConfig = async (compose): Promise<CommitResult> => {
 
         await held.promise;
 

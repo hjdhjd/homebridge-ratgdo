@@ -26,7 +26,7 @@ describe("RatgdoAccessory.updateState() lock and availability", () => {
 
       assert.equal(door?.getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.SECURED,
         "a LOCKED lock event lands as a SECURED lock current state on the garage door service");
-      assert.equal(door?.getCharacteristic(Characteristic.LockTargetState).value, Characteristic.LockTargetState.SECURED,
+      assert.equal(door.getCharacteristic(Characteristic.LockTargetState).value, Characteristic.LockTargetState.SECURED,
         "a LOCKED lock event drives the lock target state to SECURED");
 
       const lockout = accessory.getServiceById(Service.Switch, RatgdoService.SWITCH_LOCKOUT);
@@ -51,7 +51,7 @@ describe("RatgdoAccessory.updateState() lock and availability", () => {
 
       assert.equal(door?.getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.UNSECURED,
         "an UNLOCKED lock event lands as an UNSECURED lock current state on the garage door service");
-      assert.equal(door?.getCharacteristic(Characteristic.LockTargetState).value, Characteristic.LockTargetState.UNSECURED,
+      assert.equal(door.getCharacteristic(Characteristic.LockTargetState).value, Characteristic.LockTargetState.UNSECURED,
         "an UNLOCKED lock event drives the lock target state to UNSECURED");
       assert.equal(loggedAt(entries, "info", "Wireless remotes are permitted"), true, "unlocking the remotes emits the permitted deviation log");
 
@@ -212,7 +212,7 @@ describe("RatgdoAccessory.updateState() lock and availability", () => {
 
       assert.equal(info?.getCharacteristic(Characteristic.Model).value, "Ratgdo 9.9.9",
         "an online availability event refreshes the Model characteristic from the device model");
-      assert.equal(info?.getCharacteristic(Characteristic.FirmwareRevision).value, "2025.1.0",
+      assert.equal(info.getCharacteristic(Characteristic.FirmwareRevision).value, "2025.1.0",
         "an online availability event refreshes the FirmwareRevision characteristic from the device firmware version");
     });
   });

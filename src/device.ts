@@ -211,8 +211,8 @@ export class RatgdoAccessory implements Disposable {
     this.configureInfo();
     this.configureGarageDoor();
 
-    // HomeKit refuses a service without a subtype beside another service of the same type, so the light (a Lightbulb without a subtype) is acquired before the
-    // dimmer (a subtyped Lightbulb).
+    // The light (a Lightbulb without a subtype) is acquired ahead of the dimmer (a subtyped Lightbulb) so a fresh accessory takes the library's plain add, and the
+    // library detaches and re-adds the dimmer to make room for the light only on a cached accessory that carries the dimmer but not the light.
     this.configureLight();
     this.configureAutomationDoorPositionDimmer();
     this.configureAutomationDoorSwitch();

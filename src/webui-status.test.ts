@@ -16,13 +16,13 @@ import { StatusFeed, narrowStatusProbeRequest, narrowStatusWarmRequest } from ".
 import { TestClock, TestMdnsBrowserFactory, capturingLog, expectAt, formatLogEntry, settle } from "homebridge-plugin-utils/testing";
 import { TestEspHomeClient, makeBinarySensorEvent, makeCoverEvent, makeFakeOpenClient, makeLightEvent, makeLockEvent, makeRatgdoService, makeSwitchEvent,
   makeTelemetry, openThroughHello, resolverOf } from "./testing.helpers.ts";
+import type { TestLogEntry, TestMdnsBrowser } from "homebridge-plugin-utils/testing";
 import { canonicalManualAddress, manualAddressList } from "./manual.ts";
 import { describe, test } from "node:test";
 import type { OpenEspHomeClient } from "./connection.ts";
 import type { RatgdoTxtKey } from "./discovery.ts";
 import { RatgdoVariant } from "./types.ts";
 import type { StatusWarmRequest } from "./webui-status.ts";
-import type { TestMdnsBrowser } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
 
 /* This file constructs raw mDNS TXT payloads whose keys are the snake_case ESPHome wire names (esphome_version, project_name, ...), so camelcase is disabled for the
@@ -195,7 +195,8 @@ const makeAnsweringClient = (options: { deviceInfo?: Partial<DeviceInfo> | null;
  * `browser()` answers the most recently created browser rather than the first, so a test that lets one fail and be replaced reads the live one.
  */
 const makeFeed = (options: { browserFactory?: TestMdnsBrowserFactory; discoveryTimeoutSeconds?: number; openClient?: OpenEspHomeClient;
-  push?: (event: StatusEvent) => void; } = {}) => {
+  push?: (event: StatusEvent) => void; } = {}): { browser: () => TestMdnsBrowser; clock: TestClock; entries: readonly TestLogEntry[]; factory: TestMdnsBrowserFactory;
+  feed: StatusFeed; pushes: StatusEvent[]; } => {
 
   const pushes: StatusEvent[] = [];
   const clock = new TestClock();
@@ -208,7 +209,10 @@ const makeFeed = (options: { browserFactory?: TestMdnsBrowserFactory; discoveryT
     discoveryTimeoutSeconds: options.discoveryTimeoutSeconds ?? 0.02,
     log,
     openClient: options.openClient,
-    push: options.push ?? ((event) => pushes.push(event))
+    push: options.push ?? ((event): void => {
+
+      pushes.push(event);
+    })
   });
   const browser = (): TestMdnsBrowser => expectAt(factory.createCalls, factory.createCalls.length - 1, "the feed's current browser").browser;
 
@@ -1173,9 +1177,9 @@ describe("StatusFeed availability", () => {
 
     const availability = pushes.filter((event) => event.kind === "availability");
 
-    assert.deepEqual(availability.map((event) => (event.kind === "availability") ? event.online : null), [ false, true ],
+    assert.deepEqual(availability.map((event) => event.online), [ false, true ],
       "a disconnect then a reconnect push availability online false then true, values and order both");
-    assert.deepEqual(availability.map((event) => (event.kind === "availability") ? event.encrypted : null), [ false, true ],
+    assert.deepEqual(availability.map((event) => event.encrypted), [ false, true ],
       "the disconnect carries encrypted false and the reconnect threads lifecycle.encrypted true");
   });
 });
@@ -3548,20 +3552,20 @@ describe("StatusFeed probe", () => {
     const esphome = await import("esphome-client");
     const rows: { expected: string; open: () => Promise<TestEspHomeClient> }[] = [
 
-      { expected: "auth-invalid", open: async () => {
+      { expected: "auth-invalid", open: async (): Promise<never> => {
 
         throw new esphome.EncryptionKeyInvalidError("the key does not match");
       } },
-      { expected: "auth-missing", open: async () => {
+      { expected: "auth-missing", open: async (): Promise<never> => {
 
         throw new esphome.EncryptionKeyMissingError("this device requires a key");
       } },
       { expected: "misconfigured", open: async () => makeClient({ deviceInfo: null, snapshot: restingCache() }) },
-      { expected: "unreachable", open: async () => {
+      { expected: "unreachable", open: async (): Promise<never> => {
 
         throw new Error("connection refused");
       } },
-      { expected: "unsupported", open: async () => {
+      { expected: "unsupported", open: async (): Promise<never> => {
 
         throw new esphome.NegotiationFailedError("api major out of range", "API_MAJOR_OUT_OF_RANGE");
       } }

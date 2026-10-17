@@ -71,9 +71,9 @@ describe("RatgdoAccessory construction", () => {
       const info = accessory.getService(Service.AccessoryInformation);
 
       assert.equal(info?.getCharacteristic(Characteristic.Manufacturer).value, "github.com/hjdhjd", "the manufacturer is the project identity");
-      assert.equal(info?.getCharacteristic(Characteristic.SerialNumber).value, "AABBCCDDEEFF", "the serial number is the device MAC");
-      assert.equal(info?.getCharacteristic(Characteristic.FirmwareRevision).value, "2.3.4", "the firmware revision is the discovered firmware version");
-      assert.equal(info?.getCharacteristic(Characteristic.Model).value, "Ratgdo 1.2.3", "the model prefixes the variant onto the model string");
+      assert.equal(info.getCharacteristic(Characteristic.SerialNumber).value, "AABBCCDDEEFF", "the serial number is the device MAC");
+      assert.equal(info.getCharacteristic(Characteristic.FirmwareRevision).value, "2.3.4", "the firmware revision is the discovered firmware version");
+      assert.equal(info.getCharacteristic(Characteristic.Model).value, "Ratgdo 1.2.3", "the model prefixes the variant onto the model string");
     });
 
     test("renders the Konnected variant model prefix", () => {
@@ -103,10 +103,10 @@ describe("RatgdoAccessory construction", () => {
       assert.equal(accessory.getService(Service.Lightbulb), undefined, "disabling the Light feature option leaves no light service on the accessory");
     });
 
-    /* The light and the automation dimmer are both Lightbulb services, the light without a subtype and the dimmer with one. HAP refuses a subtype-less service
-     * beside a same-type subtyped one, and the accessory double refuses the same way, so a fresh accessory constructs only when the light is acquired first.
+    /* The light and the automation dimmer are both Lightbulb services, the light without a subtype and the dimmer with one. A fresh accessory with the dimmer
+     * enabled constructs with both Lightbulbs, the light's ahead of the dimmer's.
      */
-    test("is acquired ahead of the automation dimmer, so a fresh accessory with the dimmer enabled carries both", () => {
+    test("sits ahead of the automation dimmer on a fresh accessory with the dimmer enabled, which carries both", () => {
 
       const { accessory } = buildRatgdoAccessory({ userOptions: ["Enable.Opener.Dimmer"] });
       const lightIndex = accessory.services.findIndex((service) => (service.type === Service.Lightbulb) && (service.subtype === undefined));
@@ -115,7 +115,40 @@ describe("RatgdoAccessory construction", () => {
 
       assert.notEqual(lightIndex, -1, "the fresh accessory carries the light's own Lightbulb, with no subtype");
       assert.notEqual(dimmerIndex, -1, "the fresh accessory carries the dimmer's subtyped Lightbulb");
-      assert.ok(lightIndex < dimmerIndex, "the light's Lightbulb is added before the dimmer's, the only order HAP accepts on a fresh accessory");
+      assert.ok(lightIndex < dimmerIndex, "the light's Lightbulb sits ahead of the dimmer's on the fresh accessory");
+    });
+
+    // configureDevice acquires the light before the dimmer, so a fresh accessory takes the light through the library's plain add. A dimmer acquired first would
+    // already be on the accessory when the light joins, and the library would detach and re-add it to make room, which is the detach this row counts.
+    test("goes on a fresh accessory with the dimmer enabled without detaching any service", (t) => {
+
+      const accessory = makeTestAccessory();
+      const removeService = t.mock.method(accessory, "removeService");
+
+      buildRatgdoAccessory({ accessory, userOptions: ["Enable.Opener.Dimmer"] });
+
+      assert.equal(removeService.mock.callCount(), 0, "constructing a fresh accessory with the dimmer enabled detaches no service");
+    });
+
+    /* An accessory restored from the cache can carry the dimmer's subtyped Lightbulb without the light's. The library makes room for the light by detaching the
+     * dimmer, adding the light, and re-adding the same dimmer instance, so construction succeeds with the light's Lightbulb ahead of the dimmer's and the dimmer on
+     * the accessory is the one the cache handed back rather than a newly created one.
+     */
+    test("joins a cached accessory that carries only the automation dimmer, ahead of the same dimmer instance", () => {
+
+      const accessory = makeTestAccessory();
+      const dimmer = accessory.addService(Service.Lightbulb, accessory.displayName, RatgdoService.DIMMER_OPENER_AUTOMATION);
+
+      buildRatgdoAccessory({ accessory, userOptions: ["Enable.Opener.Dimmer"] });
+
+      const lightIndex = accessory.services.findIndex((service) => (service.type === Service.Lightbulb) && (service.subtype === undefined));
+      const dimmerIndex = accessory.services.findIndex((service) => (service.type === Service.Lightbulb) &&
+        (service.subtype === RatgdoService.DIMMER_OPENER_AUTOMATION));
+
+      assert.equal(accessory.getServiceById(Service.Lightbulb, RatgdoService.DIMMER_OPENER_AUTOMATION), dimmer,
+        "the dimmer on the constructed accessory is the instance the cache handed back, not a newly created one");
+      assert.notEqual(lightIndex, -1, "the cached accessory gains the light's own Lightbulb, with no subtype");
+      assert.ok(lightIndex < dimmerIndex, "the light's Lightbulb sits ahead of the dimmer's on the cached accessory");
     });
 
     // The light's presence gate matches a Lightbulb by type and subtype together, so turning the light off finds no light to remove and leaves the dimmer's

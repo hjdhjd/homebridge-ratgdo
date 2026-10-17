@@ -130,7 +130,7 @@ describe("RatgdoAccessory.updateState() cover events", () => {
 
       clock.advance(RATGDO_OCCUPANCY_DURATION * 1000);
 
-      assert.equal(occupancy?.getCharacteristic(Characteristic.OccupancyDetected).value, true,
+      assert.equal(occupancy.getCharacteristic(Characteristic.OccupancyDetected).value, true,
         "the OccupancyDetected characteristic is raised once the door has been continuously open for the configured duration");
       assert.equal(await mqtt?.invokeGet("dooropenoccupancy" + MQTT_GET_SUFFIX), "true", "the door-open occupancy status flips true and the MQTT getter reflects it");
       assert.ok(mqtt?.published.some((entry) => entry.topic.endsWith("dooropenoccupancy") && (entry.payload === "true")),
@@ -184,12 +184,12 @@ describe("RatgdoAccessory.updateState() cover events", () => {
       ratgdo.updateState(coverEvent("cover-door", "IDLE", "OPEN", 1));
 
       assert.equal(dimmer?.getCharacteristic(Characteristic.Brightness).value, 100, "a fully-open door drives the dimmer brightness to 100 percent");
-      assert.equal(dimmer?.getCharacteristic(Characteristic.On).value, true, "any non-zero door position turns the automation dimmer on");
+      assert.equal(dimmer.getCharacteristic(Characteristic.On).value, true, "any non-zero door position turns the automation dimmer on");
 
       ratgdo.updateState(coverEvent("cover-door", "IDLE", "CLOSED", 0));
 
-      assert.equal(dimmer?.getCharacteristic(Characteristic.Brightness).value, 0, "a closed door drives the dimmer brightness to 0 percent");
-      assert.equal(dimmer?.getCharacteristic(Characteristic.On).value, false, "a zero door position turns the automation dimmer off");
+      assert.equal(dimmer.getCharacteristic(Characteristic.Brightness).value, 0, "a closed door drives the dimmer brightness to 0 percent");
+      assert.equal(dimmer.getCharacteristic(Characteristic.On).value, false, "a zero door position turns the automation dimmer off");
     });
 
     test("updates the automation opener switch On to track the door state", () => {
@@ -203,7 +203,7 @@ describe("RatgdoAccessory.updateState() cover events", () => {
 
       ratgdo.updateState(coverEvent("cover-door", "IDLE", "CLOSED", 0));
 
-      assert.equal(automationSwitch?.getCharacteristic(Characteristic.On).value, false, "a closed door turns the automation opener switch off");
+      assert.equal(automationSwitch.getCharacteristic(Characteristic.On).value, false, "a closed door turns the automation opener switch off");
     });
   });
 

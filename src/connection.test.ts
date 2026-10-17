@@ -8,9 +8,10 @@
  */
 import { AuthenticationError, EncryptionKeyInvalidError, EncryptionKeyMissingError, EncryptionRequiredError, NegotiationFailedError,
   entityId } from "esphome-client";
+import type { ConnectionOutcome, EncryptionKeyLookup, ManualConnectionOutcome, OpenConnectionOptions, OpenEspHomeClient,
+  OpenManualConnectionOptions } from "./connection.ts";
 import { DeviceIdentityError, applyDeviceInfo, captureInitialState, isEncryptionError, openConnection, openManualConnection } from "./connection.ts";
 import type { DeviceInfo, EntityId, NoiseServerHello, TelemetryEvent } from "esphome-client";
-import type { EncryptionKeyLookup, OpenEspHomeClient } from "./connection.ts";
 import { RATGDO_ENTITIES, idFor, ratgdoInitialStateEntityIds } from "./entities.ts";
 import { TestEspHomeClient, asEspHomeClient, makeCoverEvent, makeFakeOpenClient, makeLightEvent, makeTelemetry, makeTestDevice, openThroughHello,
   resolverOf } from "./testing.helpers.ts";
@@ -20,7 +21,28 @@ import type { Nullable } from "homebridge-plugin-utils";
 import type { RatgdoEntityRef } from "./entities.ts";
 import { RatgdoVariant } from "./types.ts";
 import type { RecordedOpenOptions } from "./testing.helpers.ts";
+import type { TestLogEntry } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
+
+// What the connection helpers in the suites below hand back: each call's outcome beside the capturing log's entries, and for a recorded attempt the factory as well.
+interface ConnectionAttempt {
+
+  entries: readonly TestLogEntry[];
+  result: ConnectionOutcome;
+}
+
+interface ManualConnectionAttempt {
+
+  entries: readonly TestLogEntry[];
+  result: ManualConnectionOutcome;
+}
+
+interface RecordedManualAttempt {
+
+  entries: readonly TestLogEntry[];
+  openClient: ReturnType<typeof makeFakeOpenClient>;
+  outcome: ManualConnectionOutcome;
+}
 
 describe("captureInitialState", () => {
 
@@ -127,7 +149,7 @@ describe("openConnection", () => {
    * words - the key fault, the negotiated version, the socket error - and a match confined to the sentence would pass while the plugin handed the user a diagnostic
    * naming the wrong fault.
    */
-  const run = async (openClient: ReturnType<typeof makeFakeOpenClient>, overrides: Partial<Parameters<typeof openConnection>[0]> = {}) => {
+  const run = async (openClient: ReturnType<typeof makeFakeOpenClient>, overrides: Partial<OpenConnectionOptions> = {}): Promise<ConnectionAttempt> => {
 
     const log = capturingLog();
     const result = await openConnection({ expected: [coverId], host: "192.0.2.10", keyFor: () => undefined, log, mac: "AABBCCDDEEFF", openClient,
@@ -155,9 +177,9 @@ describe("openConnection", () => {
     // that cancels the call.
     assert.equal(openClient.calls.length, 1, "openConnection invokes the factory exactly once");
     assert.equal(openClient.calls[0]?.clientId, "homebridge-ratgdo", "the static clientId is forwarded to the factory");
-    assert.equal(openClient.calls[0]?.host, "192.0.2.10", "the host is forwarded to the factory");
+    assert.equal(openClient.calls[0].host, "192.0.2.10", "the host is forwarded to the factory");
     assert.equal(resolverOf(openClient.calls[0])({}), "test-psk", "the resolver the factory received answers the caller's key for this device");
-    assert.equal(openClient.calls[0]?.signal, shutdownSignal, "the caller's shutdown signal reaches the factory by reference, so an abort cancels the call itself");
+    assert.equal(openClient.calls[0].signal, shutdownSignal, "the caller's shutdown signal reaches the factory by reference, so an abort cancels the call itself");
   });
 
   test("encryption error (mismatched key): returns the encryption-invalid outcome and logs the encryption-configuration diagnostic", async () => {
@@ -308,7 +330,7 @@ describe("openManualConnection", () => {
   };
 
   // Dial the fixed host this suite uses against an injected client or error, returning the capturing log's entries and the recorded factory alongside the outcome.
-  const dial = async (result: Error | TestEspHomeClient, overrides: Partial<Parameters<typeof openManualConnection>[0]> = {}) => {
+  const dial = async (result: Error | TestEspHomeClient, overrides: Partial<OpenManualConnectionOptions> = {}): Promise<RecordedManualAttempt> => {
 
     const log = capturingLog();
     const openClient = makeFakeOpenClient(result);
@@ -465,7 +487,7 @@ describe("the key rule and the identity checks", () => {
     entities: [], snapshot: new Map() });
 
   // Open a discovered device's connection for MAC, through the given factory and key store.
-  const discover = async (openClient: ReturnType<typeof makeFakeOpenClient>, keyFor: EncryptionKeyLookup) => {
+  const discover = async (openClient: ReturnType<typeof makeFakeOpenClient>, keyFor: EncryptionKeyLookup): Promise<ConnectionAttempt> => {
 
     const log = capturingLog();
     const result = await openConnection({ expected: [], host: "192.0.2.10", keyFor, log, mac: MAC, openClient, shutdownSignal: new AbortController().signal });
@@ -474,7 +496,7 @@ describe("the key rule and the identity checks", () => {
   };
 
   // Open a listed address's connection, through the given factory and key store.
-  const dialAddress = async (openClient: ReturnType<typeof makeFakeOpenClient>, keyFor: EncryptionKeyLookup) => {
+  const dialAddress = async (openClient: ReturnType<typeof makeFakeOpenClient>, keyFor: EncryptionKeyLookup): Promise<ManualConnectionAttempt> => {
 
     const log = capturingLog();
     const result = await openManualConnection({ host: "192.0.2.10", keyFor, log, openClient, shutdownSignal: new AbortController().signal, timeoutSeconds: 0.05 });

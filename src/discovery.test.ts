@@ -57,7 +57,7 @@ describe("parseRatgdoService", () => {
       const result = parseRatgdoService({ ...makeRatgdoService(ratgdoTxt), addresses: [...advertised] });
 
       assert.deepEqual(result?.addresses, advertised, "every advertised address is carried, in the order the browser listed them, the zoned one included");
-      assert.equal(result?.address, "2001:db8::1", "while the address actually dialed is still the pick out of that same list");
+      assert.equal(result.address, "2001:db8::1", "while the address actually dialed is still the pick out of that same list");
     });
   });
 
@@ -68,7 +68,7 @@ describe("parseRatgdoService", () => {
       const result = parseRatgdoService(makeRatgdoService({ ...ratgdoTxt, mac: "aAbBcCdDeEfF" }));
 
       assert.equal(result?.macColon, "AA:BB:CC:DD:EE:FF", "the MAC is uppercased and colon-delimited for HomeKit's UUID generator and the dedup set");
-      assert.equal(result?.strippedMac, "AABBCCDDEEFF", "the bare-hex form strips the colons for device.mac, feature-option keys, and MQTT topics");
+      assert.equal(result.strippedMac, "AABBCCDDEEFF", "the bare-hex form strips the colons for device.mac, feature-option keys, and MQTT topics");
     });
   });
 
@@ -192,7 +192,7 @@ describe("classifyDeviceInfo", () => {
       const bareHex = classifyDeviceInfo({ ...ratgdoInfo, macAddress: "aabbccddeeff" }, DIALED);
 
       assert.equal(colons?.macColon, "AA:BB:CC:DD:EE:FF", "a colon-delimited wire MAC keeps its colons and is uppercased");
-      assert.equal(colons?.strippedMac, "AABBCCDDEEFF", "and yields the bare-hex form downstream consumes");
+      assert.equal(colons.strippedMac, "AABBCCDDEEFF", "and yields the bare-hex form downstream consumes");
       assert.deepEqual(bareHex, colons, "a bare-hex wire MAC naming the same device derives the same identity, colons and all");
     });
 
@@ -209,7 +209,7 @@ describe("classifyDeviceInfo", () => {
       const result = classifyDeviceInfo(ratgdoInfo, "garage.local");
 
       assert.equal(result?.address, "garage.local", "the address that answered is the address this identity says to dial");
-      assert.deepEqual(result?.addresses, ["garage.local"], "and it stands in for the advertisement, so a membership test against it answers true rather than false");
+      assert.deepEqual(result.addresses, ["garage.local"], "and it stands in for the advertisement, so a membership test against it answers true rather than false");
     });
 
     test("the project version becomes the model and an absent one leaves it undefined", () => {

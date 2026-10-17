@@ -188,7 +188,8 @@ describe("runManualAddress", () => {
    * a script of outcomes. Every attempt writes the same error line through the log it was handed, and the level each attempt's line reaches the capturing log at is
    * how the demotion is observed.
    */
-  const harness = (script: ManualDialOutcome[], options: { served?: () => boolean } = {}) => {
+  const harness = (script: ManualDialOutcome[], options: { served?: () => boolean } = {}): { clock: TestClock; dialed: string[]; lifetime: AbortController;
+    log: CapturingLog; loop: Promise<void>; pause: WakeableWait; } => {
 
     const clock = new TestClock();
     const lifetime = new AbortController();
