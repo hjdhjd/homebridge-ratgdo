@@ -25,21 +25,18 @@
  * errors - crosses the bridge as ESPHome-free, variant-free, entity-id-free data, so the row vocabulary and the label choices stay ratgdo's while the ESPHome details
  * never reach the wire.
  */
+import type { Clock, HomebridgePluginLogging, MdnsBrowserFactory, MdnsDiscovery, MdnsDiscoveryEvent, Nullable, StatusErrorReason, StatusEvent,
+  StatusRow } from "homebridge-plugin-utils";
 import type { EntityId, EspHomeClient, LifecycleEvent, TelemetryEvent } from "esphome-client";
-import type { HomebridgePluginLogging, Nullable, StatusErrorReason, StatusEvent, StatusRow } from "homebridge-plugin-utils";
-import { RATGDO_AUTODISCOVERY_TYPES, RATGDO_AUTODISCOVERY_WARMUP_OFFSETS, RATGDO_MOTION_DURATION, RATGDO_WEBUI_DISCOVERY_TIMEOUT,
-  RATGDO_WEBUI_MDNS_REQUERY_INTERVAL } from "./settings.ts";
+import { HbpuAbortError, TimerRegistry, discoverServices, prefixedLog, superviseLoop, systemClock } from "homebridge-plugin-utils";
 import { RATGDO_ENTITIES, idFor, presentEntityIds, ratgdoInitialStateEntityIds, ratgdoStatusEntityIds } from "./entities.ts";
-import { clearInterval, clearTimeout, setInterval, setTimeout } from "node:timers";
-import { Bonjour } from "bonjour-service";
+import { RATGDO_MDNS_SERVICE_TYPE, RATGDO_MOTION_DURATION, RATGDO_WEBUI_DISCOVERY_TIMEOUT } from "./settings.ts";
+import { isAdvertisedAt, parseRatgdoService } from "./discovery.ts";
 import type { DiscoveredRatgdo } from "./discovery.ts";
 import type { EspHomeEvent } from "./types.ts";
 import type { OpenEspHomeClient } from "./connection.ts";
 import { RatgdoVariant } from "./types.ts";
-import type { Service } from "bonjour-service";
 import { openConnection } from "./connection.ts";
-import { parseRatgdoService } from "./discovery.ts";
-import { prefixedLog } from "homebridge-plugin-utils";
 import { translateTelemetry } from "./protocol/telemetry.ts";
 
 // The onRequest route the warm extension registers - ratgdo's addition to the shared status protocol. It carries the whole warm set (every known device plus its
@@ -58,15 +55,12 @@ export const STATUS_ADDRESSES_ROUTE = "/statusAddresses";
 // union is ratgdo's own, so a new row must extend it here and gains its label and sizer entries at compile time.
 type StatusRowId = "door" | "light" | "lock" | "motion" | "obstruction";
 
-// The injectable mDNS discovery port: given a per-service callback, start browsing and return a stop function. The default implementation wraps bonjour-service; a unit
-// test injects a fake that drives advertisements synchronously and counts its stop calls.
-export type RatgdoServiceBrowser = (onService: (service: Service) => void) => () => void;
-
-/* Construction options for StatusFeed. `browse` and `openClient` default to the real implementations (the default-arg port pattern connection.ts establishes), and
- * `discoveryTimeoutSeconds` defaults to RATGDO_WEBUI_DISCOVERY_TIMEOUT; a unit test overrides all three. `push` is the raw bridge sink - StatusFeed guards every push on
- * session identity internally, so `push` itself is unconditional.
+/* Construction options for StatusFeed. `browserFactory`, `clock`, and `openClient` default to the real implementations (the default-arg port pattern connection.ts
+ * establishes), and `discoveryTimeoutSeconds` defaults to RATGDO_WEBUI_DISCOVERY_TIMEOUT; a unit test overrides all four. `push` is the raw bridge sink - StatusFeed
+ * guards every push on session identity internally, so `push` itself is unconditional.
  *
- * @property browse                  - The mDNS discovery port. Defaults to the real bonjour-service browser.
+ * @property browserFactory          - The library's browser boundary. A test injects TestMdnsBrowserFactory; absent, the library builds its own browser.
+ * @property clock                   - The time source the not-found timers and the browser arm on. Defaults to systemClock; a test injects TestClock.
  * @property discoveryTimeoutSeconds - Seconds a warmed mac waits for mDNS discovery before it is classified not-found. Defaults to RATGDO_WEBUI_DISCOVERY_TIMEOUT.
  * @property log                     - The logging adapter client-internal and feed-internal messages route through.
  * @property openClient              - The ESPHome client-factory port, threaded straight into openConnection. Defaults to the real factory there.
@@ -74,7 +68,8 @@ export type RatgdoServiceBrowser = (onService: (service: Service) => void) => ()
  */
 export interface StatusFeedOptions {
 
-  browse?: RatgdoServiceBrowser;
+  browserFactory?: MdnsBrowserFactory;
+  clock?: Clock;
   discoveryTimeoutSeconds?: number;
   log: HomebridgePluginLogging;
   openClient?: OpenEspHomeClient;
@@ -91,23 +86,27 @@ export interface WarmDeviceEntry {
 }
 
 /* The per-device session record, keyed in `#sessions` by stripped mac. The record carries its own mac so the identity-guarded sink is self-describing: a push through
- * `#pushForSession(session, event)` lands only while `this.#sessions.get(session.mac) === session`. `client` is null until the connection opens; `controller` cancels
- * every in-flight step; `encryptedTransport` records the negotiated transport captured once at connect resolution - true when the client negotiated encryption - and
- * backs the key diff in place of the live isEncrypted getter, which reads false during the client's own reconnect windows; `listeners` holds the retained
- * telemetry/lifecycle Disposables; `online` tracks connect and disconnect through the lifecycle listener; `rowMap` is the entity-id-to-row-id map computed at connect
- * resolution and retained because view() rebuilds a snapshot from it long after the connect; `psk` records the key the diff last reconciled - the key the connection was
- * opened with, or the key a healthy plaintext session adopted in place; `token` is the session's monotonic identity.
+ * `#pushForSession(session, event)` lands only while `this.#sessions.get(session.mac) === session`. `address` is the address this session's connect dialed, which is
+ * what lets the discovery path tell a device that has moved from one whose advertised set merely shifted underneath it - `#devices` holds the advertised truth and the
+ * session holds the dialed one, and the address projection reads the dialed one because that is where the panel's connection is; `client` is null until the connection
+ * opens; `controller` cancels every in-flight step; `encryptedTransport` records the negotiated transport captured once at connect resolution - true when the client
+ * negotiated encryption - and backs the key diff in place of the live isEncrypted getter, which reads false during the client's own reconnect windows; `online`
+ * tracks connect and disconnect through the lifecycle listener; `rowMap` is the entity-id-to-row-id map computed at connect resolution and retained because view()
+ * rebuilds a snapshot from it long after the connect; `psk` records the key the diff last reconciled - the key the connection was opened with, or the key a healthy
+ * plaintext session adopted in place; `stack` holds the client and then each retained listener, so teardown releases the listeners before the client's disconnect;
+ * `token` is the session's monotonic identity.
  */
 interface DeviceSession {
 
+  address: string;
   client: Nullable<EspHomeClient>;
   controller: AbortController;
   encryptedTransport: boolean;
-  listeners: Disposable[];
   mac: string;
   online: boolean;
   psk: string | undefined;
   rowMap: Map<EntityId, StatusRowId>;
+  stack: DisposableStack;
   token: number;
 }
 
@@ -251,60 +250,6 @@ const STATUS_ROW_SIZERS: Record<StatusRowId, string> = {
   obstruction: "Obstructed"
 };
 
-/* The default mDNS discovery port. A single mDNS query can lose its packet or be answered slowly, so the browser opens with a warmup burst before settling into a
- * steady-state re-query. The burst reuses RATGDO_AUTODISCOVERY_WARMUP_OFFSETS, the RFC 6762 §5.2 doubling-interval cadence the platform's own discovery schedule fires,
- * so this browser and the platform share one source of mDNS timing truth rather than a second set of numbers. Offset zero is the query bonjour-service issues at find()
- * time, so only the non-zero offsets schedule follow-ups; the steady-state RATGDO_WEBUI_MDNS_REQUERY_INTERVAL then carries the long tail while the modal is open. Every
- * timer is unref'd so none keeps the child process alive on its own, and the returned stop function clears the warmup timers alongside the interval, stops each browser,
- * and destroys the Bonjour instance.
- */
-const defaultBrowse: RatgdoServiceBrowser = (onService) => {
-
-  const bonjour = new Bonjour();
-  const browsers = RATGDO_AUTODISCOVERY_TYPES.map((type) => bonjour.find({ type }, onService));
-
-  // Re-issue every browser's mDNS query. Shared by the warmup burst and the steady-state interval, so the two cadences drive one query action.
-  const requery = (): void => {
-
-    for(const browser of browsers) {
-
-      browser.update();
-    }
-  };
-
-  // The warmup burst: one follow-up query at each non-zero warmup offset, catching a device whose responder missed the initial find() query. Offset zero is that initial
-  // query itself, so it schedules no follow-up here. Each timer is unref'd and retained so the stop function can clear it.
-  const warmupTimers = RATGDO_AUTODISCOVERY_WARMUP_OFFSETS.filter((offset) => offset > 0).map((offset) => {
-
-    const timer = setTimeout(requery, offset * 1000);
-
-    timer.unref();
-
-    return timer;
-  });
-
-  const interval = setInterval(requery, RATGDO_WEBUI_MDNS_REQUERY_INTERVAL * 1000);
-
-  interval.unref();
-
-  return (): void => {
-
-    clearInterval(interval);
-
-    for(const timer of warmupTimers) {
-
-      clearTimeout(timer);
-    }
-
-    for(const browser of browsers) {
-
-      browser.stop();
-    }
-
-    bonjour.destroy();
-  };
-};
-
 /* Narrow the untrusted warm-request body at the bridge boundary. The body must be an object carrying a `devices` array or the whole request is null. Each entry is
  * narrowed individually - a non-empty string mac is required, a psk is carried only when it is a non-empty string - and a malformed entry is dropped without invalidating
  * the request, because one bad device must not blank the whole panel. An empty devices array is valid: it is how the frontend says "the sidebar knows nothing". This
@@ -349,32 +294,42 @@ export function narrowStatusWarmRequest(body: unknown): Nullable<{ devices: Warm
 }
 
 /* The status connection pool. It holds one live or in-flight session per warmed, discovered device and switches the panel's view between them without teardown. Teardown
- * happens on a differing effective key - which reconnects every session except a healthy, connected, negotiated-plaintext one, that instead adopts the key in place - and
- * on disposal; an auth-failed device reconnects only when the key changes. Every push routes through the per-mac identity guard, so a superseded session's late
- * continuation reaches no panel. The pool is disposable; disposal stops the browser, clears the warm set and every timer, and tears down every session.
+ * happens on a differing effective key - which reconnects every session except a healthy, connected, negotiated-plaintext one, that instead adopts the key in place - on
+ * an advertisement that moves a warmed device to a different address, which re-dials the session at the new one so the panel follows the device exactly as the platform
+ * does, and on disposal; an auth-failed device reconnects only when the key changes. Every push routes through the per-mac identity guard, so a superseded session's late
+ * continuation reaches no panel. The pool is disposable; disposal ends the discovery stream, clears the warm set and every timer, and tears down every session.
  */
-export class StatusFeed {
+export class StatusFeed implements Disposable {
 
-  readonly #browse: RatgdoServiceBrowser;
+  readonly #browserFactory: MdnsBrowserFactory | undefined;
+  readonly #clock: Clock;
   readonly #devices = new Map<string, DiscoveredRatgdo>();
+  // The live discovery while one runs, and null between them: a null field is what makes the next warm's startDiscovery open a new one.
+  #discovery: Nullable<MdnsDiscovery<DiscoveredRatgdo>> = null;
   readonly #discoveryTimeoutSeconds: number;
-  readonly #discoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // The pool's own lifetime, and the signal every discovery it opens is bound to. Aborted exactly once, at disposal.
+  readonly #lifetime = new AbortController();
   readonly #log: HomebridgePluginLogging;
   readonly #openClient: OpenEspHomeClient | undefined;
   readonly #outcomes = new Map<string, { psk: string | undefined; reason: StatusErrorReason }>();
   readonly #push: (event: StatusEvent) => void;
   readonly #sessions = new Map<string, DeviceSession>();
-  #stopBrowser: Nullable<() => void> = null;
+  readonly #timers: TimerRegistry;
   #tokenCounter = 0;
   #warmKeys = new Map<string, string | undefined>();
 
-  public constructor({ browse = defaultBrowse, discoveryTimeoutSeconds = RATGDO_WEBUI_DISCOVERY_TIMEOUT, log, openClient, push }: StatusFeedOptions) {
+  public constructor({ browserFactory, clock = systemClock, discoveryTimeoutSeconds = RATGDO_WEBUI_DISCOVERY_TIMEOUT, log, openClient, push }: StatusFeedOptions) {
 
-    this.#browse = browse;
+    this.#browserFactory = browserFactory;
+    this.#clock = clock;
     this.#discoveryTimeoutSeconds = discoveryTimeoutSeconds;
     this.#log = log;
     this.#openClient = openClient;
     this.#push = push;
+
+    // The not-found timers are unref'd as a matter of this owner's policy: the custom-UI child process must be free to exit when the settings modal closes, and a
+    // pending per-mac budget is never a reason to hold it open.
+    this.#timers = new TimerRegistry({ clock, unref: true });
   }
 
   /* Apply a warm set: the whole sidebar's device list plus each device's effective encryption key. This is the pool's one policy chokepoint. The warm set replaces
@@ -396,16 +351,15 @@ export class StatusFeed {
 
       if(!this.#warmKeys.has(mac)) {
 
-        this.#clearDiscoveryTimer(mac);
+        this.#timers.clear(mac);
       }
     }
 
-    // Re-ensure the discovery browser before this warm applies. startDiscovery is a no-op while the browser runs, so a healthy browser pays nothing; a browser whose
-    // construction-time start failed is retried here at the warm cadence rather than staying dead for the child process's life, and each failed retry logs - the live
-    // signal an operator troubleshoots from. The start sits after the wholesale #warmKeys replacement, so a browse port that delivers callbacks synchronously from the
-    // start evaluates them against the set this warm is applying - #onService's connect decision reads #warmKeys live - never against the outgoing set. A discovery
-    // that lands after a pending not-found timer has fired self-heals on arrival: #onService's connect trigger fires for the still-warmed mac and #connectDevice's
-    // synchronous prefix clears the stored outcome before its first await, and view()'s stored-outcome retry covers a mac that re-enters the warm set later.
+    // Re-ensure the discovery stream before this warm applies. startDiscovery is a no-op while one runs, so a healthy stream pays nothing; a browser whose
+    // construction failed, or one that ended after losing its sockets, is replaced here at the warm cadence rather than leaving the pool blind for the child
+    // process's life, and each failed attempt logs - the live signal an operator troubleshoots from. A discovery that lands after a pending not-found timer has
+    // fired self-heals on arrival: #onDiscovery's connect trigger fires for the still-warmed mac and #connectDevice's synchronous prefix clears the stored outcome
+    // before its first await, and view()'s stored-outcome retry covers a mac that re-enters the warm set later.
     this.startDiscovery();
 
     for(const entry of request.devices) {
@@ -429,7 +383,7 @@ export class StatusFeed {
           }
 
           void this.#connectDevice(entry.mac);
-        } else if(!this.#discoveryTimers.has(entry.mac)) {
+        } else if(!this.#timers.has(entry.mac)) {
 
           this.#armDiscoveryTimer(entry.mac);
         }
@@ -505,9 +459,11 @@ export class StatusFeed {
   }
 
   /* Project the discovered set into a plain mac-to-address object for the identity strip. Each discovered device's stripped mac - the very key the pushes carry as
-   * serialNumber, so the frontend joins on device.serialNumber with no translation - maps to that device's live advertised address, the address the status connection
-   * actually dials. A pure synchronous read of #devices: it changes no session state and emits no wire event, so the panel can pull it at any time without perturbing a
-   * connection. The result is frozen and freshly built per call, so a caller that mutates one read can corrupt neither the pool's discovery memory nor a later read.
+   * serialNumber, so the frontend joins on device.serialNumber with no translation - maps to the address the status connection is actually on: the one this device's
+   * session dialed, and for a device the pool holds no session for, the one its advertisement would be dialed at. The two differ whenever a device advertises a
+   * higher-ranked address than the one its live connection was opened at, and the panel's "IP Address" means where the connection is. A pure synchronous read of
+   * #devices and #sessions: it changes no session state and emits no wire event, so the panel can pull it at any time without perturbing a connection. The result is
+   * frozen and freshly built per call, so a caller that mutates one read can corrupt neither the pool's discovery memory nor a later read.
    */
   public addresses(): Readonly<Record<string, string>> {
 
@@ -515,17 +471,17 @@ export class StatusFeed {
 
     for(const [ mac, device ] of this.#devices) {
 
-      projection[mac] = device.address;
+      projection[mac] = this.#sessions.get(mac)?.address ?? device.address;
     }
 
     return Object.freeze(projection);
   }
 
-  /* Start mDNS discovery, retaining the browser. The server adapter calls this as the custom-UI process spawns, so discovery runs while the settings page is still in
-   * front of the user and the first warm resolves discovered devices from a warm address map; warm() calls it again on every warm, so a spawn-time start that failed is
-   * retried at the warm cadence rather than leaving discovery dead for the child process's life. Failure is contained here - a browser that cannot start must not take
-   * down the process, whose other request handlers are unrelated to status - and every failed retry logs, the live signal an operator troubleshoots from.
-   * #ensureBrowser's early return makes the call a no-op once the browser runs, so the warm-cadence retries cost nothing on a healthy browser.
+  /* Start mDNS discovery, retaining the stream. The server adapter calls this as the custom-UI process spawns, so discovery runs while the settings page is still in
+   * front of the user and the first warm resolves discovered devices from a warm address map; warm() calls it again on every warm, so an attempt that failed is
+   * retried at the warm cadence rather than leaving discovery dead for the child process's life. Failure is contained here - a browser that cannot be built must not
+   * take down the process, whose other request handlers are unrelated to status - and every failed attempt logs, the live signal an operator troubleshoots from.
+   * #ensureBrowser's early return makes the call a no-op while a stream runs, so the warm-cadence retries cost nothing on a healthy one.
    */
   public startDiscovery(): void {
 
@@ -538,24 +494,19 @@ export class StatusFeed {
     }
   }
 
-  /* Dispose the pool. Defense in depth: stop the browser and clear the warm set FIRST, so even a discovery callback already queued finds nothing to connect; then clear
-   * every not-found timer, tear down every session over a snapshot of the keys, and clear every map. Safe to call more than once - the browser stop function is nulled
-   * after it runs, and clearing already-empty maps is harmless.
+  /* Dispose the pool. Defense in depth: abort the pool's lifetime and clear the warm set FIRST, so even a discovery event already queued finds nothing to connect by
+   * the time it drains; then clear every not-found timer, tear down every session, and clear every map. Disposal ends the pool for good: a later startDiscovery opens
+   * a browser on the aborted lifetime, whose stream ends at once. Safe to call more than once - a second abort of an aborted controller does nothing, and the maps are
+   * already empty. The session walk reads the map's own iterator rather than a copy, which tolerates the deletion of the entry it is standing on.
    */
   public [Symbol.dispose](): void {
 
-    this.#stopBrowser?.();
-    this.#stopBrowser = null;
+    this.#lifetime.abort(new HbpuAbortError("shutdown"));
+    this.#discovery = null;
     this.#warmKeys.clear();
+    this.#timers.clearAll();
 
-    for(const timer of this.#discoveryTimers.values()) {
-
-      clearTimeout(timer);
-    }
-
-    this.#discoveryTimers.clear();
-
-    for(const mac of [...this.#sessions.keys()]) {
+    for(const mac of this.#sessions.keys()) {
 
       this.#teardownSession(mac);
     }
@@ -594,15 +545,15 @@ export class StatusFeed {
     // The key backs both the session record and the openConnection argument from this one read, so a later warm-set replacement cannot make the two disagree for this
     // connect.
     const psk = this.#warmKeys.get(mac);
-    const session: DeviceSession = { client: null, controller: new AbortController(), encryptedTransport: false, listeners: [], mac, online: false, psk,
-      rowMap: new Map(), token: ++this.#tokenCounter };
+    const session: DeviceSession = { address: device.address, client: null, controller: new AbortController(), encryptedTransport: false, mac, online: false, psk,
+      rowMap: new Map(), stack: new DisposableStack(), token: ++this.#tokenCounter };
 
     try {
 
       // A connect is starting: clear any stale outcome memory and any pending not-found timer, then install the session synchronously so a concurrent advertisement or
       // warm sees a live session and does not start a second connect. This runs inside the try so the whole body - including the connecting push - stays total.
       this.#outcomes.delete(mac);
-      this.#clearDiscoveryTimer(mac);
+      this.#timers.clear(mac);
       this.#sessions.set(mac, session);
       this.#pushForSession(session, { kind: "connecting", serialNumber: mac, session: session.token });
 
@@ -676,10 +627,13 @@ export class StatusFeed {
         }
       }
 
-      // Register the session's listeners, retaining each Disposable so teardown detaches them. The telemetry listener translates each event and pushes a row only for a
-      // present panel entity; the lifecycle listener - the canonical typed connect/disconnect channel - drives the availability row. After a reconnect cycle the device
-      // re-bursts full state through the retained telemetry listener, so rows self-heal without a fresh snapshot.
-      session.listeners.push(
+      /* Register the session's listeners onto its stack. The client goes on FIRST and each listener after it, so teardown releases the listeners before the client's
+       * disconnect and an intentional reconnect never pushes a spurious "Disconnected" availability event. The telemetry listener translates each event and pushes a
+       * row only for a present panel entity; the lifecycle listener - the canonical typed connect/disconnect channel - drives the availability row. After a reconnect
+       * cycle the device re-bursts full state through the retained telemetry listener, so rows self-heal without a fresh snapshot.
+       */
+      session.stack.use(client);
+      session.stack.use(
 
         client.on("telemetry", (data: TelemetryEvent): void => {
 
@@ -694,7 +648,10 @@ export class StatusFeed {
           }
 
           this.#pushForSession(session, { kind: "row", row: { id: rowId, value: mapRowValue(rowId, event) }, serialNumber: session.mac, session: session.token });
-        }),
+        }));
+
+      session.stack.use(
+
         client.on("lifecycle", (lifecycle: LifecycleEvent): void => {
 
           switch(lifecycle.kind) {
@@ -721,8 +678,7 @@ export class StatusFeed {
               return;
             }
           }
-        })
-      );
+        }));
 
       // Capture the negotiated transport ONCE, here at connect resolution, and mark the session connected. The initial connect fired inside openConnection before this
       // listener was registered, so online is set explicitly here and maintained by the lifecycle listener thereafter. warm()'s key diff reads these two session-tracked
@@ -741,9 +697,10 @@ export class StatusFeed {
     }
   }
 
-  /* Tear down one device's session. Ordering is pinned: abort the controller so every in-flight step unwinds on its identity check, dispose the retained listeners BEFORE
-   * disposing the client - disposing a live client synchronously emits its disconnect through the event bus, and detaching the listeners first means that emission
-   * reaches no handler, so an intentional key-diff reconnect never pushes a spurious "Disconnected" availability event - then remove the session. Safe when absent.
+  /* Tear down one device's session. The order is deliberate: abort the controller so every in-flight step unwinds on its identity check, then dispose the session's
+   * stack, which releases in reverse of the order things went onto it - every listener first, then the client. Disposing a live client synchronously emits its
+   * disconnect through the event bus, and the already-detached listeners mean that emission reaches no handler, so an intentional reconnect never pushes a spurious
+   * "Disconnected" availability event. The session is removed last. Safe when absent.
    */
   #teardownSession(mac: string): void {
 
@@ -755,80 +712,127 @@ export class StatusFeed {
     }
 
     session.controller.abort();
-
-    for(const listener of session.listeners) {
-
-      listener[Symbol.dispose]();
-    }
-
-    session.client?.[Symbol.dispose]();
+    session.stack.dispose();
     this.#sessions.delete(mac);
   }
 
-  // Start the mDNS browser when it is not already running, retaining its stop function. startDiscovery is the sole caller, reached both as the custom-UI process spawns
-  // and on every warm, so a spawn-time start that succeeded has the browser browsing before the first warm arrives while a spawn-time start that failed is retried by
-  // the next warm; the early return makes that warm-cadence retry a no-op once the browser runs. A synchronous throw from the browse port propagates to startDiscovery's
-  // containment.
+  /* Open the discovery stream when one is not already running, and listen to it. startDiscovery is the sole caller, reached both as the custom-UI process spawns and
+   * on every warm, so a spawn-time attempt that succeeded has the pool listening before the first warm arrives while one that failed is retried by the next warm; the
+   * early return makes that warm-cadence retry a no-op while a stream runs. The construction is synchronous, so a factory or option fault propagates to
+   * startDiscovery's containment, and the field is assigned only once it has returned.
+   *
+   * The stream ends rather than throws when the browser loses its last network socket, so the loop's own end is where the feed sees that fault and says so. A
+   * browser that ends on its own leaves the pool with none, and the next warm's startDiscovery builds another - the warm cadence is the retry. `onError` is for a
+   * throw out of the loop body, which would be a defect here, never the browser's end. The field is nulled in the `finally` the moment the loop ends, before the
+   * disposal that follows awaits the sockets, so a warm arriving during that window opens a new stream rather than meeting a dead one; the pool's own abort at
+   * disposal nulls the field first, which makes the `finally` a no-op on that path.
+   */
   #ensureBrowser(): void {
 
-    if(this.#stopBrowser) {
+    if(this.#discovery) {
 
       return;
     }
 
-    this.#stopBrowser = this.#browse((service) => this.#onService(service));
+    const discovery = discoverServices<DiscoveredRatgdo>({ ...(this.#browserFactory === undefined) ? {} : { browserFactory: this.#browserFactory },
+      classify: parseRatgdoService, clock: this.#clock, log: this.#log, serviceType: RATGDO_MDNS_SERVICE_TYPE, signal: this.#lifetime.signal });
+
+    this.#discovery = discovery;
+
+    void superviseLoop({ loop: async (): Promise<void> => {
+
+      await using stream = discovery;
+
+      try {
+
+        for await (const event of stream) {
+
+          this.#onDiscovery(event);
+        }
+
+        if(!this.#lifetime.signal.aborted) {
+
+          this.#log.warn("The mDNS discovery browser stopped because it lost its network sockets; it restarts on the next warm.", discovery.signal.reason);
+        }
+      } finally {
+
+        if(this.#discovery === discovery) {
+
+          this.#discovery = null;
+        }
+      }
+    }, onError: (error: unknown): void => this.#log.error("The mDNS discovery browser failed.", error), signal: this.#lifetime.signal });
   }
 
-  /* Classify one advertised service and record it, keyed by stripped MAC so a later advertisement refreshes a device's address. Discovering a mac clears its pending
-   * not-found timer. When the device is warmed and has no session, start its connect: the synchronous session install in #connectDevice is the double-connect guard, so a
-   * burst of advertisements for the same mac opens exactly one connection.
+  /* Take in one thing the network said about a device, keyed by stripped MAC so a later advertisement refreshes a device's address.
+   *
+   * A warmed device with no session connects: the synchronous session install in #connectDevice is the double-connect guard, so a burst of advertisements for one mac
+   * opens exactly one connection, and that same synchronous prefix clears the mac's not-found timer - the only timer an advertisement can meet, because a timer is
+   * armed only for a warmed mac that holds no session. A warmed device that has stopped advertising the address its live or in-flight session dialed is torn down and
+   * re-dialed at the address the fresh advertisement picks, the same shape warm() uses for a changed key, so the panel follows the device exactly as the platform
+   * does. A re-advertisement that still lists the session's own address is a no-op even when the pick has moved to another of the device's addresses, and a mac
+   * outside the warm set keeps whatever session it holds, which is the warm-set departure rule.
+   *
+   * @param event - The transition the discovery derived.
    */
-  #onService(service: Service): void {
+  #onDiscovery(event: MdnsDiscoveryEvent<DiscoveredRatgdo>): void {
 
-    const discovered = parseRatgdoService(service);
+    switch(event.kind) {
 
-    if(!discovered) {
+      case "found":
+      case "updated": {
 
-      return;
-    }
+        const mac = event.device.strippedMac;
 
-    this.#devices.set(discovered.strippedMac, discovered);
-    this.#clearDiscoveryTimer(discovered.strippedMac);
+        this.#devices.set(mac, event.device);
 
-    if(this.#warmKeys.has(discovered.strippedMac) && !this.#sessions.has(discovered.strippedMac)) {
+        if(!this.#warmKeys.has(mac)) {
 
-      void this.#connectDevice(discovered.strippedMac);
+          return;
+        }
+
+        const session = this.#sessions.get(mac);
+
+        if(!session) {
+
+          void this.#connectDevice(mac);
+
+          return;
+        }
+
+        if(!isAdvertisedAt(event.device, session.address)) {
+
+          this.#teardownSession(mac);
+          void this.#connectDevice(mac);
+        }
+
+        return;
+      }
+
+      case "lost": {
+
+        // The discovery entry stands, so the address projection and any later connect keep the last address the device advertised, and a live session is left alone:
+        // whether a connected device is still there is the ESPHome connection's to report, not an absent advertisement's.
+        return;
+      }
+
+      default: {
+
+        // Compile-time exhaustiveness: a new MdnsDiscoveryEvent kind fails to type-check here until it is handled.
+        event satisfies never;
+
+        return;
+      }
     }
   }
 
   /* Arm a per-mac not-found timer for an undiscovered warmed device. Per-mac rather than one shared timer, because a shared timer re-armed on every warm would let an
-   * unrelated device's key edit defer this device's not-found verdict indefinitely. Clear-before-arm so a caller can arm unconditionally without leaking a prior timer.
-   * The timer is unref'd so it never keeps the child process alive on its own.
+   * unrelated device's key edit defer this device's not-found verdict indefinitely. The registry clears any timer already armed under the key, so a caller can arm
+   * unconditionally without leaking a prior one, and it removes the entry before the callback runs, so the verdict reads `has(mac)` as false for its own timer.
    */
   #armDiscoveryTimer(mac: string): void {
 
-    this.#clearDiscoveryTimer(mac);
-
-    const timer = setTimeout(() => {
-
-      this.#discoveryTimers.delete(mac);
-      this.#onDiscoveryTimeout(mac);
-    }, this.#discoveryTimeoutSeconds * 1000);
-
-    timer.unref();
-    this.#discoveryTimers.set(mac, timer);
-  }
-
-  // Clear and forget a mac's pending not-found timer, if one is counting down. Called on discovery, on a mac leaving the warm set, when a connect starts, and at dispose.
-  #clearDiscoveryTimer(mac: string): void {
-
-    const timer = this.#discoveryTimers.get(mac);
-
-    if(timer !== undefined) {
-
-      clearTimeout(timer);
-      this.#discoveryTimers.delete(mac);
-    }
+    this.#timers.setTimeout(mac, () => this.#onDiscoveryTimeout(mac), this.#discoveryTimeoutSeconds * 1000);
   }
 
   /* Classify a warmed device not-found once its discovery budget elapses. The timer is cleared the instant the device is discovered, so a fired timer means the mac is

@@ -3,12 +3,13 @@
  * types.ts: Interface and type definitions for Ratgdo.
  */
 
-// Ratgdo device settings. Most fields are written once at discovery time and never reassigned, so they carry readonly. The model field is the lone exception: the
-// platform refreshes it on every reconnect (handles firmware upgrades cleanly) so it stays mutable.
+// Ratgdo device settings. The mac, name, and variant are written once at discovery time and never reassigned, so they carry readonly. Three fields stay mutable
+// because the platform rewrites them after construction: address, once a reconnect to an advertised change has actually connected, and firmwareVersion and model,
+// from the connected client's device info on every connect.
 export interface RatgdoDevice {
 
-  readonly address: string;
-  readonly firmwareVersion: string;
+  address: string;
+  firmwareVersion: string;
   readonly mac: string;
   model?: string;
   readonly name: string;
@@ -51,19 +52,6 @@ export const RatgdoVariant = {
 } as const;
 
 export type RatgdoVariant = typeof RatgdoVariant[keyof typeof RatgdoVariant];
-
-/* Parsed mDNS TXT payload for an ESPHome Ratgdo or Konnected device. Fields are snake_case to mirror the wire format exactly so the discovery boundary can read them
- * without bracket notation. All fields are optional because mDNS TXT records vary by firmware version and project type.
- */
-export interface MdnsTxt {
-
-  esphome_version?: string;
-  friendly_name?: string;
-  mac?: string;
-  project_name?: string;
-  project_version?: string;
-  version?: string;
-}
 
 /* Matched entry from RATGDO_AUTODISCOVERY_PROJECTS. The discovery boundary returns one of these whenever a TXT-advertised project_name matches a known pattern, so
  * the variant classification rides through the same .find() call that gates the device into the configuration path.

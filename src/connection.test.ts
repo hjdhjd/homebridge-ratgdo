@@ -1,13 +1,14 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
  * connection.test.ts: Unit tests for the connection layer - captureInitialState's fast / slow / timeout / shutdown paths, openConnection's error taxonomy,
- * and the isEncryptionError predicate. The ESPHome client factory is injected as a fake (makeFakeOpenClient), and the state-capture budget (timeoutSeconds) is
- * injected in fractional seconds (e.g. 0.02) so each wait resolves in milliseconds of real time, driving every branch deterministically without a live device, fake
- * timers, or a fake Homebridge harness.
+ * applyDeviceInfo's identity refresh, and the isEncryptionError predicate. The ESPHome client factory is injected as a fake (makeFakeOpenClient), and the
+ * state-capture budget (timeoutSeconds) is injected in fractional seconds (e.g. 0.02) so each wait resolves in milliseconds of real time, driving every branch
+ * deterministically without a live device, fake timers, or a fake Homebridge harness.
  */
 import { AuthenticationError, EncryptionKeyInvalidError, EncryptionKeyMissingError, EncryptionRequiredError, entityId } from "esphome-client";
-import { TestEspHomeClient, asEspHomeClient, loggedAt, makeCapturingLog, makeCoverEvent, makeFakeOpenClient, makeLightEvent } from "./testing.helpers.ts";
-import { captureInitialState, isEncryptionError, openConnection } from "./connection.ts";
+import { TestEspHomeClient, asEspHomeClient, loggedAt, makeCapturingLog, makeCoverEvent, makeFakeOpenClient, makeLightEvent,
+  makeTestDevice } from "./testing.helpers.ts";
+import { applyDeviceInfo, captureInitialState, isEncryptionError, openConnection } from "./connection.ts";
 import { describe, test } from "node:test";
 import type { EntityId } from "esphome-client";
 import type { OpenEspHomeClient } from "./connection.ts";
@@ -241,6 +242,46 @@ describe("openConnection", () => {
     assert.ok(!result.ok, "a connect cancelled mid-flight by shutdown is abandoned");
     assert.equal(result.reason, "shutdown", "a factory rejection that lands while the shutdown signal is aborted carries the shutdown reason token");
     assert.equal(entries.filter((entry) => entry.level === "error").length, 0, "the silent stand-down branch logs nothing at error level");
+  });
+});
+
+describe("applyDeviceInfo", () => {
+
+  test("refreshes both identity fields from a record carrying both", () => {
+
+    const device = makeTestDevice({ firmwareVersion: "1.0.0", model: "1.0.0" });
+
+    applyDeviceInfo(device, asEspHomeClient(new TestEspHomeClient({ deviceInfo: { esphomeVersion: "2025.1.0", projectVersion: "2.5" } })));
+
+    assert.equal(device.model, "2.5", "the project version becomes the device model");
+    assert.equal(device.firmwareVersion, "2025.1.0", "the ESPHome version becomes the device firmware version");
+  });
+
+  test("leaves a field alone when the record omits its member", () => {
+
+    const modelOnly = makeTestDevice({ firmwareVersion: "1.0.0", model: "1.0.0" });
+
+    applyDeviceInfo(modelOnly, asEspHomeClient(new TestEspHomeClient({ deviceInfo: { projectVersion: "2.5" } })));
+
+    assert.equal(modelOnly.model, "2.5", "the advertised member is applied");
+    assert.equal(modelOnly.firmwareVersion, "1.0.0", "the omitted member leaves discovery's seed standing rather than blanking it");
+
+    const firmwareOnly = makeTestDevice({ firmwareVersion: "1.0.0", model: "1.0.0" });
+
+    applyDeviceInfo(firmwareOnly, asEspHomeClient(new TestEspHomeClient({ deviceInfo: { esphomeVersion: "2025.1.0" } })));
+
+    assert.equal(firmwareOnly.firmwareVersion, "2025.1.0", "the advertised member is applied");
+    assert.equal(firmwareOnly.model, "1.0.0", "the omitted member leaves discovery's seed standing rather than blanking it");
+  });
+
+  test("writes nothing when the client has no device info at all", () => {
+
+    const device = makeTestDevice({ firmwareVersion: "1.0.0", model: "1.0.0" });
+
+    applyDeviceInfo(device, asEspHomeClient(new TestEspHomeClient()));
+
+    assert.equal(device.model, "1.0.0", "a client with no device-info record leaves the model as discovery seeded it");
+    assert.equal(device.firmwareVersion, "1.0.0", "a client with no device-info record leaves the firmware version as discovery seeded it");
   });
 });
 

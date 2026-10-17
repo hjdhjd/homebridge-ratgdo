@@ -11,9 +11,6 @@ export const PLATFORM_NAME = "Ratgdo";
 // The name of our plugin.
 export const PLUGIN_NAME = "homebridge-ratgdo";
 
-// Interval, in seconds, to initiate mDNS discovery requests for new Ratgdo devices.
-export const RATGDO_AUTODISCOVERY_INTERVAL = 10;
-
 /* Recognized ESPHome project-name patterns and the device variant each one identifies. Filtering and classification are the same operation: discovery iterates this
  * list once with `Array.find`, returning both the gate (the device is one of ours) and the classifier (which variant it is) in a single pass. Keeping the pattern
  * and the variant adjacent here means a future variant addition is a one-line edit instead of a coordinated change at the filter site plus the classifier site.
@@ -24,17 +21,6 @@ export const RATGDO_AUTODISCOVERY_PROJECTS: readonly MdnsProject[] = [
   { pattern: /^konnected\.garage-door-gdov2.*$/i, variant: RatgdoVariant.KONNECTED }
 ];
 
-// mDNS service types associated with a Ratgdo device.
-export const RATGDO_AUTODISCOVERY_TYPES = ["esphomelib"];
-
-/* Cumulative seconds, measured from the start of `runDiscoverySchedule()`, at which mDNS queries fire during the bootstrap-discovery window. The doubling pattern
- * follows RFC 6762 §5.2: an initial query at t=0 followed by a doubling-backoff burst of follow-ups (the schedule below) catches devices whose mDNS responders
- * missed the first packet, before the schedule settles to the steady-state interval. After the last warmup query lands, the schedule transitions to the steady-state
- * `RATGDO_AUTODISCOVERY_INTERVAL` for the rest of the platform's lifetime. This list is the single source of truth for every query the bootstrap phase fires -
- * `configureRatgdo()` does not call `update()` directly.
- */
-export const RATGDO_AUTODISCOVERY_WARMUP_OFFSETS: readonly number[] = [ 0, 1, 2, 4, 8 ];
-
 // Duration, in seconds, to wait for the ESPHome client's LatestStateCache to populate with initial state for every stateful entity. ESPHome pushes a state event
 // per entity in response to the SUBSCRIBE_STATES_REQUEST that ends the handshake; the burst typically completes within tens of milliseconds on a healthy LAN. This is
 // the safety net for slow devices and pathological networks: if the budget elapses, the discovery attempt fails and the next mDNS refresh retries. Construction of
@@ -44,6 +30,10 @@ export const RATGDO_INITIAL_STATE_TIMEOUT = 5;
 // Duration, in seconds, that the Konnected pre-close warning switch stays "on" before auto-reverting. The switch is a momentary control: the warning audio plays for
 // this long, then the HomeKit toggle flips back to off so the user can trigger it again. Matches the audio length the Konnected firmware emits.
 export const RATGDO_KONNECTED_PCW_DURATION = 5;
+
+// The DNS-SD service type every ESPHome device advertises under, spelled as the fully qualified type name the library's browser takes. Both discovery consumers -
+// the platform and the webUI status feed - browse this one type, so the spelling lives here rather than in either of them.
+export const RATGDO_MDNS_SERVICE_TYPE = "_esphomelib._tcp.local";
 
 // Duration, in seconds, of a motion sensor event.
 export const RATGDO_MOTION_DURATION = 5;
@@ -63,8 +53,4 @@ export const RATGDO_UI_REVERT_DELAY = 50;
 // undiscovered, the pool classifies that device not-found and surfaces the verdict to the panel. The settings modal is a foreground, user-initiated context, so a bounded
 // wait keeps the panel responsive rather than waiting indefinitely on a device that is powered down or off the network.
 export const RATGDO_WEBUI_DISCOVERY_TIMEOUT = 10;
-
-// Interval, in seconds, between the webUI status browser's re-issued mDNS queries. A single mDNS query can lose its packet, so the browser re-queries on this cadence
-// while the modal is open. The cadence is modal-scoped and short-lived, so a fixed interval is sufficient where the platform runs a warmup-plus-steady-state schedule.
-export const RATGDO_WEBUI_MDNS_REQUERY_INTERVAL = 15;
 

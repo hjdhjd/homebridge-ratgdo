@@ -411,28 +411,28 @@ export class RatgdoAccessory {
     };
   }
 
-  // Configure the device information for HomeKit. The Manufacturer, SerialNumber, and FirmwareRevision characteristics never mutate over the lifetime of this
-  // accessory (they derive from immutable RatgdoDevice fields populated at discovery time), so we write them exactly once here. The mutable Model characteristic
-  // routes through refreshModel(), which is what the availability event handler calls on each reconnect.
+  // Configure the device information for HomeKit. The Manufacturer and SerialNumber characteristics never mutate over the lifetime of this accessory (they derive
+  // from immutable RatgdoDevice fields populated at discovery time), so we write them exactly once here. The Model and FirmwareRevision characteristics route
+  // through refreshInfo(), which is what the availability event handler calls on each reconnect.
   private configureInfo(): void {
 
     const info = this.accessory.getService(this.hap.Service.AccessoryInformation);
 
     info?.updateCharacteristic(this.hap.Characteristic.Manufacturer, "github.com/hjdhjd");
     info?.updateCharacteristic(this.hap.Characteristic.SerialNumber, this.device.mac);
-    info?.updateCharacteristic(this.hap.Characteristic.FirmwareRevision, this.device.firmwareVersion);
 
-    this.refreshModel();
+    this.refreshInfo();
   }
 
-  // Refresh the Model characteristic. The platform mutates `device.model` on reconnect (a firmware-side rename or hardware-variant disclosure can land between
-  // connects), so this is the lone AccessoryInformation field that updateState's availability case re-pushes to HomeKit.
-  private refreshModel(): void {
+  // Refresh the Model and FirmwareRevision characteristics. The platform rewrites `device.model` and `device.firmwareVersion` from the connected client's device
+  // info on every connect, so these two are the AccessoryInformation fields that updateState's availability case re-pushes to HomeKit.
+  private refreshInfo(): void {
 
     const info = this.accessory.getService(this.hap.Service.AccessoryInformation);
 
     info?.updateCharacteristic(this.hap.Characteristic.Model,
       ((this.device.variant === RatgdoVariant.KONNECTED) ? "Konnected" : "Ratgdo") + (this.device.model ? " " + this.device.model : ""));
+    info?.updateCharacteristic(this.hap.Characteristic.FirmwareRevision, this.device.firmwareVersion);
   }
 
   // Compose the wire-level MQTT topic for this device. Every publish and subscription on this accessory routes through this helper so the per-device prefix shape
@@ -1096,9 +1096,9 @@ export class RatgdoAccessory {
 
       case "availability": {
 
-        // Refresh the Model characteristic (the only AccessoryInformation field that can change between connects). Manufacturer / SerialNumber / FirmwareRevision are
-        // resolved once during configureInfo() and do not need re-pushing on every availability event.
-        this.refreshModel();
+        // Refresh the Model and FirmwareRevision characteristics, the identity fields that can change between connects. Manufacturer and SerialNumber are resolved
+        // once during configureInfo() and do not need re-pushing on every availability event.
+        this.refreshInfo();
 
         // Hoist the connect-state comparison once. Every StatusActive-carrying sensor service, plus the online/offline handling below, reads the same boolean, so
         // computing it once is clearer and avoids a repeated string comparison per read on every availability transition.

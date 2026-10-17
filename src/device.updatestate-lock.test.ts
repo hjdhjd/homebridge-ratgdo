@@ -171,11 +171,13 @@ describe("RatgdoAccessory.updateState() lock and availability", () => {
         "the online availability case never emits the connected announcement - that lives in the platform");
     });
 
-    test("refreshes the Model characteristic when the device comes online", () => {
+    test("refreshes the Model and FirmwareRevision characteristics when the device comes online", () => {
 
       const { accessory, ratgdo } = buildRatgdoAccessory();
 
-      // Mutate the device model the way the platform does on reconnect, then confirm the online availability event re-pushes it through refreshModel().
+      // Mutate both identity fields the way the platform does from device info on each connect, then confirm the online availability event re-pushes them through
+      // refreshInfo().
+      ratgdo.device.firmwareVersion = "2025.1.0";
       ratgdo.device.model = "9.9.9";
       ratgdo.updateState({ id: "availability", state: "online" });
 
@@ -183,6 +185,8 @@ describe("RatgdoAccessory.updateState() lock and availability", () => {
 
       assert.equal(info?.getCharacteristic(Characteristic.Model).value, "Ratgdo 9.9.9",
         "an online availability event refreshes the Model characteristic from the device model");
+      assert.equal(info?.getCharacteristic(Characteristic.FirmwareRevision).value, "2025.1.0",
+        "an online availability event refreshes the FirmwareRevision characteristic from the device firmware version");
     });
   });
 

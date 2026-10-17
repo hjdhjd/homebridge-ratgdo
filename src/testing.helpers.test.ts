@@ -9,12 +9,13 @@
  * way the device reads it; makeTestPlatform wires a REAL FeatureOptions engine). It exercises the harness directly rather than through a production accessory.
  */
 import { Characteristic, Service, TestEspHomeClient, TestMqttClient, TestService, asEspHomeClient, buildRatgdoAccessory, loggedAt, makeBinarySensorEvent,
-  makeCapturingLog, makeCoverEvent, makeFakeOpenClient, makeKonnectedInitialState, makeLightEvent, makeLockEvent, makeMdnsService, makeRatgdoInitialState,
+  makeCapturingLog, makeCoverEvent, makeFakeOpenClient, makeKonnectedInitialState, makeLightEvent, makeLockEvent, makeRatgdoInitialState, makeRatgdoService,
   makeSwitchEvent, makeTelemetry, makeTestAccessory, makeTestDevice, makeTestPlatform } from "./testing.helpers.ts";
 import { CoverOperation, LockState, entityId } from "esphome-client";
 import { describe, test } from "node:test";
 import { RatgdoVariant } from "./types.ts";
 import assert from "node:assert/strict";
+import { txtEntries } from "homebridge-plugin-utils";
 
 /* The telemetry-event fields these tests assert on. The factories return a TelemetryEvent (a schema-derived union with all-optional value fields); we view one as this
  * narrow declared-property shape at the test seam so the assertions read fields by dot access without tripping noPropertyAccessFromIndexSignature, and without an `any`
@@ -526,20 +527,25 @@ describe("makeTestDevice", () => {
   });
 });
 
-describe("makeMdnsService", () => {
+describe("makeRatgdoService", () => {
 
-  test("carries the raw txt record and defaults the address list", () => {
+  /* eslint-disable camelcase */
+  test("composes one record string per advertised TXT field and defaults the address list", () => {
 
-    const service = makeMdnsService({ mac: "AABBCCDDEEFF" });
+    const service = makeRatgdoService({ friendly_name: null, mac: "AABBCCDDEEFF", project_version: undefined, version: "2.0.0" });
 
     assert.deepEqual(service.addresses, ["192.0.2.10"], "the address list defaults to a single TEST-NET-1 address");
-    assert.deepEqual(service.txt, { mac: "AABBCCDDEEFF" }, "the raw txt record is carried through verbatim for parseRatgdoService to narrow");
+    assert.deepEqual(txtEntries(service.txt), new Map([ [ "friendly_name", null ], [ "mac", "AABBCCDDEEFF" ], [ "version", "2.0.0" ] ]),
+      "a string field carries as key=value, a null field as the bare flag key, and an undefined field is omitted from the record entirely");
   });
 
-  test("carries an explicit empty address list for the no-address guard", () => {
+  test("names the instance by the advertised MAC, falling back to a fixed label", () => {
 
-    assert.deepEqual(makeMdnsService({}, []).addresses, [], "an explicit empty address list models a service with no advertised address");
+    assert.equal(makeRatgdoService({ mac: "AABBCCDDEEFF" }).instance, "AABBCCDDEEFF",
+      "the MAC names the instance, so two devices advertising two MACs cannot collide in the browser's snapshot");
+    assert.equal(makeRatgdoService({ friendly_name: "Garage" }).instance, "ratgdo", "a device advertising no MAC falls back to the fixed label");
   });
+  /* eslint-enable camelcase */
 });
 
 describe("makeTestPlatform", () => {

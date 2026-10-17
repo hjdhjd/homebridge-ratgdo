@@ -14,6 +14,7 @@ import { EncryptionKeyInvalidError, EncryptionKeyMissingError, EncryptionRequire
 import type { EntityId, EspHomeClient, TelemetryEvent } from "esphome-client";
 import type { HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
 import { RATGDO_INITIAL_STATE_TIMEOUT } from "./settings.ts";
+import type { RatgdoDevice } from "./types.ts";
 import { presentEntityIds } from "./entities.ts";
 import util from "node:util";
 
@@ -167,6 +168,29 @@ OpenConnectionOptions): Promise<ConnectionOutcome> {
     client?.[Symbol.dispose]();
 
     return { ok: false, reason };
+  }
+}
+
+/* Refresh a device's identity fields from the connected client's device info. The mDNS TXT record seeds both the model and the firmware version at discovery, but the
+ * client's deviceInfo() is the authoritative source for each and a firmware upgrade can change either, so both are refreshed from it here. The platform applies this
+ * before it constructs the accessory, so the accessory's first characteristic write is already correct, and again on every connect through markOnline, which is what
+ * carries a post-upgrade version into HomeKit. A field whose member the record omits keeps whatever discovery seeded, so a partial record never blanks an identity.
+ *
+ * @param device - The device record whose model and firmware version are refreshed in place.
+ * @param client - The connected client whose device info is read.
+ */
+export function applyDeviceInfo(device: RatgdoDevice, client: EspHomeClient): void {
+
+  const info = client.deviceInfo();
+
+  if(info?.projectVersion !== undefined) {
+
+    device.model = info.projectVersion;
+  }
+
+  if(info?.esphomeVersion !== undefined) {
+
+    device.firmwareVersion = info.esphomeVersion;
   }
 }
 

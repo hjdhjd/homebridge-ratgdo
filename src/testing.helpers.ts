@@ -17,17 +17,22 @@
  * The HAP surface is intentionally tight: the Service / Characteristic namespaces expand as production reaches for new kinds. Co-located under src/ so the broad
  * tsconfig.json type-checks this file alongside everything else; tsconfig.build.json excludes the *.helpers.ts pattern so it never reaches the published dist/.
  */
+// The explicit-resource-management bridge, first here as it is first in the plugin's entry point: this file is the suite's composition root, so every test that
+// constructs a feed or an accessory reads against globals that are guaranteed to exist.
+import "homebridge-plugin-utils/polyfills";
 import { CoverOperation, LockState, entityId } from "esphome-client";
 import type { EntityId, EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
-import type { HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
+import type { HomebridgePluginLogging, MdnsService, Nullable } from "homebridge-plugin-utils";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import { FeatureOptions } from "homebridge-plugin-utils";
-import type { Service as MdnsService } from "bonjour-service";
 import type { OpenEspHomeClient } from "./connection.ts";
+import { RATGDO_MDNS_SERVICE_TYPE } from "./settings.ts";
 import { RatgdoAccessory } from "./device.ts";
 import type { RatgdoDevice } from "./types.ts";
 import type { RatgdoResolvedConfig } from "./options.ts";
+import type { RatgdoTxtKey } from "./discovery.ts";
 import { RatgdoVariant } from "./types.ts";
+import { makeService } from "homebridge-plugin-utils/testing";
 
 // One captured log line. The device's log wrapper formats every call through util.format into a single string parameter prefixed with the device name (for example
 // "Ratgdo: Light on."), so a log assertion matches a substring of parameters[0] at the given level.
@@ -629,7 +634,7 @@ export interface RecordedCommand {
 export interface TestEspHomeClientOptions {
 
   capabilities?: { encryption: { active: boolean } };
-  deviceInfo?: { projectVersion?: string };
+  deviceInfo?: { esphomeVersion?: string; projectVersion?: string };
   entities?: { objectId: string; type: string }[];
   snapshot?: ReadonlyMap<EntityId, TelemetryEvent>;
 }
@@ -645,7 +650,7 @@ export class TestEspHomeClient {
   public disconnected = false;
   public disposed = false;
   private readonly capabilitiesValue: { encryption: { active: boolean } };
-  private readonly deviceInfoValue: { projectVersion?: string } | undefined;
+  private readonly deviceInfoValue: { esphomeVersion?: string; projectVersion?: string } | undefined;
   private readonly entities: { objectId: string; type: string }[];
   private readonly handlers = new Map<string, ((event: unknown) => void)[]>();
   // The latest-state cache is a MUTABLE Map copied from the seed snapshot, because captureInitialState reads snapshot() ONCE and its telemetry handler re-checks
@@ -902,18 +907,39 @@ export function makeTestDevice(overrides: Partial<RatgdoDevice> = {}): RatgdoDev
   };
 }
 
-/** Build a bonjour-service mDNS Service double carrying just the fields parseRatgdoService reads: the raw TXT record and the advertised address list. The construction-
- * seam cast bridges the partial shape to the full Service type, so discovery-test bodies stay cast-free. `txt` is typed `unknown` so a test can pass a malformed or
- * non-object record to exercise the parser's narrowing; `addresses` defaults to a single TEST-NET-1 address and is set empty to exercise the no-address guard.
+/** Build the resolved mDNS service a browser derives for a Ratgdo advertisement, composed from the library's own fixture so what a test advertises and what the
+ * classify reads cannot disagree. Each TXT field becomes one record string: a string value as `key=value`, a `null` value as the bare key (the wire's flag form,
+ * which `txtEntries` reads back as `null`), and an undefined value as nothing at all.
  *
- * @param txt       - The raw mDNS TXT record (snake_case ESPHome wire keys), or any non-object value to exercise the parse-failure path.
- * @param addresses - The advertised IP addresses. Defaults to a single address; pass an empty array to model a service with no address.
+ * The instance name is the TXT `mac` when one is present and the fixed "ratgdo" otherwise - one rule, so two devices advertising two MACs get two instance names,
+ * which matters because the library keys its snapshot by instance name and a test advertising two devices must not collide them. The friendly name never names
+ * the instance.
  *
- * @returns a Service double parseRatgdoService can consume.
+ * The service type is derived from RATGDO_MDNS_SERVICE_TYPE rather than restated: `discoverServices` takes the fully qualified DNS-SD name while MdnsServiceFixture
+ * places its type under a domain of its own (defaulting to "local"), so the constant's trailing `.local` label is trimmed here and the two library conventions meet
+ * at one spelling.
+ *
+ * @param txt       - The TXT fields to advertise, keyed by the ESPHome wire names the classify reads.
+ * @param addresses - The advertised IP addresses, in the order the browser would list them. Defaults to a single TEST-NET-1 address.
+ *
+ * @returns the resolved service parseRatgdoService consumes.
  */
-export function makeMdnsService(txt: unknown, addresses: string[] = ["192.0.2.10"]): MdnsService {
+export function makeRatgdoService(txt: Partial<Record<RatgdoTxtKey, Nullable<string>>>, addresses: readonly [string, ...string[]] = ["192.0.2.10"]): MdnsService {
 
-  return { addresses, txt } as unknown as MdnsService;
+  const label = txt.mac ?? "ratgdo";
+  const strings: string[] = [];
+
+  for(const [ key, value ] of Object.entries(txt)) {
+
+    if(value === undefined) {
+
+      continue;
+    }
+
+    strings.push((value === null) ? key : (key + "=" + value));
+  }
+
+  return makeService({ addresses, host: "ratgdo-" + label, instance: label, port: 6053, serviceType: RATGDO_MDNS_SERVICE_TYPE.replace(/\.local$/u, ""), strings });
 }
 
 // The platform double's read surface, as the accessory and its configure chain consume it. The construction-seam cast to RatgdoPlatform happens in buildRatgdoAccessory.

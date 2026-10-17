@@ -1,13 +1,12 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
  * settings.test.ts: Concern net for the plugin's static settings - the mDNS autodiscovery project table (pattern matching plus variant classification), the RFC 6762
- * warmup-offset burst, and the family of duration / topic constants. These values are pure data with no runtime behavior, so the contract under test is the data itself:
- * the right regexes match the right project names, the warmup schedule is the documented doubling burst, the durations are sane positive numbers, and the MQTT topic is
- * the documented default. The variant assertions cross-check against the real RatgdoVariant const-object so a rename on either side surfaces here.
+ * service type, and the family of duration / topic constants. These values are pure data with no runtime behavior, so the contract under test is the data itself:
+ * the right regexes match the right project names, the service type is the fully qualified name the browser takes, the durations are sane positive numbers, and the
+ * MQTT topic is the documented default. The variant assertions cross-check against the real RatgdoVariant const-object so a rename on either side surfaces here.
  */
-import { RATGDO_AUTODISCOVERY_INTERVAL, RATGDO_AUTODISCOVERY_PROJECTS, RATGDO_AUTODISCOVERY_WARMUP_OFFSETS, RATGDO_INITIAL_STATE_TIMEOUT,
-  RATGDO_KONNECTED_PCW_DURATION, RATGDO_MOTION_DURATION, RATGDO_MQTT_TOPIC, RATGDO_OCCUPANCY_DURATION, RATGDO_UI_REVERT_DELAY, RATGDO_WEBUI_DISCOVERY_TIMEOUT,
-  RATGDO_WEBUI_MDNS_REQUERY_INTERVAL } from "./settings.ts";
+import { RATGDO_AUTODISCOVERY_PROJECTS, RATGDO_INITIAL_STATE_TIMEOUT, RATGDO_KONNECTED_PCW_DURATION, RATGDO_MDNS_SERVICE_TYPE, RATGDO_MOTION_DURATION,
+  RATGDO_MQTT_TOPIC, RATGDO_OCCUPANCY_DURATION, RATGDO_UI_REVERT_DELAY, RATGDO_WEBUI_DISCOVERY_TIMEOUT } from "./settings.ts";
 import { describe, test } from "node:test";
 import { RatgdoVariant } from "./types.ts";
 import assert from "node:assert/strict";
@@ -40,12 +39,12 @@ describe("RATGDO_AUTODISCOVERY_PROJECTS", () => {
   });
 });
 
-describe("RATGDO_AUTODISCOVERY_WARMUP_OFFSETS", () => {
+describe("RATGDO_MDNS_SERVICE_TYPE", () => {
 
-  test("is the RFC 6762 doubling burst starting at t=0", () => {
+  test("is the fully qualified DNS-SD type name ESPHome devices advertise under", () => {
 
-    assert.deepEqual([...RATGDO_AUTODISCOVERY_WARMUP_OFFSETS], [ 0, 1, 2, 4, 8 ],
-      "the warmup schedule is the five-query doubling burst at t=0, 1, 2, 4, and 8 seconds");
+    assert.equal(RATGDO_MDNS_SERVICE_TYPE, "_esphomelib._tcp.local",
+      "the browser takes a fully qualified DNS-SD type name, so the constant carries the protocol label and the domain as well as the service label");
   });
 });
 
@@ -53,14 +52,12 @@ describe("duration and topic constants", () => {
 
   // Every timing constant must be a positive finite number - a zero, negative, NaN, or Infinity duration would break the timers and schedules these values feed.
   const durations: readonly (readonly [string, number])[] = [
-    [ "RATGDO_AUTODISCOVERY_INTERVAL", RATGDO_AUTODISCOVERY_INTERVAL ],
     [ "RATGDO_INITIAL_STATE_TIMEOUT", RATGDO_INITIAL_STATE_TIMEOUT ],
     [ "RATGDO_KONNECTED_PCW_DURATION", RATGDO_KONNECTED_PCW_DURATION ],
     [ "RATGDO_MOTION_DURATION", RATGDO_MOTION_DURATION ],
     [ "RATGDO_OCCUPANCY_DURATION", RATGDO_OCCUPANCY_DURATION ],
     [ "RATGDO_UI_REVERT_DELAY", RATGDO_UI_REVERT_DELAY ],
-    [ "RATGDO_WEBUI_DISCOVERY_TIMEOUT", RATGDO_WEBUI_DISCOVERY_TIMEOUT ],
-    [ "RATGDO_WEBUI_MDNS_REQUERY_INTERVAL", RATGDO_WEBUI_MDNS_REQUERY_INTERVAL ]
+    [ "RATGDO_WEBUI_DISCOVERY_TIMEOUT", RATGDO_WEBUI_DISCOVERY_TIMEOUT ]
   ];
 
   for(const [ name, value ] of durations) {
