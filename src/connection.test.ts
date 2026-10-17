@@ -5,7 +5,8 @@
  * state-capture budget (timeoutSeconds) is injected in fractional seconds (e.g. 0.02) so each wait resolves in milliseconds of real time, driving every branch
  * deterministically without a live device, fake timers, or a fake Homebridge harness.
  */
-import { AuthenticationError, EncryptionKeyInvalidError, EncryptionKeyMissingError, EncryptionRequiredError, entityId } from "esphome-client";
+import { AuthenticationError, EncryptionKeyInvalidError, EncryptionKeyMissingError, EncryptionRequiredError, NegotiationFailedError,
+  entityId } from "esphome-client";
 import { TestEspHomeClient, asEspHomeClient, loggedAt, makeCapturingLog, makeCoverEvent, makeFakeOpenClient, makeLightEvent,
   makeTestDevice } from "./testing.helpers.ts";
 import { applyDeviceInfo, captureInitialState, isEncryptionError, openConnection } from "./connection.ts";
@@ -181,6 +182,19 @@ describe("openConnection", () => {
     assert.ok(!result.ok, "a permanent error skips the discovery attempt");
     assert.equal(result.reason, "permanent", "the failure outcome carries the permanent reason token");
     assert.ok(loggedAt(entries, "error", "Permanent connection error"), "the user sees the permanent-connection diagnostic");
+  });
+
+  test("unsupported API version: returns the unsupported outcome and logs the firmware-mismatch diagnostic", async () => {
+
+    /* NegotiationFailedError extends PermanentError, so this case also proves the branch order: were the two tested in the other order, the supertype would claim this
+     * error first and the reason would read permanent.
+     */
+    const { entries, result } = await run(makeFakeOpenClient(new NegotiationFailedError("api major 5 is outside the supported range",
+      "API_MAJOR_OUT_OF_RANGE")));
+
+    assert.ok(!result.ok, "a version mismatch skips the discovery attempt");
+    assert.equal(result.reason, "unsupported", "a device the client cannot negotiate with carries the unsupported reason token");
+    assert.ok(loggedAt(entries, "error", "The device's ESPHome API version"), "the user sees the firmware-mismatch diagnostic");
   });
 
   test("generic failure: returns null and logs the catch-all connection diagnostic", async () => {

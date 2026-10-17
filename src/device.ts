@@ -9,7 +9,7 @@ import type { EspHomeEvent, RatgdoDevice } from "./types.ts";
 import { LockCommand, LockState } from "esphome-client";
 import { RATGDO_ENTITIES, idFor } from "./entities.ts";
 import { RATGDO_KONNECTED_PCW_DURATION, RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION, RATGDO_UI_REVERT_DELAY } from "./settings.ts";
-import { RatgdoService, RatgdoVariant } from "./types.ts";
+import { RATGDO_VARIANT_LABELS, RatgdoService, RatgdoVariant } from "./types.ts";
 import { TimerRegistry, acquireService, guardedDispatch, validService } from "homebridge-plugin-utils";
 import type { RatgdoEntityRef } from "./entities.ts";
 import type { RatgdoPlatform } from "./platform.ts";
@@ -424,14 +424,19 @@ export class RatgdoAccessory {
     this.refreshInfo();
   }
 
-  // Refresh the Model and FirmwareRevision characteristics. The platform rewrites `device.model` and `device.firmwareVersion` from the connected client's device
-  // info on every connect, so these two are the AccessoryInformation fields that updateState's availability case re-pushes to HomeKit.
+  /* Refresh the Model and FirmwareRevision characteristics. The platform rewrites `device.model` and `device.firmwareVersion` from the connected client's device
+   * info on every connect, so these two are the AccessoryInformation fields that updateState's availability case re-pushes to HomeKit.
+   *
+   * The Model string leads with the device's family word, taken from the variant table so this site and the table never disagree. That leading word is what the
+   * settings sidebar groups a device under: the page reads the Model back off the cached accessory and heads each group with its first word, so every install groups
+   * correctly the moment the page loads, with nothing persisted and nothing to migrate.
+   */
   private refreshInfo(): void {
 
     const info = this.accessory.getService(this.hap.Service.AccessoryInformation);
 
     info?.updateCharacteristic(this.hap.Characteristic.Model,
-      ((this.device.variant === RatgdoVariant.KONNECTED) ? "Konnected" : "Ratgdo") + (this.device.model ? " " + this.device.model : ""));
+      RATGDO_VARIANT_LABELS[this.device.variant] + (this.device.model ? " " + this.device.model : ""));
     info?.updateCharacteristic(this.hap.Characteristic.FirmwareRevision, this.device.firmwareVersion);
   }
 

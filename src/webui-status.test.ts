@@ -572,6 +572,56 @@ describe("StatusFeed key diff", () => {
     assert.ok(pushes.some((event) => (event.kind === "snapshot") && (event.serialNumber === MAC)), "the key fix converts the failed device to a live session");
   });
 
+  test("gates an unsupported retry on nothing: neither an unchanged nor a changed key re-dials a version the client cannot speak", async () => {
+
+    /* A firmware version the client cannot negotiate is not a configuration mistake, so unlike an auth failure it is suppressed regardless of the key: editing a key
+     * cannot make an out-of-range API version speakable. Both directions on one failed device: re-warm the same key, then re-warm a changed one, and neither starts a
+     * second connect.
+     */
+    const openClient = makeOpenClient(async () => {
+
+      throw new (await import("esphome-client")).NegotiationFailedError("api major out of range", "API_MAJOR_OUT_OF_RANGE");
+    });
+    const { browser, feed, pushes } = makeFeed({ openClient });
+
+    feed.startDiscovery();
+    browser().found(makeService());
+
+    await settle();
+
+    feed.warm({ devices: [{ mac: MAC, psk: "first" }] });
+
+    await settle();
+
+    assert.ok(pushes.some((event) => (event.kind === "error") && (event.reason === "unsupported")), "the connect fails unsupported and records the verdict");
+    assert.equal(openClient.calls.length, 1, "the first warm started exactly one connect");
+
+    feed.warm({ devices: [{ mac: MAC, psk: "first" }] });
+
+    await settle();
+
+    assert.equal(openClient.calls.length, 1, "a re-warm carrying the same key starts no new connect");
+
+    feed.warm({ devices: [{ mac: MAC, psk: "second" }] });
+
+    await settle();
+
+    assert.equal(openClient.calls.length, 1, "a re-warm carrying a changed key starts no new connect either - the verdict does not turn on the key");
+
+    // Reselecting the device re-emits its classified verdict rather than a connecting state the panel would never resolve.
+    const before = pushes.length;
+
+    feed.view(MAC);
+
+    await settle();
+
+    const emitted = pushes.slice(before);
+
+    assert.ok(emitted.some((event) => (event.kind === "error") && (event.reason === "unsupported")),
+      "a view of the unsupported device re-surfaces its verdict");
+    assert.ok(!emitted.some((event) => (event.kind === "connecting")), "the view pushes no connecting state for a device that will never connect");
+  });
+
   test("gates an auth-failed retry on a changed key: the same failed key does not retry, a changed key does", async () => {
 
     // Outcome memory records the key an auth failure happened with, so a forced warm resending the very same key does not re-flash the doomed connect, while a genuinely
@@ -1177,6 +1227,14 @@ describe("StatusFeed connection failures", () => {
 
       throw new DOMException("timed out", "TimeoutError");
     }), "timeout", "a state-capture timeout surfaces as the timeout reason");
+  });
+
+  test("maps an unsupported API version to the unsupported error", async () => {
+
+    assert.equal(await failureReasonFor(async () => {
+
+      throw new (await import("esphome-client")).NegotiationFailedError("api major out of range", "API_MAJOR_OUT_OF_RANGE");
+    }), "unsupported", "a device announcing an API version the client cannot speak surfaces as unsupported");
   });
 
   test("maps a permanent error to the unreachable error", async () => {

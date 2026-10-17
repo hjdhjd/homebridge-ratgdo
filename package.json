@@ -27,7 +27,7 @@
     "prebuild": "npm run clean && npm run build-ui",
     "prelint": "npm run build-ui",
     "prepublishOnly": "npm run lint && npm run typecheck && npm run build",
-    "test": "node --test --experimental-test-coverage --test-coverage-include=\"src/**/*.ts\" --test-coverage-include=\"homebridge-ui/public/ratgdo-config.mjs\" --test-coverage-exclude=\"src/**/*.test.ts\" --test-coverage-exclude=\"src/**/*.helpers.ts\" --test-coverage-exclude=\"src/platform.ts\" --test-coverage-lines=85 --test-coverage-branches=80 --test-coverage-functions=85 --test-timeout=15000 \"src/**/*.test.ts\"",
+    "test": "node --test --experimental-test-coverage --test-coverage-include=\"src/**/*.ts\" --test-coverage-include=\"homebridge-ui/public/*.mjs\" --test-coverage-exclude=\"src/**/*.test.ts\" --test-coverage-exclude=\"src/**/*.helpers.ts\" --test-coverage-exclude=\"src/platform.ts\" --test-coverage-exclude=\"homebridge-ui/public/ui.mjs\" --test-coverage-lines=85 --test-coverage-branches=80 --test-coverage-functions=85 --test-timeout=15000 \"src/**/*.test.ts\"",
     "test:watch": "node --test --watch \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit"
   },

@@ -2,8 +2,9 @@
  *
  * server.js: homebridge-ratgdo webUI server API.
  */
-import { STATUS_ADDRESSES_ROUTE, STATUS_WARM_ROUTE, StatusFeed, narrowStatusWarmRequest } from "../dist/webui-status.js";
-import { STATUS_EVENT, STATUS_VIEW_ROUTE, narrowStatusViewRequest } from "homebridge-plugin-utils";
+import { STATUS_ADDRESSES_ROUTE, STATUS_WARM_ROUTE } from "./public/status-routes.mjs";
+import { STATUS_EVENT, STATUS_VIEW_ROUTE, consoleLog, narrowStatusViewRequest } from "homebridge-plugin-utils";
+import { StatusFeed, narrowStatusWarmRequest } from "../dist/webui-status.js";
 import { featureOptionCategories, featureOptions } from "../dist/options.js";
 import { HomebridgePluginUiServer } from "@homebridge/plugin-ui-utils";
 
@@ -18,26 +19,16 @@ class PluginUiServer extends HomebridgePluginUiServer {
 
     super();
 
-    /* The console-backed logging adapter the status feed and its connection layer log through. Config UI X captures the child process's console output into the
-     * Homebridge UI log, prefixed by the plugin name, so a device-side connection diagnostic reaches the same place as the plugin's own logs. console is the sanctioned
-     * logging transport at this boundary - HomebridgePluginUiServer exposes no logger - so no-console is disabled for the adapter.
+    /* One status feed for the lifetime of this custom-UI child process. push routes every status event to the iframe over the sanctioned plugin-ui-utils channel, and
+     * the feed and its connection layer log through the shared logger homebridge-plugin-utils publishes for exactly this boundary, which writes to the process's own
+     * output streams: Config UI X captures those into the Homebridge UI log, prefixed by the plugin name, so a device-side connection diagnostic reaches the same
+     * place as the plugin's own logs.
      *
-     * The debug channel is deliberately a no-op. The connection layer's wire-level diagnostics (per-frame decrypts, state updates, keepalive pings) log at debug and
-     * would fill every user's UI log for as long as the settings panel sits open, and this child process has no debug switch to gate them behind. The panel itself is
-     * the status surface; the log carries only what a user acts on - failures at error and warn, and connection lifecycle at info.
+     * That logger's debug channel discards, which is what this boundary wants. The connection layer's wire-level diagnostics (per-frame decrypts, state updates,
+     * keepalive pings) log at debug and would fill every user's UI log for as long as the settings panel sits open, and this child process has no debug switch to gate
+     * them behind. The panel itself is the status surface; the log carries only what a user acts on - failures at error and warn, and connection lifecycle at info.
      */
-    /* eslint-disable no-console */
-    const log = {
-
-      debug: () => {},
-      error: (message, ...parameters) => console.error(message, ...parameters),
-      info: (message, ...parameters) => console.info(message, ...parameters),
-      warn: (message, ...parameters) => console.warn(message, ...parameters)
-    };
-    /* eslint-enable no-console */
-
-    // One status feed for the lifetime of this custom-UI child process. push routes every status event to the iframe over the sanctioned plugin-ui-utils channel.
-    const feed = new StatusFeed({ log, push: (payload) => this.pushEvent(STATUS_EVENT, payload) });
+    const feed = new StatusFeed({ log: consoleLog, push: (payload) => this.pushEvent(STATUS_EVENT, payload) });
 
     // Start mDNS discovery immediately - it runs while the settings page is still in front of the user, so the first device selection resolves from a warm address map
     // instead of paying the discovery wait.

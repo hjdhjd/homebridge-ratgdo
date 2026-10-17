@@ -20,8 +20,9 @@
  * connects happen while no device is selected and their pushes are unrenderable, so a later view of a device that failed while unselected must re-surface the classified
  * failure rather than a permanent "Connecting...".
  *
- * The warm set and its route are ratgdo's extension to the shared protocol: STATUS_WARM_ROUTE and narrowStatusWarmRequest carry every known device plus its effective key
- * to the pool, the input the key diff reads, while the shared contract carries the pushed status back. Everything the panel renders - rows, updates, availability, and
+ * The warm set and its route are ratgdo's extension to the shared protocol: the warm route declared in homebridge-ui/public/status-routes.mjs, where both halves of the
+ * settings surface can read it, and narrowStatusWarmRequest here carry every known device plus its effective key to the pool, the input the key diff reads, while the
+ * shared contract carries the pushed status back. Everything the panel renders - rows, updates, availability, and
  * errors - crosses the bridge as ESPHome-free, variant-free, entity-id-free data, so the row vocabulary and the label choices stay ratgdo's while the ESPHome details
  * never reach the wire.
  */
@@ -38,18 +39,6 @@ import type { OpenEspHomeClient } from "./connection.ts";
 import { RatgdoVariant } from "./types.ts";
 import { openConnection } from "./connection.ts";
 import { translateTelemetry } from "./protocol/telemetry.ts";
-
-// The onRequest route the warm extension registers - ratgdo's addition to the shared status protocol. It carries the whole warm set (every known device plus its
-// effective encryption key) so the pool connects ahead of selection. server.js and ui.mjs both address the bridge through this constant (ui.mjs mirrors the literal in
-// its own module, because browser code cannot import from dist/), so this module is its one owner. The push-event name and the view route are the shared
-// homebridge-plugin-utils contract, imported by both adapters from the package root.
-export const STATUS_WARM_ROUTE = "/statusWarm";
-
-// The onRequest route the address projection registers - a ratgdo addition to the shared status protocol, beside the warm route. It carries no request body and answers
-// with the feed's live discovery map: each discovered device's mac to the address the status connection dials, the same truth the identity strip renders. server.js and
-// ui.mjs both address the bridge through this constant, and ui.mjs mirrors the literal in its own module because browser code cannot import from dist/. The address is
-// ratgdo-owned identity data, so it rides this ratgdo route rather than the shared homebridge-plugin-utils push wire.
-export const STATUS_ADDRESSES_ROUTE = "/statusAddresses";
 
 // The panel's row identities, a closed union used internally to type the label and sizer records exhaustively. The wire carries a row id as a plain string; this closed
 // union is ratgdo's own, so a new row must extend it here and gains its label and sizer entries at compile time.
@@ -368,16 +357,23 @@ export class StatusFeed implements Disposable {
 
       if(!session) {
 
-        // No session yet. A discovered device connects now, unless outcome memory records an auth failure against this very key: an auth-failed device is retried only
-        // when the incoming key differs from the one it failed with, because a forced warm - the restart recovery or the visibility belt - resends unchanged keys at
-        // foreground cadence, and re-running a connect with the key that just failed is doomed churn that re-flashes the panel. A changed key falls through to the
-        // connect, whose synchronous prefix clears the stored outcome; every non-auth outcome keeps its unconditional retry here. An undiscovered device arms a not-found
-        // timer, but only when none is already counting down for it - a re-warm that changes an unrelated device's key must not defer this device's verdict.
+        /* No session yet. A discovered device connects now, unless outcome memory holds a verdict that re-dialing cannot change. Two of those exist, and they are
+         * suppressed on different terms.
+         *
+         * An auth failure is suppressed only against the very key it failed with: a forced warm - the restart recovery or the visibility belt - resends unchanged keys
+         * at foreground cadence, and re-running a connect with the key that just failed is doomed churn that re-flashes the panel, while a changed key is a genuine
+         * retry and falls through to the connect, whose synchronous prefix clears the stored outcome. An unsupported verdict is suppressed regardless of the key,
+         * because a firmware version the client cannot speak does not become speakable when a key is edited; only a firmware or plugin update changes it, and either
+         * one reopens the panel. Every other outcome keeps its unconditional retry here. An undiscovered device arms a not-found timer, but only when none is already
+         * counting down for it - a re-warm that changes an unrelated device's key must not defer this device's verdict.
+         */
         if(this.#devices.has(entry.mac)) {
 
           const outcome = this.#outcomes.get(entry.mac);
+          const authFailedOnThisKey = (outcome !== undefined) && ((outcome.reason === "auth-invalid") || (outcome.reason === "auth-missing")) &&
+            (outcome.psk === entry.psk);
 
-          if((outcome !== undefined) && ((outcome.reason === "auth-invalid") || (outcome.reason === "auth-missing")) && (outcome.psk === entry.psk)) {
+          if((outcome?.reason === "unsupported") || authFailedOnThisKey) {
 
             continue;
           }
@@ -448,7 +444,7 @@ export class StatusFeed implements Disposable {
       return;
     }
 
-    if((reason === "auth-invalid") || (reason === "auth-missing")) {
+    if((reason === "auth-invalid") || (reason === "auth-missing") || (reason === "unsupported")) {
 
       this.#emit({ kind: "error", reason, serialNumber: mac, session: ++this.#tokenCounter });
 
@@ -583,6 +579,12 @@ export class StatusFeed implements Disposable {
           case "timeout":
 
             this.#recordFailure(session, "timeout");
+
+            return;
+
+          case "unsupported":
+
+            this.#recordFailure(session, "unsupported");
 
             return;
 
@@ -846,8 +848,8 @@ export class StatusFeed implements Disposable {
       return;
     }
 
-    // Store the not-found verdict with an undefined key: the retry gate consults the stored key only for the auth reasons, so it is inert for not-found, and this write
-    // site has no session in scope to read a key from.
+    // Store the not-found verdict with an undefined key: the retry gate pairs the stored key with the auth reasons alone - an unsupported verdict suppresses without
+    // reading it, and not-found is not suppressed at all - so the key is inert here, and this write site has no session in scope to read one from.
     this.#outcomes.set(mac, { psk: undefined, reason: "not-found" });
     this.#emit({ kind: "error", reason: "not-found", serialNumber: mac, session: ++this.#tokenCounter });
   }

@@ -26,8 +26,6 @@ export default hbPluginUtils({
    * We turn off only the rules needed for test infrastructure so the rest of the strict preset still applies. Mirrors the same admission unifi-protect uses.
    */
   extraConfigs: [
-    // server.js runs in Node, so it needs console declared as a readonly global - the js preset applied to that file pattern does not supply it on its own.
-    { files: ["homebridge-ui/server.js"], languageOptions: { globals: { console: "readonly" } } },
     {
 
       files: [ "**/*.test.ts", "**/*.fixtures.ts", "**/*.helpers.ts" ],
@@ -42,5 +40,5 @@ export default hbPluginUtils({
   ],
   js: [ "homebridge-ui/public/**/*.@(js|mjs)", "homebridge-ui/server.js", "eslint.config.mjs" ],
   ts: ["src/**/*.ts"],
-  ui: [ "homebridge-ui/public/lib/webUi.mjs", "homebridge-ui/public/lib/webUi-featureoptions.mjs", "homebridge-ui/public/ui.mjs" ]
+  ui: ["homebridge-ui/public/ui.mjs"]
 });

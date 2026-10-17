@@ -10,7 +10,7 @@
  * Feature-option resolution stays at the platform: the caller resolves the device's encryption key and passes the concrete `psk` in, so this module's only external
  * dependency is the client-factory port. That keeps the seam single-purpose and the functions trivially testable.
  */
-import { EncryptionKeyInvalidError, EncryptionKeyMissingError, EncryptionRequiredError, PermanentError, openEspHomeClient } from "esphome-client";
+import { EncryptionKeyInvalidError, EncryptionKeyMissingError, EncryptionRequiredError, NegotiationFailedError, PermanentError, openEspHomeClient } from "esphome-client";
 import type { EntityId, EspHomeClient, TelemetryEvent } from "esphome-client";
 import type { HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
 import { RATGDO_INITIAL_STATE_TIMEOUT } from "./settings.ts";
@@ -37,9 +37,11 @@ export interface ConnectionResult {
 /* The classification of every way `openConnection` can fail. `shutdown` is not a fault - the platform is tearing down - and a caller acts on it by standing down
  * silently; `encryption-invalid` marks a configured key that does not match the device and `encryption-missing` marks a device that requires an API key that was not
  * supplied; `permanent` and `unknown` mark a device that is unreachable or failed for an unclassified reason; `timeout` marks a device that opened the connection but did
- * not push its initial state in the budget. This is the typed sentinel a second consumer branches on in place of scraping the log line each branch emits.
+ * not push its initial state in the budget; `unsupported` marks a device announcing an ESPHome API version outside the range this plugin's client speaks, which no
+ * amount of retrying changes - only a firmware or plugin update does. This is the typed sentinel a second consumer branches on in place of scraping the log line each
+ * branch emits.
  */
-export type ConnectionFailureReason = "encryption-invalid" | "encryption-missing" | "permanent" | "shutdown" | "timeout" | "unknown";
+export type ConnectionFailureReason = "encryption-invalid" | "encryption-missing" | "permanent" | "shutdown" | "timeout" | "unknown" | "unsupported";
 
 /* `openConnection`'s outcome, a discriminated union on `ok`: `ok: true` carries the connected client and its captured initial state, `ok: false` carries the classified
  * failure reason. Every failure branch has already logged its diagnostic and disposed the partially-constructed client, so a caller reads the outcome purely to decide
@@ -151,6 +153,13 @@ OpenConnectionOptions): Promise<ConnectionOutcome> {
       // Split the encryption fault so a caller acts on which kind it is without re-inspecting the error: a mismatched key (EncryptionKeyInvalidError) reads as
       // "encryption-invalid", while an absent-but-required key (EncryptionKeyMissingError or EncryptionRequiredError) reads as "encryption-missing".
       reason = (error instanceof EncryptionKeyInvalidError) ? "encryption-invalid" : "encryption-missing";
+    } else if(error instanceof NegotiationFailedError) {
+
+      // A version mismatch is its own verdict rather than a generic permanent failure: the device and this plugin's client cannot agree on an API version, so the user
+      // acts by updating one side or the other. This branch sits ahead of the PermanentError one below because NegotiationFailedError extends it and the first matching
+      // branch wins, so the two in the other order would leave this one unreachable.
+      log.error("The device's ESPHome API version is not one this plugin supports: %s", error.message);
+      reason = "unsupported";
     } else if(error instanceof PermanentError) {
 
       log.error("Permanent connection error: %s", util.inspect(error, { depth: null }));

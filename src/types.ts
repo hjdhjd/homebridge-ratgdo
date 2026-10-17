@@ -53,6 +53,16 @@ export const RatgdoVariant = {
 
 export type RatgdoVariant = typeof RatgdoVariant[keyof typeof RatgdoVariant];
 
+/* The family word each variant's devices are known by. It is the word HomeKit's Model characteristic opens with, which device.ts composes from this table, and it is
+ * also the heading the settings sidebar groups a device under - the page derives the group from the leading word of the Model it reads back. Declaring it once beside
+ * the variant is what keeps those two readings one vocabulary: a variant added without a label fails to compile here rather than rendering an unlabelled group.
+ */
+export const RATGDO_VARIANT_LABELS = {
+
+  konnected: "Konnected",
+  ratgdo: "Ratgdo"
+} as const satisfies Record<RatgdoVariant, string>;
+
 /* Matched entry from RATGDO_AUTODISCOVERY_PROJECTS. The discovery boundary returns one of these whenever a TXT-advertised project_name matches a known pattern, so
  * the variant classification rides through the same .find() call that gates the device into the configuration path.
  */

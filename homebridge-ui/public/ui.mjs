@@ -2,23 +2,13 @@
  *
  * ui.mjs: Homebridge Ratgdo webUI.
  */
+import { STATUS_ADDRESSES_ROUTE, STATUS_WARM_ROUTE } from "./status-routes.mjs";
 import { FeatureOptions } from "homebridge-plugin-utils/featureOptions.js";
 import { PluginConfigSession } from "homebridge-plugin-utils/pluginConfigSession.mjs";
 import { STATUS_EVENT } from "homebridge-plugin-utils/webui-status.js";
 import { makeRatgdoConfig } from "./ratgdo-config.mjs";
 import { webUi } from "homebridge-plugin-utils/webUi.mjs";
 import { withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
-
-// The warm-route literal, ratgdo's extension to the shared status protocol. It must stay in step with STATUS_WARM_ROUTE in src/webui-status.ts, the owner of the warm
-// extension, because browser code cannot import from dist/. The warm route carries the whole sidebar's device list plus each device's effective key; the shared push
-// event and view route belong to homebridge-plugin-utils and are handled by the imported statusPanel component, so this warm-extension route is the one bridge literal
-// this module mirrors.
-const STATUS_WARM_ROUTE = "/statusWarm";
-
-// The addresses-route literal, ratgdo's identity-strip extension to the shared status protocol. It must stay in step with STATUS_ADDRESSES_ROUTE in src/webui-status.ts,
-// the route's owner, because browser code cannot import from dist/. The route answers with the server's live discovery map - each device's mac to the address the status
-// connection dials - which the strip's address row reads by device.serialNumber. Its response carries the whole projection; the request carries no body.
-const STATUS_ADDRESSES_ROUTE = "/statusAddresses";
 
 // The motion-latch fallback duration, in seconds, for the placeholder skeleton only. The authoritative snapshot rows carry the server's RATGDO_MOTION_DURATION on their
 // own latch, so this fallback governs the clear-back only until the first snapshot arrives; browser code cannot import the server constant, so the fallback is local by
@@ -27,15 +17,9 @@ const MOTION_LATCH_FALLBACK_SECONDS = 5;
 
 // The trailing-debounce window, in milliseconds, before a hook- or belt-driven warm recompute sends. It mirrors homebridge-plugin-utils' own persist coalescing window:
 // the edit hook fires once per option mutation, so a burst of keystrokes into an encryption-key field would otherwise re-send a warm on every character and reconnect the
-// device against a half-typed key. The debounce coalesces the burst into one warm carrying the settled value. The initial warm bypasses this and sends immediately.
+// device against a half-typed key. The debounce coalesces the burst into one warm carrying the settled value. The load announcement's warm bypasses this window and
+// sends immediately, because a page that has just established has nothing to coalesce with.
 const WARM_DEBOUNCE_MS = 300;
-
-/* The bound in seconds on the shared option-catalog fetch below. The bound exists so a bridge call that never settles rejects rather than wedging the cached promise for
- * the life of the page, and it binds every consumer of that one fetch alike - the load-time wiring and the post-boot warm-path triggers. The trade it carries: a fetch
- * that is legitimately slow but would eventually have settled costs a retry cycle rather than resolving, which is cheap beside the permanent wedge the bound prevents,
- * because the cache clears on rejection and the warm-path triggers repeat, so the next trigger refetches fresh.
- */
-const CATALOG_DEADLINE = 5;
 
 /* The warm-set recompute state. rememberedKeys is the warm set the server last received, keyed by mac with the value being that mac's effective key (undefined recorded
  * explicitly, so a tracked-keyless device is distinct from an untracked one); a recompute re-sends only when this set would change, a send-suppression optimization over
@@ -43,34 +27,6 @@ const CATALOG_DEADLINE = 5;
  */
 let rememberedKeys = new Map();
 let warmDebounceTimer = null;
-
-/* The option catalog, fetched once per page from the plugin's own UI server (a local IPC to /getOptions, never a cloud call) and shared by the load-time configuration
- * wiring and the warm-set recompute. The FeatureOptions engine is rebuilt from live editedConfig on every recompute, but the catalog's categories and option definitions
- * are static, so one fetch serves both consumers. The cached promise is cleared on failure so a later read retries rather than pinning a transient fault for the page.
- */
-let catalogPromise = null;
-
-const getCatalog = () => {
-
-  catalogPromise ??= withDeadline({ promise: homebridge.request("/getOptions"), seconds: CATALOG_DEADLINE }).then((response) => {
-
-    // A response without the catalog shape the server publishes is a failure, not a default. Shaping it into an empty catalog would make the engine resolve every
-    // device's encryption key as absent and connect the whole sidebar keyless, so a malformed response throws and the guarded callers surface it instead.
-    if(!Array.isArray(response?.categories) || !response.categories.length || (typeof response?.options !== "object") || !response.options) {
-
-      throw new Error("Received a malformed response from the plugin option catalog.");
-    }
-
-    return { categories: response.categories, options: response.options };
-  }).catch((error) => {
-
-    catalogPromise = null;
-
-    throw error;
-  });
-
-  return catalogPromise;
-};
 
 /* The identity-strip address cache. deviceAddresses maps each device's mac - device.serialNumber, the same key the status pushes carry - to that device's live discovery
  * address, so the strip's address row reads the very address the status connection dials. It starts empty and is replaced wholesale by refreshAddresses on every resolved
@@ -138,17 +94,16 @@ const refreshAddresses = async () => {
  * exactly one place rather than being restated per trigger; the address-refresh request is a read and is deliberately outside this funnel. The whole body is guarded:
  * a failed lookup logs to the console and keeps the last-sent set rather than throwing out of a callback. The device list comes from the public HBPU device-list source
  * (never a hand-parse of the cached accessories), and each device's effective key comes from one FeatureOptions engine rebuilt from the live editedConfig against the
- * once-fetched catalog, so encryption-key inheritance resolves entirely through the engine. The remembered set records every mac explicitly with undefined meaning "no
- * key", so a keyless tracked device and an untracked one are distinguishable, and the send is suppressed unless a mac is new or a key differs - a redundant warm would be
- * a no-op at the server's authoritative diff, so suppressing it is purely an optimization.
+ * framework's page-lifetime catalog, which it fetches once and shares with every reader, so encryption-key inheritance resolves entirely through the engine. The
+ * remembered set records every mac explicitly with undefined meaning "no key", so a keyless tracked device and an untracked one are distinguishable, and the send is
+ * suppressed unless a mac is new or a key differs - a redundant warm would be a no-op at the server's authoritative diff, so suppressing it is purely an optimization.
  */
 const recomputeWarmSet = async () => {
 
   try {
 
-    const catalog = await getCatalog();
-    const result = await ui.featureOptions.getHomebridgeDevices();
-    const devices = result?.devices ?? [];
+    const catalog = await ui.featureOptions.catalog();
+    const devices = (await deviceList()).devices ?? [];
 
     /* The primary config block, read by position, whose absence is the establishment gate. The plugin-config session pins config[0] as the primary platform entry and the
      * editedConfig getter hands that entry back first on every read, and the array it reads is Ratgdo-only by the host's own construction - the server filters plugin
@@ -157,12 +112,13 @@ const recomputeWarmSet = async () => {
      * in-memory config block, so a tag match can miss against a fully keyed configuration after a Settings-tab visit and compute every encrypted device keyless.
      *
      * The getter answers with an empty array exactly until show() has supplied the session - a failed launch included, because the shell's show() reports a launch
-     * failure to the user and resolves rather than rejecting - so an absent block gates establishment for every caller of this function alike: the initial warm, the
-     * debounced triggers, and the forced re-sends. The gate keys on the block being absent and never on its options being empty, so an established session that has
-     * configured no options passes it and computes an honest keyless set for devices that need no key. A failed launch heals when the menu's re-launch recovery supplies
-     * the session, and the bound that healing carries is taken deliberately: the recovery transition itself fires no warm, so the first warm after a failed launch rides
-     * the next trigger - a config change, an option edit, a helper hello, a visibility return, or a resume - rather than firing at the moment of establishment, which is
-     * the trade against re-introducing a boot-shaped send that could race establishment. The panel's own feed machinery keeps the user's view honest in that window.
+     * failure to the user and resolves rather than rejecting - so an absent block gates establishment for every caller of this function alike: the load announcement's
+     * warm, the debounced triggers, and the forced re-sends. The gate keys on the block being absent and never on its options being empty, so an established session
+     * that has configured no options passes it and computes an honest keyless set for devices that need no key.
+     *
+     * Every show cycle that establishes the page announces its loaded model and warms at once; a cycle that fails before that point announces nothing, and the relaunch
+     * the menu's recovery runs announces and warms when it establishes. A repeat cycle costs nothing beyond one cached-accessories read - the same read every trigger
+     * already pays, served from the host's own cache - because the send suppression below refuses a re-send while no key has moved.
      */
     const block = ui.featureOptions.editedConfig[0];
 
@@ -268,9 +224,9 @@ const scheduleRecompute = () => {
  * warm set, so a suppressed re-send would leave it starved. Clearing the remembered keys forces the next recompute to send. Routing through the debounced recompute
  * rather than an immediate one makes the debounce the serializer: a hello landing mid-keystroke coalesces with the typing burst instead of racing it with a
  * half-typed key, concurrent triggers (a hello and a foreground return together) collapse into one send, and the 300ms trailing delay is imperceptible beside the
- * roughly one-second connect floor. One honest bound: the boot-time initial warm bypasses this debounce, so a boot hello's debounced recompute can overlap the
- * initial warm's async body - both compute against the same live state, and the server's authoritative diff makes the double-send harmless, the same posture every
- * redundant send in this design rides.
+ * roughly one-second connect floor. One honest bound: the load announcement's warm bypasses this debounce, so a hello arriving during a launch can have its debounced
+ * recompute overlap that announcement's async body - both compute against the same live state, and the server's authoritative diff makes the double-send harmless,
+ * which is the posture every redundant send in this design takes.
  */
 const forceWarmResend = () => {
 
@@ -278,22 +234,82 @@ const forceWarmResend = () => {
   scheduleRecompute();
 };
 
-/* The feature-options parameters. The statusPanel configuration supplies exactly the parts ratgdo owns and inherits the shared homebridge-plugin-utils panel around them:
+/* The sidebar's own order for the groups this page assigns. These are the family words a device's Model characteristic opens with, declared for HomeKit in the plugin's
+ * own variant table, listed here only to rank the sections; a word this list does not name sorts after both of them by locale rather than breaking the sidebar.
+ */
+const SIDEBAR_GROUP_ORDER = [ "Ratgdo", "Konnected" ];
+
+// A group's place in the order above, with a group the order does not name ranking after every group it does.
+const sidebarGroupRank = (group) => {
+
+  const rank = SIDEBAR_GROUP_ORDER.indexOf(group);
+
+  return (rank === -1) ? SIDEBAR_GROUP_ORDER.length : rank;
+};
+
+/* The sidebar group a device belongs to, read from the leading word of its Model. device.ts composes that Model as the family word followed by the hardware model, for
+ * exactly this reason, so the group is available on every install the moment the page loads - nothing is persisted, nothing is migrated, and no plugin-runtime module
+ * reaches the browser. A Model that is not text at all leaves the device untagged, which the framework renders under the top-level device heading.
+ */
+const variantGroup = (model) => {
+
+  if((typeof model !== "string") || (model.length === 0)) {
+
+    return undefined;
+  }
+
+  const space = model.indexOf(" ");
+
+  return (space === -1) ? model : model.slice(0, space);
+};
+
+/* The page's device source, and the one place the device fetch and its grouping live. It hands back the framework's own result object - both `devices` and `error`,
+ * which the framework's contract guard requires - with each row tagged by its variant group, so the sidebar and the warm recompute read one list processed one way.
+ */
+const deviceList = async () => {
+
+  const result = await ui.featureOptions.getHomebridgeDevices();
+
+  for(const device of result.devices ?? []) {
+
+    device.sidebarGroup = variantGroup(device.model);
+  }
+
+  return result;
+};
+
+/* The feature-options parameters. onLoaded is the page's first warm: the framework announces it once per show cycle that reaches a loaded model, with the status panel's
+ * handle already minted and the configuration session established, which is exactly the state the recompute's own establishment gate waits for. The statusPanel
+ * configuration supplies exactly the parts ratgdo owns and inherits the shared homebridge-plugin-utils panel around them:
  * the error-copy overrides for the reasons whose ratgdo wording differs from the component's credential-neutral defaults, the identity cells (Model, plus the monospace
  * MAC and IP address rows), and the placeholder rows the skeleton renders before the first snapshot. The row ids, labels, and sizers are ratgdo's vocabulary; the motion
  * row's placeholder latch is the fallback the snapshot's authoritative latch supersedes.
  */
 const featureOptionsParams = {
 
+  getDevices: deviceList,
+  onLoaded: () => {
+
+    void recomputeWarmSet();
+  },
   onOptionsEdited: scheduleRecompute,
-  sidebar: { deviceLabel: "Ratgdo Devices" },
+  sidebar: {
+
+    deviceLabel: "Ratgdo Devices",
+
+    /* Where each group of the device list sits: the Ratgdo family first, then the Konnected one. The framework hands this comparator only the names that render as
+     * sections, so the reserved hidden group never reaches it, and a group the order above does not name sorts after both of the named ones by locale.
+     */
+    groupOrder: (a, b) => (sidebarGroupRank(a) - sidebarGroupRank(b)) || a.localeCompare(b)
+  },
   statusPanel: {
 
     errorMessages: {
 
       "auth-invalid": { label: "Key mismatch", message: "The configured encryption key does not match the key in this device's YAML configuration." },
       "auth-missing": { label: "Key required", message: "This device requires its API encryption key. Set it with the Device Encryption Key feature option." },
-      "not-found": { message: "This device was not discovered via mDNS." }
+      "not-found": { message: "This device was not discovered via mDNS." },
+      "unsupported": { message: "This device's ESPHome API version is not one this plugin can talk to. Update the device's firmware or this plugin so the two match." }
     },
     identity: (device) => [
 
@@ -411,7 +427,7 @@ const wiringSignal = ui.epochBounded(wiringController.signal);
  */
 const wireRatgdoConfig = async () => {
 
-  const ratgdoConfig = makeRatgdoConfig({ FeatureOptions, catalog: await getCatalog() });
+  const ratgdoConfig = makeRatgdoConfig({ FeatureOptions, catalog: await ui.featureOptions.catalog() });
 
   // The library's session is the single conduit the framework's own writes use, so the patch merges onto a replica synced just now rather than onto a snapshot taken
   // before the page opened.
@@ -427,7 +443,7 @@ const wireRatgdoConfig = async () => {
     // rather than forced, which leaves the migration staged for the user's own save - the weaker outcome, and the honest one.
     if(!wiringSignal.aborted) {
 
-      await homebridge.savePluginConfig();
+      await session.persist();
     }
   }
 };
@@ -449,9 +465,6 @@ try {
   console.error("The configuration migration did not complete.", error);
 }
 
-// Await show() before the first warm: it is the sanctioned first send, and it sends immediately rather than through the debounce that only the burst-prone trigger paths
-// need. The establishment gate inside the recompute is what makes every invocation that lands earlier, or after a failed launch, a silent no-op, so this await orders the
-// boot send behind the session rather than carrying correctness on its own.
+// Await show() so this module's import settles with the page established rather than mid-launch - the loader awaits this module, so what it awaits is a page that has
+// finished coming up. The first warm is the load announcement's, sent from inside the launch the moment the model loads.
 await ui.show();
-
-void recomputeWarmSet();
