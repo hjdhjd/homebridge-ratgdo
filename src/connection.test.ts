@@ -6,14 +6,13 @@
  * The ESPHome client factory is injected as a fake (makeFakeOpenClient), and the state-capture budget (timeoutSeconds) is injected in fractional seconds (e.g. 0.02)
  * so each wait resolves in milliseconds of real time, driving every branch deterministically without a live device, fake timers, or a fake Homebridge harness.
  */
-import { AuthenticationError, EncryptionKeyInvalidError, EncryptionKeyMissingError, EncryptionRequiredError, NegotiationFailedError,
-  entityId } from "esphome-client";
 import type { ConnectionOutcome, EncryptionKeyLookup, ManualConnectionOutcome, OpenConnectionOptions, OpenEspHomeClient,
   OpenManualConnectionOptions } from "./connection.ts";
 import { DeviceIdentityError, applyDeviceInfo, captureInitialState, isEncryptionError, openConnection, openManualConnection } from "./connection.ts";
 import type { DeviceInfo, EntityId, NoiseServerHello, TelemetryEvent } from "esphome-client";
+import { EncryptionKeyInvalidError, EncryptionKeyMissingError, EncryptionRequiredError, NegotiationFailedError, entityId } from "esphome-client";
 import { RATGDO_ENTITIES, idFor, ratgdoInitialStateEntityIds } from "./entities.ts";
-import { TestEspHomeClient, asEspHomeClient, makeCoverEvent, makeFakeOpenClient, makeLightEvent, makeTelemetry, makeTestDevice, openThroughHello,
+import { TestEspHomeClient, TestPermanentError, asEspHomeClient, makeCoverEvent, makeFakeOpenClient, makeLightEvent, makeTelemetry, makeTestDevice, openThroughHello,
   resolverOf } from "./testing.helpers.ts";
 import { capturingLog, logCount, loggedAt } from "homebridge-plugin-utils/testing";
 import { describe, test } from "node:test";
@@ -107,8 +106,7 @@ describe("captureInitialState", () => {
 
     await assert.rejects(
       captureInitialState({ client: asEspHomeClient(client), expected: [ coverId, lightId ], signal: deadline }),
-      (error) => error === deadline.reason,
-      "a deadline that fires mid-wait rejects the wait with that deadline's own reason, by identity");
+      (error) => error === deadline.reason);
   });
 
   test("shutdown: rejects with the shutdown reason at the synchronous gate when the signal is already aborted", async () => {
@@ -117,8 +115,7 @@ describe("captureInitialState", () => {
 
     await assert.rejects(
       captureInitialState({ client: asEspHomeClient(client), expected: [ coverId, lightId ], signal: AbortSignal.abort("shutdown") }),
-      (reason) => reason === "shutdown",
-      "a signal already aborted with the shutdown reason surfaces that reason through the throwIfAborted gate");
+      (reason) => reason === "shutdown");
   });
 
   test("shutdown: rejects with the shutdown reason when the signal aborts mid-wait", async () => {
@@ -129,7 +126,7 @@ describe("captureInitialState", () => {
 
     controller.abort("shutdown");
 
-    await assert.rejects(pending, (reason) => reason === "shutdown", "an abort the controller delivers while waiting surfaces its signal's reason");
+    await assert.rejects(pending, (reason) => reason === "shutdown");
   });
 });
 
@@ -213,11 +210,11 @@ describe("openConnection", () => {
 
   test("permanent error: returns null and logs the permanent-connection diagnostic", async () => {
 
-    const { entries, result } = await run(makeFakeOpenClient(new AuthenticationError("auth failed")));
+    const { entries, result } = await run(makeFakeOpenClient(new TestPermanentError("the device refused permanently")));
 
     assert.ok(!result.ok, "a permanent error skips the discovery attempt");
     assert.equal(result.reason, "permanent", "the failure outcome carries the permanent reason token");
-    assert.ok(loggedAt(entries, "error", "Permanent connection error: AuthenticationError: auth failed"),
+    assert.ok(loggedAt(entries, "error", "Permanent connection error: TestPermanentError: the device refused permanently"),
       "the user sees the permanent-connection diagnostic carrying the inspected error");
   });
 
@@ -457,7 +454,7 @@ describe("openManualConnection", () => {
       { error: new EncryptionKeyMissingError("missing key"), why: "an absent encryption key" },
       { error: new EncryptionRequiredError("key required"), why: "a device that requires a key it was not given" },
       { error: new NegotiationFailedError("api major 5 is outside the supported range", "API_MAJOR_OUT_OF_RANGE"), why: "an unsupported API version" },
-      { error: new AuthenticationError("auth failed"), why: "a permanent connection error" },
+      { error: new TestPermanentError("the device refused permanently"), why: "a permanent connection error" },
       { error: new Error("connection refused"), why: "an unclassified connection error" }
     ];
 
@@ -714,6 +711,7 @@ describe("isEncryptionError", () => {
   test("rejects a generic error and a non-encryption PermanentError", () => {
 
     assert.equal(isEncryptionError(new Error("boom")), false, "a generic Error is not an encryption-configuration error");
-    assert.equal(isEncryptionError(new AuthenticationError("auth failed")), false, "a non-encryption PermanentError subclass is not an encryption-configuration error");
+    assert.equal(isEncryptionError(new TestPermanentError("the device refused permanently")), false,
+      "a non-encryption PermanentError subclass is not an encryption-configuration error");
   });
 });

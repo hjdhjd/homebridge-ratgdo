@@ -223,8 +223,7 @@ describe("TestAccessory and makeTestAccessory", () => {
 
     const before = accessory.services.length;
 
-    assert.throws(() => accessory.addService(new Service.Lightbulb("light")), { message: /^Cannot add a Service with the same UUID/ },
-      "a subtype-less service beside a same-type subtyped one is refused in HAP's own words");
+    assert.throws(() => accessory.addService(new Service.Lightbulb("light")), { message: /^Cannot add a Service with the same UUID/ });
     assert.equal(accessory.services.length, before, "the refused service is never appended");
     assert.doesNotThrow(() => accessory.addService(new Service.Lightbulb("other", "other")), "a second subtyped service with a distinct subtype is admitted");
   });
@@ -425,8 +424,7 @@ describe("TestEspHomeClient", () => {
 
     const client = new TestEspHomeClient({ throwOnListen: true });
 
-    assert.throws(() => client.on("lifecycle", () => { /* Never registered: the throw precedes registration. */ }), /listener registration failed/u,
-      "a client whose listener registration fails throws out of on()");
+    assert.throws(() => client.on("lifecycle", () => { /* Never registered: the throw precedes registration. */ }), /listener registration failed/u);
 
     // Nothing was recorded, so a later emit reaches no handler - the state a consumer's totality catch has to cope with.
     client.emit("lifecycle", { encrypted: false, kind: "connect" });
@@ -471,7 +469,7 @@ describe("asEspHomeClient and makeFakeOpenClient", () => {
     const failure = new Error("connection refused");
     const open = makeFakeOpenClient(failure);
 
-    await assert.rejects(() => open({ host: "192.0.2.10" }), (error) => error === failure, "an Error result rejects through the factory, mirroring a failed open");
+    await assert.rejects(() => open({ host: "192.0.2.10" }), (error) => error === failure);
   });
 
   test("makeFakeOpenClient records the options each invocation received", async () => {
@@ -495,11 +493,13 @@ describe("asEspHomeClient and makeFakeOpenClient", () => {
     await open({ host: "192.0.2.11", psk: null });
 
     assert.equal(resolverOf(open.calls[0]), resolver, "the resolver the invocation carried is the one answered");
-    assert.throws(() => resolverOf(open.calls[1]), /carried no key resolver/, "an invocation opened with no resolver fails at the read rather than at a call of null");
-    assert.throws(() => resolverOf(undefined), /carried no key resolver/, "and so does an invocation that never happened");
+
+    // An invocation opened with no resolver fails at the read, rather than at a later call of null, and so does an invocation that never happened.
+    assert.throws(() => resolverOf(open.calls[1]), /carried no key resolver/);
+    assert.throws(() => resolverOf(undefined), /carried no key resolver/);
   });
 
-  test("openThroughHello settles the way the client settles on what the resolver did with the hello", async () => {
+  test("openThroughHello settles the way the client settles on what the resolver did with the hello", async (t) => {
 
     const client = new TestEspHomeClient();
     const hello = { macAddress: "AA:BB:CC:DD:EE:FF" };
@@ -520,7 +520,7 @@ describe("asEspHomeClient and makeFakeOpenClient", () => {
     await assert.rejects(() => makeFakeOpenClient(openThroughHello({ client, hello }))({ host: "192.0.2.10", psk: () => {
 
       throw refusal;
-    } }), (error) => error === refusal, "a library error the resolver throws rejects as thrown");
+    } }), (error) => error === refusal);
 
     const fault = new Error("the resolver came apart");
 
@@ -538,13 +538,16 @@ describe("asEspHomeClient and makeFakeOpenClient", () => {
 
     for(const answer of [ null, "" ]) {
 
+      // A subtest per answer names the answer in a failure report, and the sequential await keeps each rejection attributable to the answer that caused it.
       // eslint-disable-next-line no-await-in-loop
-      await assert.rejects(() => makeFakeOpenClient(openThroughHello({ client, hello }))({ host: "192.0.2.10", psk: () => answer }),
-        EncryptionKeyMissingError, "a resolver answering " + JSON.stringify(answer) + " fails as a missing key");
+      await t.test("a resolver answering " + JSON.stringify(answer) + " fails as a missing key", async () => {
+
+        await assert.rejects(() => makeFakeOpenClient(openThroughHello({ client, hello }))({ host: "192.0.2.10", psk: () => answer }), EncryptionKeyMissingError);
+      });
     }
 
-    await assert.rejects(() => makeFakeOpenClient(openThroughHello({ client, hello }))({ host: "192.0.2.10", psk: null }),
-      EncryptionRequiredError, "and an invocation carrying no resolver fails the way an encrypted device answers a plaintext client");
+    // An invocation carrying no resolver fails the way an encrypted device answers a plaintext client.
+    await assert.rejects(() => makeFakeOpenClient(openThroughHello({ client, hello }))({ host: "192.0.2.10", psk: null }), EncryptionRequiredError);
   });
 
   test("makeFakeOpenClient answers each call through a handler, passing that call's options and its zero-based index", async () => {

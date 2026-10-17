@@ -7,7 +7,7 @@
  * capture budget is injected the same way, but its deadline is the connection core's own timer, so a row that lets it fire waits it out in real milliseconds. The
  * doubles follow the testing.helpers conventions - counters, not booleans, wherever a no-op-versus-double-call distinction matters.
  */
-import { AuthenticationError, CoverOperation, LockState, entityId } from "esphome-client";
+import { CoverOperation, LockState, entityId } from "esphome-client";
 import type { DeviceInfo, EntityId, TelemetryEvent } from "esphome-client";
 import { HbpuAbortError, dnsNameKey, formatValueList } from "homebridge-plugin-utils";
 import type { MdnsBrowserLike, MdnsBrowserOptions, MdnsService, Nullable, StatusEvent } from "homebridge-plugin-utils";
@@ -15,8 +15,8 @@ import type { OpenClientHandler, RecordedOpenOptions, TestEspHomeClientOptions }
 import { RATGDO_MOTION_DURATION, RATGDO_WEBUI_PROBE_TIMEOUT } from "./settings.ts";
 import { StatusFeed, narrowStatusProbeRequest, narrowStatusWarmRequest } from "./webui-status.ts";
 import { TestClock, TestMdnsBrowserFactory, capturingLog, expectAt, formatLogEntry, settle, waitUntil } from "homebridge-plugin-utils/testing";
-import { TestEspHomeClient, makeBinarySensorEvent, makeCoverEvent, makeFakeOpenClient, makeLightEvent, makeLockEvent, makeRatgdoService, makeSwitchEvent,
-  makeTelemetry, openThroughHello, resolverOf } from "./testing.helpers.ts";
+import { TestEspHomeClient, TestPermanentError, makeBinarySensorEvent, makeCoverEvent, makeFakeOpenClient, makeLightEvent, makeLockEvent, makeRatgdoService,
+  makeSwitchEvent, makeTelemetry, openThroughHello, resolverOf } from "./testing.helpers.ts";
 import type { TestLogEntry, TestMdnsBrowser } from "homebridge-plugin-utils/testing";
 import { canonicalManualAddress, manualAddressList } from "./manual.ts";
 import { describe, test } from "node:test";
@@ -110,7 +110,6 @@ const makeKonnectedService = (mac = MAC, address = ADDR): MdnsService => {
   return makeRatgdoService({ esphome_version: "2.0.0", friendly_name: "Test Konnected", mac, project_name: "konnected.garage-door-gdov2-s", project_version: "1.0.0" },
     [address]);
 };
-
 
 /* A browser factory whose first `failNext` builds throw, for the discovery-start failure paths. It extends the library's own double so any build past the failures
  * answers a real browser a test can drive, and `attempts` counts every build asked for - the recorded createCalls hold only the ones that succeeded.
@@ -904,7 +903,7 @@ describe("StatusFeed addresses", () => {
     assert.deepEqual(first, { [MAC]: ADDR }, "the projection carries the discovered address");
     assert.ok(Object.isFrozen(first), "the returned projection is frozen against mutation");
     assert.notStrictEqual(feed.addresses(), first, "each call returns a fresh object rather than a shared reference");
-    assert.throws(() => { (first as Record<string, string>)[MAC] = "10.0.0.1"; }, "mutating the frozen projection throws rather than corrupting it");
+    assert.throws(() => { (first as Record<string, string>)[MAC] = "10.0.0.1"; }, TypeError);
     assert.deepEqual(feed.addresses(), { [MAC]: ADDR }, "a later read is unchanged by an attempt to mutate an earlier one");
   });
 
@@ -1266,7 +1265,7 @@ describe("StatusFeed connection failures", () => {
 
     assert.equal(await failureReasonFor(async () => {
 
-      throw new AuthenticationError("auth failed");
+      throw new TestPermanentError("the device refused permanently");
     }), "unreachable", "a permanent connection error surfaces as unreachable");
   });
 
@@ -1894,7 +1893,6 @@ describe("StatusFeed supersede", () => {
     browser().found(makeService());
 
     await settle();
-
 
     // Start the first connect against one key; its client resolution defers. Supersede it with a re-warm carrying a different key, which tears the first session down and
     // starts the successor. Only then does the first connect resolve - after the supersede has installed the successor session.

@@ -865,9 +865,9 @@ describe("the ratgdo settings page's Add Device card", () => {
        * listener on every surface a stray click could reach - the sidebar, its content wrapper, and the document - which leaves nothing a non-navigating click could
        * reach that would release the card.
        */
-      assert.throws(() => fire(sidebar, "click"), /registered no click listener/, "the page listens for no click on the sidebar");
-      assert.throws(() => fire(content, "click"), /registered no click listener/, "nor on the sidebar's content wrapper");
-      assert.throws(() => fire(page.document, "click"), /registered no click listener/, "nor on the document");
+      assert.throws(() => fire(sidebar, "click"), /registered no click listener/);
+      assert.throws(() => fire(content, "click"), /registered no click listener/);
+      assert.throws(() => fire(page.document, "click"), /registered no click listener/);
       assert.ok(isHeld(page, card.region), "and the card is still held");
     });
 

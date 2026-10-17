@@ -21,7 +21,7 @@
 // constructs a feed or an accessory reads against globals that are guaranteed to exist.
 import "homebridge-plugin-utils/polyfills";
 import type { Clock, HomebridgePluginLogging, MdnsService, Nullable } from "homebridge-plugin-utils";
-import { ConnectionError, CoverOperation, EncryptionKeyMissingError, EncryptionRequiredError, EspHomeError, LockState, entityId } from "esphome-client";
+import { ConnectionError, CoverOperation, EncryptionKeyMissingError, EncryptionRequiredError, EspHomeError, LockState, PermanentError, entityId } from "esphome-client";
 import type { DeviceInfo, EntityId, EspHomeClient, LifecycleEvent, LogEventData, NoiseServerHello, PskResolver, TelemetryEvent } from "esphome-client";
 import { TestClock, TestMqttClient, capturingLog, makeService, makeTxtStrings } from "homebridge-plugin-utils/testing";
 import { featureOptionCategories, featureOptions } from "./options.ts";
@@ -751,6 +751,13 @@ export interface RecordedOpenOptions {
  * recovers from.
  */
 export type OpenClientHandler = (options: RecordedOpenOptions, index: number) => Promise<TestEspHomeClient>;
+
+/* A permanent connection failure esphome-client does not name. The library's PermanentError is the abstract root its reconnect supervisor refuses to retry, and
+ * every subclass it ships is an encryption or negotiation failure with a branch of its own in the connection core. The core's PermanentError branch is the
+ * contract for any other subclass a release may add, so the suite drives that branch with a subclass of its own rather than a shipped class whose meaning the core
+ * already reads in an earlier branch.
+ */
+export class TestPermanentError extends PermanentError {}
 
 /* Build a fake `openEspHomeClient` factory for openConnection and status-feed tests. Pass a TestEspHomeClient to model a successful open (the factory resolves it), an
  * Error to model a failed open (the factory rejects with it - an EncryptionKeyInvalidError, a PermanentError subclass, etc.), or a handler to answer each call on its

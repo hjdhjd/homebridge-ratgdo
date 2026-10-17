@@ -180,7 +180,8 @@
       if(details) {
 
         // The error text is untrusted, so each detail line is assigned as plain text through textContent and is never parsed as markup.
-        const lines = [ "Stage: " + stage, "Error: " + ((error instanceof Error) ? error.message : String(error)), "Browser: " + navigator.userAgent ];
+        // The message is read by homebridge-plugin-utils's errorMessage, the settings page's shared rule, restated since this script runs before any module loads.
+        const lines = [ "Stage: " + stage, "Error: " + (error?.message ?? String(error)), "Browser: " + navigator.userAgent ];
 
         for(const line of lines) {
 

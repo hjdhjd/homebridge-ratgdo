@@ -64,4 +64,3 @@ export const RATGDO_WEBUI_DISCOVERY_TIMEOUT = 10;
 // address is watching the card, so the budget is short enough to answer them promptly and long enough to cover a device waking on a busy network. The page arms a
 // longer bound of its own around the request, so what a slow device produces is this classified answer rather than the browser giving up first.
 export const RATGDO_WEBUI_PROBE_TIMEOUT = 10;
-
