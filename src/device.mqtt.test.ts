@@ -296,6 +296,31 @@ describe("RatgdoAccessory MQTT configuration", () => {
     });
   });
 
+  describe("the motion subscriptions across the variants", () => {
+
+    test("a Konnected device registers neither, since the hints its firmware cannot serve gate both", () => {
+
+      const { mqtt } = buildRatgdoAccessory({ device: { variant: RatgdoVariant.KONNECTED }, initialState: makeKonnectedInitialState(), mqtt: true,
+        userOptions: ["Enable.Motion.OccupancySensor"] });
+
+      assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
+      assert.equal(mqtt.subscriptions.some((entry) => entry.topic.endsWith("motion" + MQTT_GET_SUFFIX)), false,
+        "a Konnected device registers no motion subscription, so a broker read of it answers nothing");
+      assert.equal(mqtt.subscriptions.some((entry) => entry.topic.endsWith("/occupancy" + MQTT_GET_SUFFIX)), false,
+        "a Konnected device registers no motion occupancy subscription even with the occupancy sensor enabled");
+    });
+
+    test("a Ratgdo device registers both under the same configuration", async () => {
+
+      const { mqtt } = buildRatgdoAccessory({ mqtt: true, userOptions: ["Enable.Motion.OccupancySensor"] });
+
+      assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
+      assert.equal(await mqtt.invokeGet("motion" + MQTT_GET_SUFFIX), "false", "a Ratgdo device registers the motion subscription, which reports the resting state");
+      assert.equal(await mqtt.invokeGet("/occupancy" + MQTT_GET_SUFFIX), "false",
+        "a Ratgdo device registers the motion occupancy subscription, which reports the cleared state");
+    });
+  });
+
   describe("the per-device topic prefix", () => {
 
     test("prefixes every registered get and set topic with the device MAC", () => {

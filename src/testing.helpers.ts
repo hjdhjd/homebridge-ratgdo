@@ -989,10 +989,15 @@ export function makeTestPlatform(options: MakeTestPlatformOptions = {}): MakeTes
   return { client, clock, entries: log.entries, mqtt, platform };
 }
 
-// Options for buildRatgdoAccessory: device fields to override, initial-state snapshot, the clock the accessory's timers arm on, platform config, client availability,
-// MQTT double, and feature-option strings. The clock carries makeTestPlatform's typing and its omit-for-a-fresh-one behavior.
+/* Options for buildRatgdoAccessory: the accessory to construct against, device fields to override, initial-state snapshot, the clock the accessory's timers arm on,
+ * platform config, client availability, MQTT double, and feature-option strings. The accessory member is how a test describes an install Homebridge restored from
+ * its cache - a TestAccessory the test has pre-seeded with the services a previous run wired on - so the configure chain runs against an accessory that already
+ * carries them; left unset, the harness builds a fresh accessory, which is the first-run case every other test wants. The clock carries makeTestPlatform's typing
+ * and its omit-for-a-fresh-one behavior.
+ */
 export interface BuildRatgdoAccessoryOptions {
 
+  accessory?: TestAccessory;
   clientUnavailable?: boolean;
   clock?: TestClock;
   config?: TestPlatform["config"];
@@ -1024,7 +1029,7 @@ export function buildRatgdoAccessory(options: BuildRatgdoAccessoryOptions = {}):
   const device = makeTestDevice(options.device);
   const { client, clock, entries, mqtt, platform } = makeTestPlatform({ clientUnavailable: options.clientUnavailable, clock: options.clock, config: options.config,
     mqtt: options.mqtt, userOptions: options.userOptions });
-  const accessory = makeTestAccessory(device.name, platform.hap.uuid.generate(device.mac));
+  const accessory = options.accessory ?? makeTestAccessory(device.name, platform.hap.uuid.generate(device.mac));
   const initialState = options.initialState ?? ((device.variant === RatgdoVariant.KONNECTED) ? makeKonnectedInitialState() : makeRatgdoInitialState());
 
   // The construction-seam casts (platform, accessory) bridge the doubles to the production constructor's parameter types - the only casts a device test needs.

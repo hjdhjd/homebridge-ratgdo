@@ -361,7 +361,8 @@ export class RatgdoAccessory implements Disposable {
   /* Build the hints record from feature-option configuration. Resolves every option exactly once at construction time and returns the populated structure. The
    * caching contract is structural: any reader (the `name` getter, the configureXxx methods, the updateState hot path) reads from `this.hints.X` instead of re-issuing
    * the underlying featureOptions lookup. The variant gates fold here too so configureXxx() methods can treat a single hint boolean as the source of truth for whether
-   * a feature applies to this device.
+   * a feature applies to this device. Motion sits under the same gate as the disco hardware: Konnected firmware advertises no motion entity, so both motion hints
+   * resolve false on that variant and the accessory carries neither the motion sensor nor the occupancy sensor its activity would drive.
    *
    * No side effects: this function returns a value and does not touch `this.hints`, `this.log`, or any other field that depends on construction order. Side effects
    * that depend on the resolved hints (e.g., the read-only announcement) belong in the constructor, after `this.hints` is assigned.
@@ -396,8 +397,8 @@ export class RatgdoAccessory implements Disposable {
       logOpener: this.hasFeature("Log.Opener"),
       logVehiclePresence: this.hasFeature("Log.VehiclePresence"),
       motionOccupancyDuration: featureOptions.getInteger("Motion.OccupancySensor.Duration", this.device.mac) ?? RATGDO_OCCUPANCY_DURATION,
-      motionOccupancySensor: this.hasFeature("Motion.OccupancySensor"),
-      motionSensor: this.hasFeature("Motion"),
+      motionOccupancySensor: isRatgdo && this.hasFeature("Motion.OccupancySensor"),
+      motionSensor: isRatgdo && this.hasFeature("Motion"),
       readOnly: this.hasFeature("Opener.ReadOnly")
     };
   }

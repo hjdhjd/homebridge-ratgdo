@@ -21,8 +21,9 @@ import { RatgdoVariant } from "./types.ts";
 import assert from "node:assert/strict";
 
 /* The fully-spelled hint record a default Ratgdo device resolves to. Spelling it out rather than deriving it from the production code makes this the test's independent
- * contract for "what every default is", and it doubles as the baseline every single-option test deviates exactly one field from. The Konnected variant resolves to the
- * identical record at default: the disco* and konnected* gates all multiply against an option whose default is false, so both collapse to false on either variant.
+ * contract for "what every default is", and it doubles as the baseline every single-option test deviates exactly one field from. A Konnected device at default reads
+ * the same record but for motionSensor: the disco* and konnected* gates all multiply against an option whose default is false, so both collapse to false on either
+ * variant, while Motion defaults on and its gate is what turns it off for firmware that reports no motion.
  */
 const DEFAULT_HINTS = {
 
@@ -93,11 +94,12 @@ describe("RatgdoAccessory hints", () => {
       assert.deepEqual(ratgdo.hints, DEFAULT_HINTS, "an unconfigured Ratgdo device resolves the full default hint record");
     });
 
-    test("resolves the identical default hint record on a Konnected device", () => {
+    test("resolves the defaults on a Konnected device but for the hints its firmware cannot serve", () => {
 
       const { ratgdo } = buildRatgdoAccessory({ device: { variant: RatgdoVariant.KONNECTED }, initialState: makeKonnectedInitialState() });
 
-      assert.deepEqual(ratgdo.hints, DEFAULT_HINTS, "an unconfigured Konnected device resolves the same defaults - the disco and konnected gates collapse to false");
+      assert.deepEqual(ratgdo.hints, { ...DEFAULT_HINTS, motionSensor: false },
+        "an unconfigured Konnected device resolves the same defaults - the disco and konnected gates collapse to false - but for the motion its firmware never reports");
     });
   });
 
@@ -147,6 +149,16 @@ describe("RatgdoAccessory hints", () => {
 
       assert.deepEqual({ konnectedPcwSwitch: ratgdo.hints.konnectedPcwSwitch, konnectedStrobeSwitch: ratgdo.hints.konnectedStrobeSwitch },
         { konnectedPcwSwitch: true, konnectedStrobeSwitch: true }, "both konnected hints are true on a Konnected device once their feature option is enabled");
+    });
+
+    test("suppresses both motion hints on the Konnected variant even when the occupancy option is enabled", () => {
+
+      const { ratgdo } = buildRatgdoAccessory({ device: { variant: RatgdoVariant.KONNECTED }, initialState: makeKonnectedInitialState(),
+        userOptions: ["Enable.Motion.OccupancySensor"] });
+
+      assert.deepEqual({ motionOccupancySensor: ratgdo.hints.motionOccupancySensor, motionSensor: ratgdo.hints.motionSensor },
+        { motionOccupancySensor: false, motionSensor: false },
+        "the variant gate keeps both motion hints false on a Konnected device regardless of the option, Motion's own default-on included");
     });
 
     test("suppresses the konnected hints on the Ratgdo variant even when their option is enabled", () => {

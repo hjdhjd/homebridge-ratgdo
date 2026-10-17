@@ -9,10 +9,11 @@
  * at all) is asserted here through the default and a representative disable; the full hints derivation is netted in device.hints.test.ts.
  */
 import { Characteristic, Service, buildRatgdoAccessory, makeBinarySensorEvent, makeCoverEvent, makeKonnectedInitialState, makeLightEvent, makeLockEvent,
-  makeRatgdoInitialState } from "./testing.helpers.ts";
+  makeRatgdoInitialState, makeTestAccessory } from "./testing.helpers.ts";
 import { CoverOperation, LockState } from "esphome-client";
 import { RatgdoService, RatgdoVariant } from "./types.ts";
 import { describe, test } from "node:test";
+import type { TestAccessory } from "./testing.helpers.ts";
 import assert from "node:assert/strict";
 import { ratgdoInitialStateEntityIds } from "./entities.ts";
 
@@ -139,6 +140,54 @@ describe("RatgdoAccessory construction", () => {
 
       assert.equal(presence?.getCharacteristic(Characteristic.OccupancyDetected).value, false,
         "an absent vehicle leaves OccupancyDetected clear at construction");
+    });
+  });
+
+  describe("the motion services on an accessory restored from the cache", () => {
+
+    /* The accessory Homebridge hands back for a device it has seen before, carrying the two motion services a previous run wired onto it. Each is seeded through the
+     * same service type and subtype the production configure path looks it up by, so the presence gate finds what a real restore would hand it - seeded any other way,
+     * the lookup would miss and the removal assertion below would hold for the wrong reason.
+     */
+    const restoredAccessory = (): TestAccessory => {
+
+      const accessory = makeTestAccessory();
+
+      accessory.addService(Service.MotionSensor, accessory.displayName);
+      accessory.addService(Service.OccupancySensor, accessory.displayName, RatgdoService.OCCUPANCY_SENSOR_MOTION);
+
+      return accessory;
+    };
+
+    test("keeps both on a Ratgdo device, whose firmware drives them", () => {
+
+      const accessory = restoredAccessory();
+
+      assert.ok(accessory.getService(Service.MotionSensor), "the restored accessory carries the motion sensor before construction");
+      assert.ok(accessory.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_SENSOR_MOTION),
+        "the restored accessory carries the motion occupancy sensor before construction");
+
+      buildRatgdoAccessory({ accessory, userOptions: ["Enable.Motion.OccupancySensor"] });
+
+      assert.ok(accessory.getService(Service.MotionSensor), "a Ratgdo device keeps the restored motion sensor, since its hint stays true");
+      assert.ok(accessory.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_SENSOR_MOTION),
+        "a Ratgdo device keeps the restored motion occupancy sensor, since its hint stays true");
+    });
+
+    test("strips both from a Konnected device, whose firmware reports no motion", () => {
+
+      const accessory = restoredAccessory();
+
+      assert.ok(accessory.getService(Service.MotionSensor), "the restored accessory carries the motion sensor before construction");
+      assert.ok(accessory.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_SENSOR_MOTION),
+        "the restored accessory carries the motion occupancy sensor before construction");
+
+      buildRatgdoAccessory({ accessory, device: { variant: RatgdoVariant.KONNECTED }, initialState: makeKonnectedInitialState(),
+        userOptions: ["Enable.Motion.OccupancySensor"] });
+
+      assert.equal(accessory.getService(Service.MotionSensor), undefined, "the variant gate takes the cached motion sensor off a Konnected accessory at construction");
+      assert.equal(accessory.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_SENSOR_MOTION), undefined,
+        "the variant gate takes the cached motion occupancy sensor off a Konnected accessory at construction");
     });
   });
 
