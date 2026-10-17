@@ -11,10 +11,9 @@ import type { EntityId, TelemetryEvent } from "esphome-client";
 import { HbpuAbortError, dnsNameKey } from "homebridge-plugin-utils";
 import type { MdnsBrowserLike, MdnsBrowserOptions, MdnsService, Nullable, StatusEvent } from "homebridge-plugin-utils";
 import { StatusFeed, narrowStatusWarmRequest } from "./webui-status.ts";
-import { TestClock, TestMdnsBrowserFactory, expectAt, settle } from "homebridge-plugin-utils/testing";
+import { TestClock, TestMdnsBrowserFactory, capturingLog, expectAt, formatLogEntry, settle } from "homebridge-plugin-utils/testing";
 import { describe, test } from "node:test";
-import { makeBinarySensorEvent, makeCapturingLog, makeCoverEvent, makeLightEvent, makeLockEvent, makeRatgdoService, makeSwitchEvent,
-  makeTelemetry } from "./testing.helpers.ts";
+import { makeBinarySensorEvent, makeCoverEvent, makeLightEvent, makeLockEvent, makeRatgdoService, makeSwitchEvent, makeTelemetry } from "./testing.helpers.ts";
 import type { OpenEspHomeClient } from "./connection.ts";
 import { RATGDO_MOTION_DURATION } from "./settings.ts";
 import type { RatgdoTxtKey } from "./discovery.ts";
@@ -261,7 +260,7 @@ const makeFeed = (options: { browserFactory?: TestMdnsBrowserFactory; discoveryT
   const pushes: StatusEvent[] = [];
   const clock = new TestClock();
   const factory = options.browserFactory ?? new TestMdnsBrowserFactory();
-  const { entries, log } = makeCapturingLog();
+  const log = capturingLog();
   const feed = new StatusFeed({
 
     browserFactory: factory,
@@ -273,7 +272,7 @@ const makeFeed = (options: { browserFactory?: TestMdnsBrowserFactory; discoveryT
   });
   const browser = (): TestMdnsBrowser => expectAt(factory.createCalls, factory.createCalls.length - 1, "the feed's current browser").browser;
 
-  return { browser, clock, entries, factory, feed, pushes };
+  return { browser, clock, entries: log.entries, factory, feed, pushes };
 };
 
 describe("StatusFeed pool connect", () => {
@@ -1333,7 +1332,7 @@ describe("StatusFeed connection failures", () => {
       await settle();
 
       assert.deepEqual(rejections, [], "no push throw escapes as an unhandled rejection across the warm-connect-fail cycle");
-      assert.ok(entries.some((entry) => (entry.level === "error") && String(entry.parameters[0]).includes("could not be delivered")),
+      assert.ok(entries.some((entry) => (entry.level === "error") && formatLogEntry(entry).includes("could not be delivered")),
         "the contained push failure is logged rather than swallowed silently");
     } finally {
 
@@ -1379,7 +1378,7 @@ describe("StatusFeed connection logging", () => {
 
     for(const { level, message } of levels) {
 
-      assert.ok(entries.some((entry) => (entry.level === level) && (entry.parameters[0] === ("Test Ratgdo: " + message))),
+      assert.ok(entries.some((entry) => (entry.level === level) && (formatLogEntry(entry) === ("Test Ratgdo: " + message))),
         "the " + level + " level arrives at the feed's log under the device's advertised name");
     }
   });
@@ -1408,7 +1407,7 @@ describe("StatusFeed connection logging", () => {
 
       call.logger.info("A line.");
 
-      assert.ok(entries.some((entry) => (entry.level === "info") && (entry.parameters[0] === (ADDR + ": A line."))),
+      assert.ok(entries.some((entry) => (entry.level === "info") && (formatLogEntry(entry) === (ADDR + ": A line."))),
         "the dialed address stands in as the device's identity");
     };
 
@@ -1418,8 +1417,10 @@ describe("StatusFeed connection logging", () => {
 
   test("keeps the feed-level delivery error free of any device identity", async () => {
 
-    // The #emit containment sits below every per-device session and has no device in scope, so its message stays exactly the feed-level string. The equality is exact
-    // rather than a substring match, so a device prefix leaking down into feed-scope messages fails here instead of passing unnoticed.
+    /* The #emit containment sits below every per-device session and has no device in scope, so its message opens with exactly the feed-level string. The match is
+     * anchored at the head of the rendered line rather than floating anywhere within it, so a device prefix leaking down into feed-scope messages fails here instead
+     * of passing unnoticed...the caught error renders after the sentence, which is why the head is what the assertion reads.
+     */
     const throwingPush = (): void => {
 
       throw new Error("the settings panel channel is closed");
@@ -1435,8 +1436,8 @@ describe("StatusFeed connection logging", () => {
 
     await settle();
 
-    assert.ok(entries.some((entry) => (entry.level === "error") && (entry.parameters[0] === "A live-status update could not be delivered to the settings panel.")),
-      "the feed-level delivery error carries no device prefix");
+    assert.ok(entries.some((entry) => (entry.level === "error") &&
+      formatLogEntry(entry).startsWith("A live-status update could not be delivered to the settings panel.")), "the feed-level delivery error carries no device prefix");
   });
 
   test("gives each of two concurrent connects its own device identity", async () => {
@@ -1464,16 +1465,16 @@ describe("StatusFeed connection logging", () => {
     north.logger.info("A north line.");
     south.logger.info("A south line.");
 
-    assert.ok(entries.some((entry) => (entry.level === "info") && (entry.parameters[0] === "Garage Door North: A north line.")),
+    assert.ok(entries.some((entry) => (entry.level === "info") && (formatLogEntry(entry) === "Garage Door North: A north line.")),
       "the first device's adapter carries only its own name");
-    assert.ok(entries.some((entry) => (entry.level === "info") && (entry.parameters[0] === "Garage Door South: A south line.")),
+    assert.ok(entries.some((entry) => (entry.level === "info") && (formatLogEntry(entry) === "Garage Door South: A south line.")),
       "the second device's adapter carries only its own name");
   });
 
   test("attributes an unexpected connect-body failure to its device", async () => {
 
-    // The connect body's totality catch runs with the device still in scope, so its line carries the same identity every other line of this connection does. A client
-    // whose listener registration throws lands in exactly that catch.
+    // The connect body's totality catch runs with the device still in scope, so its line opens with the same identity every other line of this connection does. A
+    // client whose listener registration throws lands in exactly that catch, and the caught error renders after the sentence, so the head is what the assertion reads.
     const { browser, entries, feed } = makeFeed({ openClient: makeOpenClient(async () => new FakeClient({ cache: restingCache(), throwOnListen: true })) });
 
     feed.startDiscovery();
@@ -1485,8 +1486,8 @@ describe("StatusFeed connection logging", () => {
 
     await settle();
 
-    assert.ok(entries.some((entry) => (entry.level === "error") && (entry.parameters[0] === "Test Ratgdo: The live-status connection failed unexpectedly.")),
-      "the connect body's catch logs under the device's identity");
+    assert.ok(entries.some((entry) => (entry.level === "error") &&
+      formatLogEntry(entry).startsWith("Test Ratgdo: The live-status connection failed unexpectedly.")), "the connect body's catch logs under the device's identity");
   });
 });
 
@@ -1882,7 +1883,7 @@ describe("StatusFeed discovery lifecycle", () => {
 
     await settle();
 
-    assert.ok(entries.some((entry) => (entry.level === "warn") && String(entry.parameters[0]).includes("lost its network sockets")),
+    assert.ok(entries.some((entry) => (entry.level === "warn") && formatLogEntry(entry).includes("lost its network sockets")),
       "the loop's own end is where the socket loss is reported");
 
     feed.warm({ devices: [{ mac: MAC }] });

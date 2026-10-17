@@ -23,6 +23,7 @@ import "homebridge-plugin-utils/polyfills";
 import { CoverOperation, LockState, entityId } from "esphome-client";
 import type { EntityId, EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
 import type { HomebridgePluginLogging, MdnsService, Nullable } from "homebridge-plugin-utils";
+import { capturingLog, makeService } from "homebridge-plugin-utils/testing";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import { FeatureOptions } from "homebridge-plugin-utils";
 import type { OpenEspHomeClient } from "./connection.ts";
@@ -32,15 +33,7 @@ import type { RatgdoDevice } from "./types.ts";
 import type { RatgdoResolvedConfig } from "./options.ts";
 import type { RatgdoTxtKey } from "./discovery.ts";
 import { RatgdoVariant } from "./types.ts";
-import { makeService } from "homebridge-plugin-utils/testing";
-
-// One captured log line. The device's log wrapper formats every call through util.format into a single string parameter prefixed with the device name (for example
-// "Ratgdo: Light on."), so a log assertion matches a substring of parameters[0] at the given level.
-export interface TestLogEntry {
-
-  level: "debug" | "error" | "info" | "warn";
-  parameters: unknown[];
-}
+import type { TestLogEntry } from "homebridge-plugin-utils/testing";
 
 // Identity classes for the HAP Characteristic kinds the plugin touches. Each kind is its own marker class carrying a hapKind property (so failures surface the kind in
 // inspect output) and, where production compares against named constants, the HAP integer constants as statics. Production passes the class itself as a key into
@@ -531,29 +524,6 @@ export function makeTestAccessory(displayName = "Test Ratgdo", uuid = "00000000-
   return new TestAccessory(displayName, uuid);
 }
 
-// Build a capturing HomebridgePluginLogging double plus the backing entries array. Every level pushes into the shared array, so a test asserts on what production
-// logged by scanning entries. The debug channel is captured too, since the device's debug path routes through here.
-export function makeCapturingLog(): { entries: TestLogEntry[]; log: HomebridgePluginLogging } {
-
-  const entries: TestLogEntry[] = [];
-  const record = (level: TestLogEntry["level"]) => (message: string, ...parameters: unknown[]): void => {
-
-    entries.push({ level, parameters: [ message, ...parameters ] });
-  };
-
-  return {
-
-    entries,
-    log: { debug: record("debug"), error: record("error"), info: record("info"), warn: record("warn") }
-  };
-}
-
-// Scan captured log entries for a level whose first parameter contains the given substring. Mirrors the device log wrapper's "format into one string parameter" shape.
-export function loggedAt(entries: TestLogEntry[], level: TestLogEntry["level"], substring: string): boolean {
-
-  return entries.some((entry) => (entry.level === level) && String(entry.parameters[0]).includes(substring));
-}
-
 // A recorded MQTT subscription. We retain the get / set handlers by topic so a test can invoke them and assert the returned / published values.
 interface RecordedMqttGet {
 
@@ -643,7 +613,7 @@ export interface TestEspHomeClientOptions {
  * disconnect / subscribeToLogs (recorded), and on (registers a handler and returns a Disposable). emit lets a test drive a lifecycle / telemetry / log event through
  * the registered handlers. Construction options seed the configurable reads so a test tailors the device's view of the wire without a live connection.
  */
-export class TestEspHomeClient {
+export class TestEspHomeClient implements Disposable {
 
   public readonly commands: RecordedCommand[] = [];
   public readonly logSubscriptions: number[] = [];
@@ -949,7 +919,6 @@ export interface TestPlatform {
   // The double's config is the platform's RESOLVED shape, not the raw configuration properties, so a test can never seed a legacy property the accessory would never
   // have seen: the platform resolves those into this shape before any accessory is built.
   config: RatgdoResolvedConfig;
-  debug: (message: string, ...parameters: unknown[]) => void;
   featureOptions: FeatureOptions;
   getEspHomeClient: (mac: string) => TestEspHomeClient | undefined;
   hap: TestHap;
@@ -980,7 +949,7 @@ export interface MakeTestPlatformOptions {
 export interface MakeTestPlatformResult {
 
   client: TestEspHomeClient;
-  entries: TestLogEntry[];
+  entries: readonly TestLogEntry[];
   mqtt: Nullable<TestMqttClient>;
   platform: TestPlatform;
 }
@@ -992,7 +961,7 @@ export interface MakeTestPlatformResult {
  */
 export function makeTestPlatform(options: MakeTestPlatformOptions = {}): MakeTestPlatformResult {
 
-  const { entries, log } = makeCapturingLog();
+  const log = capturingLog();
   const client = options.client ?? new TestEspHomeClient();
   const mqtt = options.mqtt ? new TestMqttClient() : null;
   const fo = new FeatureOptions(featureOptionCategories, featureOptions, options.userOptions);
@@ -1001,10 +970,6 @@ export function makeTestPlatform(options: MakeTestPlatformOptions = {}): MakeTes
 
     api: { hap },
     config: options.config ?? { debug: false, mqttTopic: undefined, mqttUrl: undefined, options: undefined },
-    debug: (message: string, ...parameters: unknown[]): void => {
-
-      entries.push({ level: "debug", parameters: [ message, ...parameters ] });
-    },
     featureOptions: fo,
     getEspHomeClient: (): TestEspHomeClient | undefined => (options.clientUnavailable ? undefined : client),
     hap,
@@ -1018,7 +983,7 @@ export function makeTestPlatform(options: MakeTestPlatformOptions = {}): MakeTes
     }
   };
 
-  return { client, entries, mqtt, platform };
+  return { client, entries: log.entries, mqtt, platform };
 }
 
 // Options for buildRatgdoAccessory: device fields to override, initial-state snapshot, platform config, client availability, MQTT double, and feature-option strings.
@@ -1037,7 +1002,7 @@ export interface BuildRatgdoAccessoryResult {
 
   accessory: TestAccessory;
   client: TestEspHomeClient;
-  entries: TestLogEntry[];
+  entries: readonly TestLogEntry[];
   mqtt: Nullable<TestMqttClient>;
   platform: TestPlatform;
   ratgdo: RatgdoAccessory;

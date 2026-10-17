@@ -4,11 +4,12 @@
  * translation (LOCKED / UNLOCKED to HomeKit's SECURED / UNSECURED, the lockout automation switch, the deviation log, and the MQTT publish) and the connection
  * availability fan-out (Model refresh, StatusActive across every sensor service, and the disconnect log that the device - not the platform - owns).
  */
-import { Characteristic, Service, buildRatgdoAccessory, loggedAt, makeLockEvent, makeRatgdoInitialState } from "./testing.helpers.ts";
+import { Characteristic, Service, buildRatgdoAccessory, makeLockEvent, makeRatgdoInitialState } from "./testing.helpers.ts";
 import { describe, test } from "node:test";
 import { LockState } from "esphome-client";
 import { RatgdoService } from "./types.ts";
 import assert from "node:assert/strict";
+import { loggedAt } from "homebridge-plugin-utils/testing";
 
 describe("RatgdoAccessory.updateState() lock and availability", () => {
 

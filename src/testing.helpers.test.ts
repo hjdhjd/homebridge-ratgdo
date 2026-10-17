@@ -8,11 +8,12 @@
  * getCharacteristic returns a stable instance; triggerSet runs the handler then caches; on/emit/dispose drive and detach; the telemetry factories key the snapshot the
  * way the device reads it; makeTestPlatform wires a REAL FeatureOptions engine). It exercises the harness directly rather than through a production accessory.
  */
-import { Characteristic, Service, TestEspHomeClient, TestMqttClient, TestService, asEspHomeClient, buildRatgdoAccessory, loggedAt, makeBinarySensorEvent,
-  makeCapturingLog, makeCoverEvent, makeFakeOpenClient, makeKonnectedInitialState, makeLightEvent, makeLockEvent, makeRatgdoInitialState, makeRatgdoService,
-  makeSwitchEvent, makeTelemetry, makeTestAccessory, makeTestDevice, makeTestPlatform } from "./testing.helpers.ts";
+import { Characteristic, Service, TestEspHomeClient, TestMqttClient, TestService, asEspHomeClient, buildRatgdoAccessory, makeBinarySensorEvent,
+  makeCoverEvent, makeFakeOpenClient, makeKonnectedInitialState, makeLightEvent, makeLockEvent, makeRatgdoInitialState, makeRatgdoService, makeSwitchEvent,
+  makeTelemetry, makeTestAccessory, makeTestDevice, makeTestPlatform } from "./testing.helpers.ts";
 import { CoverOperation, LockState, entityId } from "esphome-client";
 import { describe, test } from "node:test";
+import { logCount, loggedAt } from "homebridge-plugin-utils/testing";
 import { RatgdoVariant } from "./types.ts";
 import assert from "node:assert/strict";
 import { txtEntries } from "homebridge-plugin-utils";
@@ -247,31 +248,6 @@ describe("HAP marker namespaces", () => {
     assert.equal(Characteristic.LockCurrentState.UNSECURED, 0, "LockCurrentState.UNSECURED is 0");
     assert.equal(Characteristic.ChargingState.CHARGING, 1, "ChargingState.CHARGING is 1");
     assert.equal(Characteristic.ChargingState.NOT_CHARGING, 0, "ChargingState.NOT_CHARGING is 0");
-  });
-});
-
-describe("makeCapturingLog and loggedAt", () => {
-
-  test("each level records an entry and loggedAt matches by level and substring", () => {
-
-    const { entries, log } = makeCapturingLog();
-
-    log.info("Hello world.");
-    log.warn("A warning.");
-
-    assert.equal(entries.length, 2, "each log call records one entry");
-    assert.equal(loggedAt(entries, "info", "Hello"), true, "loggedAt finds an info entry by substring");
-    assert.equal(loggedAt(entries, "warn", "warning"), true, "loggedAt finds a warn entry by substring");
-  });
-
-  test("loggedAt is negative for the wrong level or a missing substring", () => {
-
-    const { entries, log } = makeCapturingLog();
-
-    log.error("Disk failure.");
-
-    assert.equal(loggedAt(entries, "info", "Disk failure."), false, "the level must match");
-    assert.equal(loggedAt(entries, "error", "not present"), false, "the substring must be present");
   });
 });
 
@@ -557,15 +533,13 @@ describe("makeTestPlatform", () => {
       "a Disable.Light userOption threads through the real engine to disable the feature");
   });
 
-  test("the capturing log routes platform.log and platform.debug into the entries buffer", () => {
+  test("the capturing log routes what the double logs into the entries buffer", () => {
 
     const { entries, platform } = makeTestPlatform();
 
     platform.log.info("info line");
-    platform.debug("debug line");
 
     assert.equal(loggedAt(entries, "info", "info line"), true, "platform.log routes into the shared entries buffer");
-    assert.equal(loggedAt(entries, "debug", "debug line"), true, "platform.debug routes into the shared entries buffer");
   });
 
   test("mqtt is null by default and a recording double when requested", () => {
@@ -606,5 +580,26 @@ describe("buildRatgdoAccessory", () => {
     const { accessory } = buildRatgdoAccessory({ device: { variant: RatgdoVariant.KONNECTED } });
 
     assert.ok(accessory.getService(Service.GarageDoorOpener), "a Konnected build uses the Konnected snapshot and constructs without throwing");
+  });
+
+  /* The accessory's logger is a gate wrapped around a prefix wrapped around the platform's own gated logger, so a debug call crosses two gates on its way to the
+   * sink. Asserting the COUNT rather than mere presence is what proves the two gates produce one line and not two, and asserting the level is what proves the
+   * plugin's opt-in debug output lands where Homebridge actually prints it.
+   */
+  test("routes an accessory debug line into the buffer at warn under the debug opt-in, and drops it without one", () => {
+
+    const debugOn = buildRatgdoAccessory({ config: { debug: true, mqttTopic: undefined, mqttUrl: undefined, options: undefined } });
+    const before = debugOn.entries.length;
+
+    debugOn.ratgdo.log.debug("a gated line");
+
+    assert.equal(logCount(debugOn.entries.slice(before), "warn", "a gated line"), 1, "the gated debug channel emits the line exactly once, through warn");
+    assert.equal(loggedAt(debugOn.entries, "debug", "a gated line"), false, "nothing is recorded at the debug level itself");
+
+    const debugOff = buildRatgdoAccessory();
+
+    debugOff.ratgdo.log.debug("a gated line");
+
+    assert.equal(loggedAt(debugOff.entries, "warn", "a gated line"), false, "the gate drops the line with the debug opt-in off");
   });
 });

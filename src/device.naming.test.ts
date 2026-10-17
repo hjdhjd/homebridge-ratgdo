@@ -4,12 +4,13 @@
  * capitalization helpers, all reached strictly through the accessory's public surface (log prefixes, MQTT get handlers, and the door telemetry router).
  *
  * The `name` getter fronts every info / warn / error log line via prefixed(), so we observe its precedence by driving a logging event (a door transition with the
- * default-on Log.Opener) and asserting the captured entry's parameters[0] prefix. translateCurrentDoorState() and capitalize() are private, so we observe them through
+ * default-on Log.Opener) and asserting the rendered entry's prefix. translateCurrentDoorState() and capitalize() are private, so we observe them through
  * the two public surfaces that consume them: the MQTT "garagedoor" get handler (which returns the lowercase translation) and the door-transition info log (which
  * emits the capitalized translation, e.g. "Open.", "Closed."). Door states are driven through ratgdo.updateState() with the EspHomeEvent cover shape.
  */
-import { Characteristic, Service, buildRatgdoAccessory, loggedAt, makeKonnectedInitialState } from "./testing.helpers.ts";
+import { Characteristic, Service, buildRatgdoAccessory, makeKonnectedInitialState } from "./testing.helpers.ts";
 import { describe, test } from "node:test";
+import { formatLogEntry, loggedAt } from "homebridge-plugin-utils/testing";
 import type { EspHomeEvent } from "./types.ts";
 import { RatgdoVariant } from "./types.ts";
 import assert from "node:assert/strict";
@@ -32,10 +33,10 @@ describe("RatgdoAccessory naming", () => {
       // Drive a door-open transition. Log.Opener defaults on, so this emits an info line fronted by the name getter via prefixed().
       ratgdo.updateState(coverEvent("cover-door", "OPEN", "IDLE", 1));
 
-      const opened = entries.find((entry) => (entry.level === "info") && String(entry.parameters[0]).endsWith("Open."));
+      const opened = entries.find((entry) => (entry.level === "info") && formatLogEntry(entry).endsWith("Open."));
 
       assert.ok(opened, "a door-open transition with Log.Opener enabled emits an info line");
-      assert.ok(String(opened.parameters[0]).startsWith("MyDoor: "), "the log line is prefixed with the configured Device.LogName value");
+      assert.ok(formatLogEntry(opened).startsWith("MyDoor: "), "the log line is prefixed with the configured Device.LogName value");
     });
 
     test("prefers the configured Device.LogName over the GarageDoorOpener Name characteristic", () => {
@@ -46,10 +47,10 @@ describe("RatgdoAccessory naming", () => {
       accessory.getService(Service.GarageDoorOpener)?.getCharacteristic(Characteristic.Name).updateValue("RenamedDoor");
       ratgdo.updateState(coverEvent("cover-door", "OPEN", "IDLE", 1));
 
-      const opened = entries.find((entry) => (entry.level === "info") && String(entry.parameters[0]).endsWith("Open."));
+      const opened = entries.find((entry) => (entry.level === "info") && formatLogEntry(entry).endsWith("Open."));
 
       assert.ok(opened, "a door-open transition emits an info line");
-      assert.ok(String(opened.parameters[0]).startsWith("MyDoor: "), "the configured LogName takes precedence over the service Name characteristic");
+      assert.ok(formatLogEntry(opened).startsWith("MyDoor: "), "the configured LogName takes precedence over the service Name characteristic");
     });
 
     test("falls back to the GarageDoorOpener Name characteristic when no LogName is configured", () => {
@@ -60,10 +61,10 @@ describe("RatgdoAccessory naming", () => {
       accessory.getService(Service.GarageDoorOpener)?.getCharacteristic(Characteristic.Name).updateValue("RenamedDoor");
       ratgdo.updateState(coverEvent("cover-door", "OPEN", "IDLE", 1));
 
-      const opened = entries.find((entry) => (entry.level === "info") && String(entry.parameters[0]).endsWith("Open."));
+      const opened = entries.find((entry) => (entry.level === "info") && formatLogEntry(entry).endsWith("Open."));
 
       assert.ok(opened, "a door-open transition emits an info line");
-      assert.ok(String(opened.parameters[0]).startsWith("RenamedDoor: "), "with no LogName, the prefix follows the service Name characteristic");
+      assert.ok(formatLogEntry(opened).startsWith("RenamedDoor: "), "with no LogName, the prefix follows the service Name characteristic");
     });
 
     test("falls back to the accessory displayName when neither LogName nor a service Name is set", () => {
@@ -72,10 +73,10 @@ describe("RatgdoAccessory naming", () => {
 
       ratgdo.updateState(coverEvent("cover-door", "OPEN", "IDLE", 1));
 
-      const opened = entries.find((entry) => (entry.level === "info") && String(entry.parameters[0]).endsWith("Open."));
+      const opened = entries.find((entry) => (entry.level === "info") && formatLogEntry(entry).endsWith("Open."));
 
       assert.ok(opened, "a door-open transition emits an info line");
-      assert.ok(String(opened.parameters[0]).startsWith("Test Ratgdo: "), "the prefix falls back to the accessory displayName / device.name");
+      assert.ok(formatLogEntry(opened).startsWith("Test Ratgdo: "), "the prefix falls back to the accessory displayName / device.name");
     });
 
     test("ignores a Device.LogName enabled without a value and falls back to the displayName", () => {
@@ -85,10 +86,10 @@ describe("RatgdoAccessory naming", () => {
 
       ratgdo.updateState(coverEvent("cover-door", "OPEN", "IDLE", 1));
 
-      const opened = entries.find((entry) => (entry.level === "info") && String(entry.parameters[0]).endsWith("Open."));
+      const opened = entries.find((entry) => (entry.level === "info") && formatLogEntry(entry).endsWith("Open."));
 
       assert.ok(opened, "a door-open transition emits an info line");
-      assert.ok(String(opened.parameters[0]).startsWith("Test Ratgdo: "), "a valueless LogName does not blank the prefix; it falls back to the displayName");
+      assert.ok(formatLogEntry(opened).startsWith("Test Ratgdo: "), "a valueless LogName does not blank the prefix; it falls back to the displayName");
     });
   });
 

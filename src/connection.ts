@@ -17,6 +17,7 @@ import { RATGDO_INITIAL_STATE_TIMEOUT } from "./settings.ts";
 import type { RatgdoDevice } from "./types.ts";
 import { presentEntityIds } from "./entities.ts";
 import util from "node:util";
+import { waitWithSignal } from "homebridge-plugin-utils";
 
 /* The injectable ESPHome client-factory port. Aliased to the real factory's type so the seam stays bound to esphome-client's signature: if `openEspHomeClient`'s shape
  * changes, this alias and every default-arg site that resolves to it move with it. Production never passes it (the default real factory runs); a unit test passes a
@@ -249,8 +250,9 @@ Promise<ReadonlyMap<EntityId, TelemetryEvent>> {
 
   /* Slow path: subscribe to telemetry and resolve when the cache completes. The `using` form scopes the bootstrap subscription to this function: at scope exit
    * the implicit `Symbol.dispose()` call removes the handler from the EventBus, so the bootstrap listener never leaks into the runtime telemetry path the platform
-   * wires up after construction. The abort path threads `signal.reason` through `reject()`, so a timeout or shutdown abort surfaces the appropriate reason to the
-   * caller's catch handler - shutdown surfaces the platform's "shutdown" string, timeout surfaces a TimeoutError DOMException.
+   * wires up after construction. The wait below is the library's, and it owns the abort side of the race: it rejects with `signal.reason`, so a timeout or shutdown
+   * abort surfaces the appropriate reason to the caller's catch handler - shutdown surfaces the platform's "shutdown" string, timeout surfaces a TimeoutError
+   * DOMException.
    */
 
   // Compose shutdown and state-capture timeout into one cancellation source. AbortSignal.any propagates whichever source aborts first as the composed signal's
@@ -258,12 +260,12 @@ Promise<ReadonlyMap<EntityId, TelemetryEvent>> {
   // local to this call - it does not leak past return because we hold the only reference.
   const signal = AbortSignal.any([ shutdownSignal, AbortSignal.timeout(timeoutSeconds * 1000) ]);
 
-  // Synchronous gate against an already-aborted shutdown signal (the timeout we just created cannot have fired in the same tick). `AbortSignal#addEventListener`
-  // does not fire the handler when the signal is already aborted, so skipping this check would let a shutdown that landed while we were awaiting
-  // `openEspHomeClient()` slip past the listener and hang `await promise` forever.
+  // Synchronous gate against an already-aborted shutdown signal (the timeout we just created cannot have fired in the same tick). A shutdown that landed while we
+  // were awaiting `openEspHomeClient()` leaves nothing worth waiting for, and checking here means we give up before subscribing to telemetry at all rather than
+  // subscribing and tearing the subscription straight back down.
   signal.throwIfAborted();
 
-  const { promise, resolve, reject } = Promise.withResolvers<undefined>();
+  const { promise, resolve } = Promise.withResolvers<undefined>();
 
   using _sub = client.on("telemetry", () => {
 
@@ -273,17 +275,7 @@ Promise<ReadonlyMap<EntityId, TelemetryEvent>> {
     }
   });
 
-  const abortListener = (): void => reject(signal.reason);
-
-  signal.addEventListener("abort", abortListener, { once: true });
-
-  try {
-
-    await promise;
-  } finally {
-
-    signal.removeEventListener("abort", abortListener);
-  }
+  await waitWithSignal(promise, signal);
 
   return cache;
 }

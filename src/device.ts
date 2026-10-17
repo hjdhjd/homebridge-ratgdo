@@ -10,10 +10,9 @@ import { LockCommand, LockState } from "esphome-client";
 import { RATGDO_ENTITIES, idFor } from "./entities.ts";
 import { RATGDO_KONNECTED_PCW_DURATION, RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION, RATGDO_UI_REVERT_DELAY } from "./settings.ts";
 import { RATGDO_VARIANT_LABELS, RatgdoService, RatgdoVariant } from "./types.ts";
-import { TimerRegistry, acquireService, guardedDispatch, validService } from "homebridge-plugin-utils";
+import { TimerRegistry, acquireService, debugGatedLog, guardedDispatch, prefixedLog, validCharacteristic, validService } from "homebridge-plugin-utils";
 import type { RatgdoEntityRef } from "./entities.ts";
 import type { RatgdoPlatform } from "./platform.ts";
-import util from "node:util";
 
 /* Command topics dispatched to the ESPHome client by command(). Each topic accepts a different payload shape:
  *
@@ -32,7 +31,7 @@ type CommandTopic = "disco-laser" | "disco-led" | "door" | "konnected-pcw" | "ko
  * surface here mirrors that contract.
  *
  * `logName` is the user-configured Device.LogName feature option captured at configure time. Caching it here avoids paying the featureOptions lookup cost on every
- * single log line emission (the `name` getter is called from `prefixed()`, which fronts every info / warn / error log). All other hint fields follow the same
+ * single log line emission (the `name` getter is the prefix supplier behind every log line this accessory emits). All other hint fields follow the same
  * read-once-cache-forever pattern.
  */
 interface RatgdoHints {
@@ -111,7 +110,7 @@ type OccupancyKind = keyof typeof RATGDO_OCCUPANCY;
 /* The per-accessory HomeKit projection for a single garage door opener. Owns HomeKit service configuration, the RatgdoStatus single-source-of-truth, updateState()
  * telemetry-event routing, command dispatch to the ESPHome client, and MQTT publishing.
  */
-export class RatgdoAccessory {
+export class RatgdoAccessory implements Disposable {
 
   private readonly accessory: PlatformAccessory;
   private readonly api: API;
@@ -139,23 +138,11 @@ export class RatgdoAccessory {
     this.platform = platform;
     this.services = {};
 
-    this.log = {
-
-      // Short-circuit before util.format runs when debug is off. Otherwise the format work would always execute even though platform.debug() would discard the
-      // result. Saves the prefix concatenation, the format call, and the platform.debug indirection on every off-debug call.
-      debug: (message: string, ...parameters: unknown[]): void => {
-
-        if(!platform.config.debug) {
-
-          return;
-        }
-
-        platform.debug(this.prefixed(message, ...parameters));
-      },
-      error: (message: string, ...parameters: unknown[]): void => platform.log.error(this.prefixed(message, ...parameters)),
-      info: (message: string, ...parameters: unknown[]): void => platform.log.info(this.prefixed(message, ...parameters)),
-      warn: (message: string, ...parameters: unknown[]): void => platform.log.warn(this.prefixed(message, ...parameters))
-    };
+    /* Compose this accessory's logger from the library's two wrappers over the platform's own logger. The prefix is a supplier rather than a captured string, so a
+     * device the user renames carries the new name on the very next line. The debug gate sits outermost, which is what keeps a suppressed debug line to a single
+     * predicate call: the prefix concatenation and the format work behind it never run, and the platform's own gate below is never consulted either.
+     */
+    this.log = debugGatedLog(prefixedLog(platform.log, () => this.name), (): boolean => platform.config.debug);
 
     /* Build status from the captured initial telemetry. `initialState` carries one event per stateful entity the device exposed - the platform's discovery path
      * already waited for ESPHome's per-entity SUBSCRIBE_STATES burst to land before constructing us. Status fields are therefore initialized to real device state,
@@ -165,7 +152,7 @@ export class RatgdoAccessory {
 
     this.hints = this.buildHints();
 
-    /* Read-only deviation log runs AFTER `this.hints` is assigned. The `name` getter (which fronts every log line via `prefixed()`) reads `this.hints.logName`, so any
+    /* Read-only deviation log runs AFTER `this.hints` is assigned. The `name` getter (the prefix supplier behind every log line) reads `this.hints.logName`, so any
      * logging that fires while `this.hints` is still undefined would crash with a TypeError. Keeping the call here - and out of `buildHints()` - means the cache
      * contract (hints fully resolved before any log call that depends on it) is enforced by program order, not by reviewer discipline.
      */
@@ -560,7 +547,17 @@ export class RatgdoAccessory {
 
     this.logFeature("Opener.Lock", "Wireless remote lock");
 
-    // Configure the wireless remote lock current and target state characteristics if the user has enabled it.
+    /* The wireless remote lock pair's presence follows the user's feature flag in both directions on every configure pass: each characteristic is attached where the
+     * feature is on and taken off the service where the user turned it off, so a tile that once showed the lock stops showing it. Presence is read before anything is
+     * attached, so a characteristic this service never carried is never materialized only to be removed again.
+     */
+    validCharacteristic({ characteristic: this.hap.Characteristic.LockCurrentState, service, validate: this.hints.lock });
+    validCharacteristic({ characteristic: this.hap.Characteristic.LockTargetState, service, validate: this.hints.lock });
+
+    /* Dress the pair whenever the feature is on, which is exactly when the calls above leave it present. The handler binds on every pass rather than only on the pass
+     * that first attached the characteristic: an accessory Homebridge restored from its cache arrives here already carrying the pair, and a characteristic restored
+     * that way has no handler bound in this process, so a bind conditioned on first attachment would leave the user's lock tile inert until the cache was cleared.
+     */
     if(this.hints.lock) {
 
       service.getCharacteristic(this.hap.Characteristic.LockTargetState).onSet((value: CharacteristicValue) => {
@@ -578,13 +575,6 @@ export class RatgdoAccessory {
 
       service.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.status.lock);
       service.updateCharacteristic(this.hap.Characteristic.LockTargetState, this.lockTargetStateBias(this.status.lock));
-    } else {
-
-      // The user disabled the lock feature. Strip any leftover lock characteristics so HomeKit does not surface them on the garage door tile.
-      for(const characteristic of [ this.hap.Characteristic.LockCurrentState, this.hap.Characteristic.LockTargetState ]) {
-
-        service.removeCharacteristic(service.getCharacteristic(characteristic));
-      }
     }
 
     // The garage door is the primary affordance for this accessory, which controls how HomeKit surfaces it in the Home app.
@@ -1051,9 +1041,9 @@ export class RatgdoAccessory {
     this.command("refresh");
   }
 
-  /* Lazy-evaluation debug log. The builder thunk only runs when platform.config.debug is enabled, so callers on hot paths (per-event telemetry, per-line verbose logs)
-   * can construct expensive messages (util.inspect of large payloads, string concatenations) without paying the cost when debug is off. Routes through prefixed() and
-   * platform.debug() so the prefix-decoration shape and the debug-channel choice each live in exactly one place rather than being duplicated in this method.
+  /* Lazy-evaluation debug log. The builder thunk only runs when the debug setting is on, so callers on hot paths (per-event telemetry, per-line verbose logs) can
+   * construct expensive messages (util.inspect of large payloads, string concatenations) without paying the cost when debug is off. The guard here reads the same
+   * setting the logger's own gate does; it earns its place by keeping the builder from running at all, which the gate downstream cannot do.
    */
   public debugLazy(builder: () => string): void {
 
@@ -1062,16 +1052,7 @@ export class RatgdoAccessory {
       return;
     }
 
-    this.platform.debug(this.prefixed(builder()));
-  }
-
-  /* Single source of truth for accessory log-line decoration. Every log channel (debug, error, info, warn) and the lazy debug path all forward through here so the
-   * "<name>: <message>" prefix shape lives in one place. util.format substitution applies as it would for the underlying logger - callers pass printf-style format
-   * strings and parameters directly. When called with just one argument (the lazy debug path's pre-built message), util.format returns it unchanged.
-   */
-  private prefixed(message: string, ...parameters: unknown[]): string {
-
-    return this.name + ": " + util.format(message, ...parameters);
+    this.log.debug(builder());
   }
 
   /* Central per-telemetry-event state router, invoked for every inbound ESPHome event (many times per second during a door transition). We alias every service we
@@ -1832,7 +1813,7 @@ export class RatgdoAccessory {
   //
   //   1. The user-configured Device.LogName feature option, when set. We read this from `hints.logName`, which buildHints() resolved exactly once at construction
   //      time. Reading the cache rather than the live feature-option store means we do not pay the featureOptions lookup cost on every log line (the getter fronts
-  //      every info / warn / error log via prefixed()).
+  //      every log line as the prefix supplier).
   //   2. The GarageDoorOpener service's Name characteristic. This reflects any rename the user has made in HomeKit, so logs follow what the user sees there.
   //   3. The accessory's displayName, which Homebridge manages and uses when the service Name has not been set.
   //   4. The mDNS-advertised device.name, as a final fallback.

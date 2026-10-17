@@ -7,9 +7,9 @@
  */
 import { AuthenticationError, EncryptionKeyInvalidError, EncryptionKeyMissingError, EncryptionRequiredError, NegotiationFailedError,
   entityId } from "esphome-client";
-import { TestEspHomeClient, asEspHomeClient, loggedAt, makeCapturingLog, makeCoverEvent, makeFakeOpenClient, makeLightEvent,
-  makeTestDevice } from "./testing.helpers.ts";
+import { TestEspHomeClient, asEspHomeClient, makeCoverEvent, makeFakeOpenClient, makeLightEvent, makeTestDevice } from "./testing.helpers.ts";
 import { applyDeviceInfo, captureInitialState, isEncryptionError, openConnection } from "./connection.ts";
+import { capturingLog, loggedAt } from "homebridge-plugin-utils/testing";
 import { describe, test } from "node:test";
 import type { EntityId } from "esphome-client";
 import type { OpenEspHomeClient } from "./connection.ts";
@@ -114,14 +114,19 @@ describe("openConnection", () => {
   // A client that advertises the cover but whose snapshot never holds it, so the wait reaches the slow path (and times out or aborts).
   const pendingClient = (): TestEspHomeClient => new TestEspHomeClient({ entities: coverEntity, snapshot: new Map() });
 
-  // Drive openConnection with the fixed host and wait-list this suite uses, varying only the injected factory and the optional shutdown signal / timeout per case.
-  // Returns the capturing log alongside the result so each test asserts on both.
+  /* Drive openConnection with the fixed host and wait-list this suite uses, varying only the injected factory and the optional shutdown signal / timeout per case.
+   * Returns the capturing log alongside the result so each test asserts on both.
+   *
+   * Every diagnostic below is matched on a substring spanning the sentence AND the value interpolated into it, because each of these lines carries the device's own
+   * words - the key fault, the negotiated version, the socket error - and a match confined to the sentence would pass while the plugin handed the user a diagnostic
+   * naming the wrong fault.
+   */
   const run = async (openClient: ReturnType<typeof makeFakeOpenClient>, overrides: Partial<Parameters<typeof openConnection>[0]> = {}) => {
 
-    const { entries, log } = makeCapturingLog();
+    const log = capturingLog();
     const result = await openConnection({ expected: [coverId], host: "192.0.2.10", log, openClient, shutdownSignal: new AbortController().signal, ...overrides });
 
-    return { entries, result };
+    return { entries: log.entries, result };
   };
 
   test("success: resolves with the client and its captured initial state, leaving the client live", async () => {
@@ -154,7 +159,7 @@ describe("openConnection", () => {
 
     assert.ok(!result.ok, "an encryption failure skips the discovery attempt");
     assert.equal(result.reason, "encryption-invalid", "a mismatched key carries the encryption-invalid reason token");
-    assert.ok(loggedAt(entries, "error", "Encryption configuration error"), "the user sees the encryption-key diagnostic");
+    assert.ok(loggedAt(entries, "error", "API encryption key: bad key"), "the user sees the encryption-key diagnostic naming the mismatched key's fault");
   });
 
   test("encryption error (missing key): returns the encryption-missing outcome and logs the encryption-configuration diagnostic", async () => {
@@ -163,7 +168,7 @@ describe("openConnection", () => {
 
     assert.ok(!result.ok, "an encryption failure skips the discovery attempt");
     assert.equal(result.reason, "encryption-missing", "an absent key carries the encryption-missing reason token");
-    assert.ok(loggedAt(entries, "error", "Encryption configuration error"), "the user sees the encryption-key diagnostic");
+    assert.ok(loggedAt(entries, "error", "API encryption key: missing key"), "the user sees the encryption-key diagnostic naming the absent key's fault");
   });
 
   test("encryption error (key required): returns the encryption-missing outcome and logs the encryption-configuration diagnostic", async () => {
@@ -172,7 +177,7 @@ describe("openConnection", () => {
 
     assert.ok(!result.ok, "an encryption failure skips the discovery attempt");
     assert.equal(result.reason, "encryption-missing", "a device that requires but lacks a key carries the encryption-missing reason token");
-    assert.ok(loggedAt(entries, "error", "Encryption configuration error"), "the user sees the encryption-key diagnostic");
+    assert.ok(loggedAt(entries, "error", "API encryption key: key required"), "the user sees the encryption-key diagnostic naming the required key's fault");
   });
 
   test("permanent error: returns null and logs the permanent-connection diagnostic", async () => {
@@ -181,7 +186,8 @@ describe("openConnection", () => {
 
     assert.ok(!result.ok, "a permanent error skips the discovery attempt");
     assert.equal(result.reason, "permanent", "the failure outcome carries the permanent reason token");
-    assert.ok(loggedAt(entries, "error", "Permanent connection error"), "the user sees the permanent-connection diagnostic");
+    assert.ok(loggedAt(entries, "error", "Permanent connection error: AuthenticationError: auth failed"),
+      "the user sees the permanent-connection diagnostic carrying the inspected error");
   });
 
   test("unsupported API version: returns the unsupported outcome and logs the firmware-mismatch diagnostic", async () => {
@@ -194,7 +200,8 @@ describe("openConnection", () => {
 
     assert.ok(!result.ok, "a version mismatch skips the discovery attempt");
     assert.equal(result.reason, "unsupported", "a device the client cannot negotiate with carries the unsupported reason token");
-    assert.ok(loggedAt(entries, "error", "The device's ESPHome API version"), "the user sees the firmware-mismatch diagnostic");
+    assert.ok(loggedAt(entries, "error", "API version is not one this plugin supports: api major 5 is outside the supported range"),
+      "the user sees the firmware-mismatch diagnostic carrying the version the client rejected");
   });
 
   test("generic failure: returns null and logs the catch-all connection diagnostic", async () => {
@@ -204,7 +211,8 @@ describe("openConnection", () => {
 
     assert.ok(!result.ok, "an unclassified failure skips the discovery attempt");
     assert.equal(result.reason, "unknown", "the failure outcome carries the unknown reason token");
-    assert.ok(loggedAt(entries, "error", "Failed to establish connection"), "the user sees the catch-all connection diagnostic");
+    assert.ok(loggedAt(entries, "error", "Failed to establish connection: Error: connection refused"),
+      "the user sees the catch-all connection diagnostic carrying the inspected error");
   });
 
   test("timeout: returns null, logs the timeout diagnostic, and disposes the client", async () => {
@@ -214,7 +222,8 @@ describe("openConnection", () => {
 
     assert.ok(!result.ok, "a state-capture timeout skips the discovery attempt");
     assert.equal(result.reason, "timeout", "the failure outcome carries the timeout reason token");
-    assert.ok(loggedAt(entries, "error", "Initial-state capture timed out"), "the user sees the timeout diagnostic");
+    assert.ok(loggedAt(entries, "error", "Initial-state capture timed out after 0.02 seconds"),
+      "the user sees the timeout diagnostic carrying the budget it exhausted");
     assert.equal(client.disposed, true, "the partially-constructed client is torn down");
   });
 
@@ -246,7 +255,7 @@ describe("openConnection", () => {
       return promise;
     }) as unknown as OpenEspHomeClient;
 
-    const { entries, log } = makeCapturingLog();
+    const log = capturingLog();
     const pending = openConnection({ expected: [coverId], host: "192.0.2.10", log, openClient, shutdownSignal: controller.signal });
 
     controller.abort("shutdown");
@@ -255,7 +264,7 @@ describe("openConnection", () => {
 
     assert.ok(!result.ok, "a connect cancelled mid-flight by shutdown is abandoned");
     assert.equal(result.reason, "shutdown", "a factory rejection that lands while the shutdown signal is aborted carries the shutdown reason token");
-    assert.equal(entries.filter((entry) => entry.level === "error").length, 0, "the silent stand-down branch logs nothing at error level");
+    assert.equal(log.entries.filter((entry) => entry.level === "error").length, 0, "the silent stand-down branch logs nothing at error level");
   });
 });
 

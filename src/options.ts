@@ -2,10 +2,10 @@
  *
  * options.ts: Feature option and type definitions for Ratgdo.
  */
-import type { FeatureCategoryEntry, FeatureOptionEntry, FeatureOptions, Nullable } from "homebridge-plugin-utils";
+import type { FeatureOptionEntry, FeatureOptionScope, FeatureOptions, Nullable } from "homebridge-plugin-utils";
 import { RATGDO_MQTT_TOPIC, RATGDO_OCCUPANCY_DURATION } from "./settings.ts";
+import { buildFixedScopeDescribers, mqttFeatureOptions } from "homebridge-plugin-utils";
 import type { PlatformConfig } from "homebridge";
-import { mqttFeatureOptions } from "homebridge-plugin-utils";
 
 /* The configuration properties a user's config.json can carry directly, as normalizeConfig narrows them out of Homebridge's open index-signature shape. Every field is
  * a plainly narrowed type because a property either survives its typeof guard or it is absent - there is no third answer at this boundary. The platform resolves these
@@ -30,6 +30,24 @@ export interface RatgdoResolvedConfig {
   mqttTopic: Nullable<string> | undefined;
   mqttUrl: Nullable<string> | undefined;
   options: string[] | undefined;
+}
+
+/* The scope levels this plugin's own catalog admits. The framework's vocabulary carries a third level, "controller", for plugins whose devices sit beneath a hub the
+ * user configures in its own right; a Ratgdo opener is reached directly, so there is nothing between the global level and the device itself. Extracting the two levels
+ * this plugin uses from the framework's union rather than restating them keeps one vocabulary at work, so a level the framework renames or retires stops compiling
+ * here rather than drifting quietly.
+ */
+export type RatgdoFeatureOptionScope = Extract<FeatureOptionScope, "device" | "global">;
+
+/* A feature option entry as this plugin's own catalog declares one. The framework leaves scopes optional on its entry type, because a catalog also carries entries a
+ * library contributes and those answer to the library; every entry this plugin authors must say where it may be configured, so we close that hole for our own. An
+ * intersection with the base type does not work here - TypeScript resolves an intersected mutable-plus-readonly property as writable - so we Omit the base declaration
+ * and redeclare it both required and readonly. The tuple is non-empty by construction, since an option declaring no level at all would render nowhere and resolve
+ * nowhere.
+ */
+export interface RatgdoFeatureOption extends Omit<FeatureOptionEntry, "scopes"> {
+
+  readonly scopes: readonly [ RatgdoFeatureOptionScope, ...RatgdoFeatureOptionScope[] ];
 }
 
 /* The globally-scoped value-centric option names the platform resolves once at startup. The value resolver narrows against this union, so asking it for an option that
@@ -119,100 +137,95 @@ export const featureOptionCategories = [
  * renders and the documentation generator restates in prose: a device-facing option belongs at the global level and on an individual device alike, while a
  * platform-wide fact - the broker connection, the debug stream - has exactly one home.
  */
-export const featureOptions: Record<string, FeatureOptionEntry[]> = {
 
-  // Device options.
-  "Device": [
+// Device options.
+const deviceOptions: RatgdoFeatureOption[] = [
 
-    { default: true, description: "Make this device available in HomeKit.", name: "", scopes: [ "device", "global" ] },
-    { default: false, defaultValue: "", description: "Name to use for logging purposes. Defaults to the name the Ratgdo device advertises.", inputSize: 15, name: "LogName", scopes: [ "device", "global" ] },
-    { default: false, defaultValue: "", description: "Base64-encoded encryption key to use for the ESPHome API as specified in your YAML configuration.", inputSize: 44, name: "Encryption.Key", scopes: [ "device", "global" ] }
-  ],
+  { default: true, description: "Make this device available in HomeKit.", name: "", scopes: [ "device", "global" ] },
+  { default: false, defaultValue: "", description: "Name to use for logging purposes. Defaults to the name the Ratgdo device advertises.", inputSize: 15, name: "LogName", scopes: [ "device", "global" ] },
+  { default: false, defaultValue: "", description: "Base64-encoded encryption key to use for the ESPHome API as specified in your YAML configuration.", inputSize: 44, name: "Encryption.Key", scopes: [ "device", "global" ] }
+];
 
-  // Ratgdo ESP32 Disco options.
-  "Disco": [
+// Ratgdo ESP32 Disco options.
+const discoOptions: RatgdoFeatureOption[] = [
 
-    { default: false, description: "Show the state of the backup battery in HomeKit. This requires ensuring the Ratgdo (ESP32) Disco is connected directly to the backup battery.", name: "Battery", scopes: [ "device", "global" ] },
-    { default: false, description: "Add an occupancy sensor accessory for vehicle presence detection.", name: "OccupancySensor.Vehicle.Presence", scopes: [ "device", "global" ] },
-    { default: false, description: "Add a contact sensor accessory for vehicle arrival.", name: "ContactSensor.Vehicle.Arriving", scopes: [ "device", "global" ] },
-    { default: false, description: "Add a contact sensor accessory for vehicle departure.", name: "ContactSensor.Vehicle.Leaving", scopes: [ "device", "global" ] },
-    { default: false, description: "Add a switch accessory to control the park assistance laser feature.", name: "Switch.Laser", scopes: [ "device", "global" ] },
-    { default: false, description: "Add a switch accessory to control the LED setting.", name: "Switch.Led", scopes: [ "device", "global" ] }
-  ],
+  { default: false, description: "Show the state of the backup battery in HomeKit. This requires ensuring the Ratgdo (ESP32) Disco is connected directly to the backup battery.", name: "Battery", scopes: [ "device", "global" ] },
+  { default: false, description: "Add an occupancy sensor accessory for vehicle presence detection.", name: "OccupancySensor.Vehicle.Presence", scopes: [ "device", "global" ] },
+  { default: false, description: "Add a contact sensor accessory for vehicle arrival.", name: "ContactSensor.Vehicle.Arriving", scopes: [ "device", "global" ] },
+  { default: false, description: "Add a contact sensor accessory for vehicle departure.", name: "ContactSensor.Vehicle.Leaving", scopes: [ "device", "global" ] },
+  { default: false, description: "Add a switch accessory to control the park assistance laser feature.", name: "Switch.Laser", scopes: [ "device", "global" ] },
+  { default: false, description: "Add a switch accessory to control the LED setting.", name: "Switch.Led", scopes: [ "device", "global" ] }
+];
 
-  // Konnected options.
-  "Konnected": [
+// Konnected options.
+const konnectedOptions: RatgdoFeatureOption[] = [
 
-    { default: false, description: "Add a switch accessory to control the pre-close warning feature on Konnected openers. This can be useful in automation scenarios.", name: "Switch.Pcw", scopes: [ "device", "global" ] },
-    { default: false, description: "Add a switch accessory to control the strobe setting on Konnected openers.", name: "Switch.Strobe", scopes: [ "device", "global" ] }
-  ],
+  { default: false, description: "Add a switch accessory to control the pre-close warning feature on Konnected openers. This can be useful in automation scenarios.", name: "Switch.Pcw", scopes: [ "device", "global" ] },
+  { default: false, description: "Add a switch accessory to control the strobe setting on Konnected openers.", name: "Switch.Strobe", scopes: [ "device", "global" ] }
+];
 
-  // Light options.
-  "Light": [
+// Light options.
+const lightOptions: RatgdoFeatureOption[] = [
 
-    { default: true, description: "Make the light on the opener available in HomeKit.", name: "", scopes: [ "device", "global" ] }
-  ],
+  { default: true, description: "Make the light on the opener available in HomeKit.", name: "", scopes: [ "device", "global" ] }
+];
 
-  // Logging options. The debug switch leads the list: it is the support knob, reached for far more often than the per-event log toggles beneath it.
-  "Log": [
+// Logging options. The debug switch leads the list: it is the support knob, reached for far more often than the per-event log toggles beneath it.
+const logOptions: RatgdoFeatureOption[] = [
 
-    { default: false, description: "Enable debug logging.", name: "Debug", scopes: ["global"] },
-    { default: true, description: "Log opener events in Homebridge.", name: "Opener", scopes: [ "device", "global" ] },
-    { default: true, description: "Log light events in Homebridge.", name: "Light", scopes: [ "device", "global" ] },
-    { default: true, description: "Log motion-related events in Homebridge.", name: "Motion", scopes: [ "device", "global" ] },
-    { default: true, description: "Log obstruction events in Homebridge.", name: "Obstruction", scopes: [ "device", "global" ] },
-    { default: true, description: "Log vehicle presence-related events in Homebridge. This is only valid on Ratgdo (ESP32) Disco openers.", name: "VehiclePresence", scopes: [ "device", "global" ] }
-  ],
+  { default: false, description: "Enable debug logging.", name: "Debug", scopes: ["global"] },
+  { default: true, description: "Log opener events in Homebridge.", name: "Opener", scopes: [ "device", "global" ] },
+  { default: true, description: "Log light events in Homebridge.", name: "Light", scopes: [ "device", "global" ] },
+  { default: true, description: "Log motion-related events in Homebridge.", name: "Motion", scopes: [ "device", "global" ] },
+  { default: true, description: "Log obstruction events in Homebridge.", name: "Obstruction", scopes: [ "device", "global" ] },
+  { default: true, description: "Log vehicle presence-related events in Homebridge. This is only valid on Ratgdo (ESP32) Disco openers.", name: "VehiclePresence", scopes: [ "device", "global" ] }
+];
 
-  // Motion options.
-  "Motion": [
+// Motion options.
+const motionOptions: RatgdoFeatureOption[] = [
 
-    { default: true, description: "Make the motion sensor on the opener available in HomeKit.", name: "", scopes: [ "device", "global" ] },
-    { default: false, description: "Add an occupancy sensor accessory using motion sensor activity to determine occupancy.", name: "OccupancySensor", scopes: [ "device", "global" ] },
-    { default: true, defaultValue: RATGDO_OCCUPANCY_DURATION, description: "Duration, in seconds, to wait without receiving a motion event to determine when occupancy is no longer detected.", group: "OccupancySensor", name: "OccupancySensor.Duration", scopes: [ "device", "global" ] }
-  ],
+  { default: true, description: "Make the motion sensor on the opener available in HomeKit.", name: "", scopes: [ "device", "global" ] },
+  { default: false, description: "Add an occupancy sensor accessory using motion sensor activity to determine occupancy.", name: "OccupancySensor", scopes: [ "device", "global" ] },
+  { default: true, defaultValue: RATGDO_OCCUPANCY_DURATION, description: "Duration, in seconds, to wait without receiving a motion event to determine when occupancy is no longer detected.", group: "OccupancySensor", name: "OccupancySensor.Duration", scopes: [ "device", "global" ] }
+];
 
-  // The library's MQTT group, contributed whole rather than restated here, so the plugin and the library cannot disagree about the entries, their defaults, or their scope.
-  [mqtt.category.name]: mqtt.options,
+// Opener options.
+const openerOptions: RatgdoFeatureOption[] = [
 
-  // Opener options.
-  "Opener": [
-
-    { default: true, description: "Make the wireless remote lock on the opener available in HomeKit.", name: "Lock", scopes: [ "device", "global" ] },
-    { default: false, description: "Make this opener read-only by ignoring open and close requests from HomeKit.", name: "ReadOnly", scopes: [ "device", "global" ] },
-    { default: false, description: "Add a dimmer accessory to control the opener. This can be useful in automation scenarios where you want to set the door to a specific percentage.", name: "Dimmer", scopes: [ "device", "global" ] },
-    { default: false, description: "Add a switch accessory to control the opener. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling garage door openers.", name: "Switch", scopes: [ "device", "global" ] },
-    { default: false, description: "Add an occupancy sensor accessory using the open state of the opener to determine occupancy. This can be useful in automation scenarios where you want to trigger an action based on the opener being open for an extended period of time.", name: "OccupancySensor", scopes: [ "device", "global" ] },
-    { default: true, defaultValue: RATGDO_OCCUPANCY_DURATION, description: "Duration, in seconds, to wait once the opener has reached the open state before indicating occupancy.", group: "OccupancySensor", name: "OccupancySensor.Duration", scopes: [ "device", "global" ] },
-    { default: false, description: "Add a switch accessory to control the wireless remote lockout feature (if present) on your opener. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling the lock state of garage door openers.", name: "Switch.RemoteLockout", scopes: [ "device", "global" ] }
-  ]
-};
+  { default: true, description: "Make the wireless remote lock on the opener available in HomeKit.", name: "Lock", scopes: [ "device", "global" ] },
+  { default: false, description: "Make this opener read-only by ignoring open and close requests from HomeKit.", name: "ReadOnly", scopes: [ "device", "global" ] },
+  { default: false, description: "Add a dimmer accessory to control the opener. This can be useful in automation scenarios where you want to set the door to a specific percentage.", name: "Dimmer", scopes: [ "device", "global" ] },
+  { default: false, description: "Add a switch accessory to control the opener. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling garage door openers.", name: "Switch", scopes: [ "device", "global" ] },
+  { default: false, description: "Add an occupancy sensor accessory using the open state of the opener to determine occupancy. This can be useful in automation scenarios where you want to trigger an action based on the opener being open for an extended period of time.", name: "OccupancySensor", scopes: [ "device", "global" ] },
+  { default: true, defaultValue: RATGDO_OCCUPANCY_DURATION, description: "Duration, in seconds, to wait once the opener has reached the open state before indicating occupancy.", group: "OccupancySensor", name: "OccupancySensor.Duration", scopes: [ "device", "global" ] },
+  { default: false, description: "Add a switch accessory to control the wireless remote lockout feature (if present) on your opener. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling the lock state of garage door openers.", name: "Switch.RemoteLockout", scopes: [ "device", "global" ] }
+];
 /* eslint-enable @stylistic/max-len */
 
-/* Documentation hook: the scope sentence appended to an option's description cell in the generated feature-option reference. The entry's own scopes declaration is the
- * single source and this is only its formatter, so an entry that changes level changes its prose with it. Ratgdo declares two shapes - a device-facing option at both
- * levels, and a platform-wide fact at the global level alone - and the presence of the device level is what tells them apart.
- *
- * The suffix carries its own leading separator because the renderer concatenates it straight onto the bolded-default text and passes hook-owned markup through
- * verbatim. The scopes guard is what the renderer's generic entry type requires, since that type keeps scopes optional; every entry in this catalog declares one.
+/* The full catalog, composed from the categories this plugin authors and the group the library contributes, in the order the webUI renders them and the generated
+ * reference documents them. Two types are at work here on purpose, and neither needs a cast. The authored arrays are typed as this plugin's own entry, which is what
+ * makes a missing, empty, or controller-level scopes declaration a compile error at the site where the entry is written. The exported record speaks the framework's
+ * wider entry vocabulary, and that is what lets a group the library composes drop straight in beside the authored ones.
  */
-export function describeOptionScope(option: FeatureOptionEntry, _category: FeatureCategoryEntry): string | undefined {
+export const featureOptions: Record<string, FeatureOptionEntry[]> = {
 
-  const scopes = option.scopes;
+  "Device": deviceOptions,
+  "Disco": discoOptions,
+  "Konnected": konnectedOptions,
+  "Light": lightOptions,
+  "Log": logOptions,
+  "Motion": motionOptions,
 
-  if(!scopes) {
+  // The library's MQTT group, contributed whole rather than restated here, so the plugin and the library cannot disagree about the entries, their defaults, or
+  // their scope.
+  [mqtt.category.name]: mqtt.options,
 
-    return undefined;
-  }
+  "Opener": openerOptions
+};
 
-  return scopes.includes("device") ? "<BR>This option may be applied globally or on individual devices." : "<BR>This option may only be applied globally.";
-}
-
-/* Documentation hook: the scope sentence rendered beneath a category heading. Ratgdo has none to give - the per-option suffixes above carry the whole story, and a
- * category-level sentence would either repeat them or contradict a category holding options at differing levels. The hook is exported all the same so the catalog
- * states that choice outright rather than leaving the renderer to infer it from an absent export.
+/* Documentation hooks: the scope prose the generated feature-option reference renders. Every entry in this catalog declares one of exactly two shapes - a device-facing
+ * option configurable at both levels, and a platform-wide fact configurable globally alone - which is the pair the library's fixed sentences are written for, so the
+ * sentences themselves belong to the library and the choice of that pair is all this module states. The category hook comes back with it and contributes nothing: the
+ * per-option suffixes carry the whole story, and a category-level sentence would either repeat them or contradict a category holding options at differing levels.
  */
-export function describeCategoryScope(_category: FeatureCategoryEntry): string | undefined {
-
-  return undefined;
-}
+export const { describeCategoryScope, describeOptionScope } = buildFixedScopeDescribers();

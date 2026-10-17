@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, mock, test } from "node:test";
 import type { EspHomeEvent } from "./types.ts";
 import { RATGDO_OCCUPANCY_DURATION } from "./settings.ts";
 import assert from "node:assert/strict";
+import { loggedAt } from "homebridge-plugin-utils/testing";
 
 /* Build a cover EspHomeEvent in the exact shape updateState() consumes. updateState() reads the EspHomeEvent surface (id / state / current_operation / position), which
  * is distinct from the wire TelemetryEvent shape the initial-state snapshot carries - so we construct these directly rather than through the telemetry factories.
@@ -239,12 +240,12 @@ describe("RatgdoAccessory.updateState() cover events", () => {
 
       ratgdo.updateState(coverEvent("cover-door", "OPENING", "OPEN", 0.5));
 
-      assert.ok(entries.some((entry) => (entry.level === "info") && String(entry.parameters[0]).includes("Opening.")),
+      assert.ok(loggedAt(entries, "info", "Opening."),
         "the opening transition logs the capitalized door state at info level, since Log.Opener defaults on");
 
       ratgdo.updateState(coverEvent("cover-door", "IDLE", "OPEN", 1));
 
-      assert.ok(entries.some((entry) => (entry.level === "info") && String(entry.parameters[0]).includes("Open.")),
+      assert.ok(loggedAt(entries, "info", "Open."),
         "the open transition logs its own capitalized door state at info level");
     });
   });
@@ -270,7 +271,7 @@ describe("RatgdoAccessory.updateState() cover events", () => {
 
       ratgdo.updateState(coverEvent("cover-door", "IDLE", "OPEN", 1));
 
-      assert.equal(entries.some((entry) => (entry.level === "info") && String(entry.parameters[0]).includes("Open.")), false,
+      assert.equal(loggedAt(entries, "info", "Open."), false,
         "disabling Log.Opener suppresses the capitalized door state info log on a real transition");
     });
 
@@ -280,7 +281,7 @@ describe("RatgdoAccessory.updateState() cover events", () => {
 
       ratgdo.updateState(coverEvent("cover-door", "WIGGLE", "OPEN", 0.5));
 
-      assert.ok(entries.some((entry) => (entry.level === "error") && String(entry.parameters[0]).includes("Unknown door operation detected")),
+      assert.ok(loggedAt(entries, "error", "Unknown door operation detected"),
         "an unrecognized current_operation is reported through an error log");
       assert.equal(accessory.getService(Service.GarageDoorOpener)?.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED,
         "the unrecognized operation returns early, leaving CurrentDoorState untouched at its born CLOSED state");

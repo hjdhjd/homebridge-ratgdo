@@ -9,12 +9,13 @@
  * Timer-driven command concerns - the command-failure UI revert (RATGDO_UI_REVERT_DELAY) and the Konnected pre-close-warning momentary auto-revert
  * (RATGDO_KONNECTED_PCW_DURATION) - run under node:test mock timers so the deferred characteristic write is observed deterministically without a real-time delay.
  */
-import { Characteristic, Service, buildRatgdoAccessory, loggedAt, makeCoverEvent, makeKonnectedInitialState, makeRatgdoInitialState } from "./testing.helpers.ts";
+import { Characteristic, Service, buildRatgdoAccessory, makeCoverEvent, makeKonnectedInitialState, makeRatgdoInitialState } from "./testing.helpers.ts";
 import { RATGDO_KONNECTED_PCW_DURATION, RATGDO_UI_REVERT_DELAY } from "./settings.ts";
 import { RatgdoService, RatgdoVariant } from "./types.ts";
 import { afterEach, beforeEach, describe, mock, test } from "node:test";
 import { LockCommand } from "esphome-client";
 import assert from "node:assert/strict";
+import { loggedAt } from "homebridge-plugin-utils/testing";
 
 describe("RatgdoAccessory command dispatch", () => {
 

@@ -11,9 +11,12 @@
  * resolveLogName (empty collapses to undefined). The read-only deviation log - the one side effect the constructor fires after hints resolve - is asserted from the
  * captured log entries.
  */
-import { buildRatgdoAccessory, loggedAt, makeKonnectedInitialState } from "./testing.helpers.ts";
+import { Characteristic, Service, buildRatgdoAccessory, makeKonnectedInitialState, makeRatgdoInitialState } from "./testing.helpers.ts";
 import { describe, test } from "node:test";
+import { formatLogEntry, loggedAt } from "homebridge-plugin-utils/testing";
+import { LockCommand } from "esphome-client";
 import { RATGDO_OCCUPANCY_DURATION } from "./settings.ts";
+import { RatgdoAccessory } from "./device.ts";
 import { RatgdoVariant } from "./types.ts";
 import assert from "node:assert/strict";
 
@@ -201,10 +204,10 @@ describe("RatgdoAccessory hints", () => {
     test("fronts the device log prefix when a logName is configured", () => {
 
       const { entries } = buildRatgdoAccessory({ userOptions: [ "Enable.Device.LogName.GarageLogger", "Enable.Opener.ReadOnly" ] });
-      const readOnlyEntry = entries.find((entry) => String(entry.parameters[0]).includes("Read-only mode"));
+      const readOnlyEntry = entries.find((entry) => formatLogEntry(entry).includes("Read-only mode"));
 
       assert.ok(readOnlyEntry, "the read-only deviation log fires so we have a log line to inspect the prefix on");
-      assert.ok(String(readOnlyEntry.parameters[0]).startsWith("GarageLogger: "), "the configured logName fronts every log line through the name getter's prefix");
+      assert.ok(formatLogEntry(readOnlyEntry).startsWith("GarageLogger: "), "the configured logName fronts every log line through the name getter's prefix");
     });
   });
 
@@ -230,6 +233,70 @@ describe("RatgdoAccessory hints", () => {
       const { entries } = buildRatgdoAccessory();
 
       assert.equal(loggedAt(entries, "info", "Read-only mode"), false, "leaving read-only at its disabled default emits no read-only deviation log");
+    });
+  });
+
+  /* The lock hint is the one hint that decides whether a HomeKit characteristic exists at all, so its net asserts the resulting shape of the garage door service
+   * rather than only the resolved hint. testCharacteristic is the right reader here because it answers presence without creating anything, which is the same
+   * distinction the presence gate itself turns on.
+   */
+  describe("the wireless remote lock characteristic pair", () => {
+
+    test("leaves both lock characteristics off the garage door service when Opener.Lock is disabled", () => {
+
+      const { accessory } = buildRatgdoAccessory({ userOptions: ["Disable.Opener.Lock"] });
+      const service = accessory.getService(Service.GarageDoorOpener);
+
+      assert.ok(service, "the garage door service is configured regardless of the lock feature");
+      assert.equal(service.testCharacteristic(Characteristic.LockCurrentState), false, "the current-state characteristic is absent with the lock feature off");
+      assert.equal(service.testCharacteristic(Characteristic.LockTargetState), false, "the target-state characteristic is absent with the lock feature off");
+    });
+
+    test("carries both lock characteristics on the garage door service when Opener.Lock is enabled", () => {
+
+      const { accessory } = buildRatgdoAccessory();
+      const service = accessory.getService(Service.GarageDoorOpener);
+
+      assert.ok(service, "the garage door service is configured");
+      assert.equal(service.testCharacteristic(Characteristic.LockCurrentState), true, "the current-state characteristic is present at the lock feature's default");
+      assert.equal(service.testCharacteristic(Characteristic.LockTargetState), true, "the target-state characteristic is present at the lock feature's default");
+    });
+
+    test("binds a live lock handler on a configure pass over a service that already carries the pair", async () => {
+
+      const { accessory, client, platform, ratgdo } = buildRatgdoAccessory();
+      const service = accessory.getService(Service.GarageDoorOpener);
+
+      assert.ok(service, "the first pass configured the garage door service");
+      assert.equal(service.testCharacteristic(Characteristic.LockTargetState), true,
+        "the first pass leaves the pair present, so the second pass below is the one that meets an already-carried characteristic");
+
+      /* Stand in for the handler the previous process bound with one that dispatches nothing, which is what makes this test able to tell the two outcomes apart: the
+       * characteristic double keeps a single handler, so a pass that skipped the bind would leave this inert one in place and the set below would reach no device.
+       */
+      let inertHandlerRan = false;
+
+      service.getCharacteristic(Characteristic.LockTargetState).onSet((): void => {
+
+        inertHandlerRan = true;
+      });
+
+      /* A second accessory over the SAME TestAccessory is what a cached accessory restored after a Homebridge restart looks like: the service and its characteristics
+       * survive, and nothing bound in the previous process does. Constructing through the helper again would fabricate a fresh accessory and never reach that state,
+       * so this repeats the helper's own two construction casts against the handles it already returned.
+       */
+      const restored = new RatgdoAccessory(platform as unknown as ConstructorParameters<typeof RatgdoAccessory>[0],
+        accessory as unknown as ConstructorParameters<typeof RatgdoAccessory>[1], ratgdo.device, makeRatgdoInitialState());
+
+      assert.ok(restored, "the restored accessory configures over the service it inherited");
+
+      client.commands.length = 0;
+
+      await service.getCharacteristic(Characteristic.LockTargetState).triggerSet(Characteristic.LockTargetState.SECURED);
+
+      assert.equal(inertHandlerRan, false, "the restored pass replaced the inert handler rather than leaving the characteristic bound to it");
+      assert.deepEqual(client.commands, [{ id: "lock-lock_remotes", payload: { command: LockCommand.LOCK } }],
+        "setting the inherited target-state characteristic reaches the device, so the pass bound its own handler over a characteristic it did not create");
     });
   });
 });

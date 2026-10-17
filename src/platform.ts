@@ -3,10 +3,10 @@
  * platform.ts: homebridge-ratgdo platform class.
  */
 import type { API, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
-import { CoalescingTask, FeatureOptions, HbpuAbortError, createMqttClient, discoverServices, formatErrorMessage, prefixedLog, sanitizeName,
+import { CoalescingTask, FeatureOptions, HbpuAbortError, createMqttClient, debugGatedLog, discoverServices, formatErrorMessage, prefixedLog, sanitizeName,
   superviseLoop } from "homebridge-plugin-utils";
 import type { EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
-import type { MdnsDiscovery, MdnsDiscoveryEvent, MqttClient, Nullable } from "homebridge-plugin-utils";
+import type { HomebridgePluginLogging, MdnsDiscovery, MdnsDiscoveryEvent, MqttClient, Nullable } from "homebridge-plugin-utils";
 import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_MDNS_SERVICE_TYPE } from "./settings.ts";
 import { applyDeviceInfo, isEncryptionError, openConnection } from "./connection.ts";
 import { consolidatedFlag, consolidatedValue, featureOptionCategories, featureOptions, normalizeConfig } from "./options.ts";
@@ -48,7 +48,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   private readonly discoveredDevices: Set<string>;
   public readonly featureOptions: FeatureOptions;
   public readonly hap: HAP;
-  public readonly log: Logging;
+  public readonly log: HomebridgePluginLogging;
   public readonly mqtt: Nullable<MqttClient>;
   // AbortController scoped to the platform's lifetime. Aborted on Homebridge shutdown so that every signal-aware resource we own (the MQTT client, any future
   // signal-driven primitive) tears itself down through one composed signal instead of per-resource imperative cleanup.
@@ -78,11 +78,11 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     };
 
     this.hap = api.hap;
-    this.log = log;
-    // In-place override: this redirects the injected Homebridge Logging instance's own debug() method through the plugin's debug() method below, which gates
-    // output on the opt-in config.debug setting. Any caller holding this same log reference therefore gets the plugin's config.debug behavior rather than
-    // Homebridge's global debug switch.
-    this.log.debug = (message: string, ...parameters: unknown[]): void => this.debug(message, ...parameters);
+    /* Wrap the logger Homebridge handed us in the library's config-gated composition. The plugin offers a debug setting of its own, read live on every call, and the
+     * gated channel emits through warn because Homebridge prints its DEBUG lines only when Homebridge's own global debug switch is on...warn is the level that
+     * actually reaches the user's log. Wrapping rather than overwriting a method on Homebridge's own instance leaves that object exactly as Homebridge owns it.
+     */
+    this.log = debugGatedLog(log, (): boolean => this.config.debug);
     this.mqtt = null;
     this.shutdownController = new AbortController();
 
@@ -625,16 +625,6 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     if(ratgdo.hints.discoBattery) {
 
       client.subscribeToLogs(LogLevel.VERBOSE);
-    }
-  }
-
-  // Plugin-owned debug logging, gated on the config.debug opt-in. We route it through log.warn rather than log.debug because Homebridge suppresses DEBUG-level lines
-  // unless its own global debug switch is on, so surfacing our opt-in debug stream at WARN level is what makes config.debug output actually appear in the log.
-  public debug(message: string, ...parameters: unknown[]): void {
-
-    if(this.config.debug) {
-
-      this.log.warn(util.format(message, ...parameters));
     }
   }
 }

@@ -11,6 +11,7 @@
 import { Characteristic, Service, buildRatgdoAccessory, makeKonnectedInitialState } from "./testing.helpers.ts";
 import { RatgdoService, RatgdoVariant } from "./types.ts";
 import { describe, test } from "node:test";
+import { formatLogEntry, loggedAt } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
 
 describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery telemetry", () => {
@@ -33,7 +34,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       assert.ok(service, "the vehicle arriving contact sensor service exists when the feature is enabled");
       assert.equal(service.getCharacteristic(Characteristic.ContactSensorState).value, true, "an ON arriving event writes true to the ContactSensorState characteristic");
-      assert.equal(entries.some((entry) => (entry.level === "info") && String(entry.parameters[0]).includes("Vehicle arriving detected.")), true,
+      assert.equal(loggedAt(entries, "info", "Vehicle arriving detected."), true,
         "an arriving transition logs at info when Log.VehiclePresence is enabled");
       assert.equal(mqtt.publishes.find((entry) => entry.topic.endsWith("vehiclearriving"))?.payload, "true",
         "an arriving transition publishes true to the vehiclearriving MQTT topic");
@@ -52,7 +53,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       assert.equal(service?.getCharacteristic(Characteristic.ContactSensorState).value, false,
         "the following OFF arriving event writes false to the ContactSensorState characteristic");
-      assert.equal(entries.some((entry) => (entry.level === "info") && String(entry.parameters[0]).includes("Vehicle arriving no longer detected.")), true,
+      assert.equal(loggedAt(entries, "info", "Vehicle arriving no longer detected."), true,
         "the OFF arriving transition logs the no-longer-detected message at info");
       assert.equal(mqtt.publishes.filter((entry) => entry.topic.endsWith("vehiclearriving")).at(-1)?.payload, "false",
         "the OFF arriving transition publishes false to the vehiclearriving MQTT topic");
@@ -67,7 +68,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
       ratgdo.updateState({ id: "binary_sensor-vehicle_arriving", state: "OFF" });
 
       assert.equal(mqtt.publishes.some((entry) => entry.topic.endsWith("vehiclearriving")), false, "an unchanged OFF arriving event publishes nothing to MQTT");
-      assert.equal(entries.some((entry) => String(entry.parameters[0]).includes("Vehicle arriving")), false, "an unchanged OFF arriving event logs nothing");
+      assert.equal(entries.some((entry) => formatLogEntry(entry).includes("Vehicle arriving")), false, "an unchanged OFF arriving event logs nothing");
     });
 
     test("suppresses the log but still publishes and flips the characteristic when Log.VehiclePresence is disabled", () => {
@@ -80,7 +81,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       const service = accessory.getServiceById(Service.ContactSensor, RatgdoService.CONTACT_DISCO_VEHICLE_ARRIVING);
 
-      assert.equal(entries.some((entry) => String(entry.parameters[0]).includes("Vehicle arriving detected.")), false,
+      assert.equal(entries.some((entry) => formatLogEntry(entry).includes("Vehicle arriving detected.")), false,
         "disabling Log.VehiclePresence suppresses the arriving detection log entirely");
       assert.equal(service?.getCharacteristic(Characteristic.ContactSensorState).value, true, "the characteristic still flips to true with logging disabled");
       assert.equal(mqtt.publishes.find((entry) => entry.topic.endsWith("vehiclearriving"))?.payload, "true", "MQTT still publishes with logging disabled");
@@ -101,7 +102,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       assert.ok(service, "the vehicle leaving contact sensor service exists when the feature is enabled");
       assert.equal(service.getCharacteristic(Characteristic.ContactSensorState).value, true, "an ON leaving event writes true to the ContactSensorState characteristic");
-      assert.equal(entries.some((entry) => (entry.level === "info") && String(entry.parameters[0]).includes("Vehicle leaving detected.")), true,
+      assert.equal(loggedAt(entries, "info", "Vehicle leaving detected."), true,
         "a leaving transition logs at info when Log.VehiclePresence is enabled");
       assert.equal(mqtt.publishes.find((entry) => entry.topic.endsWith("vehicleleaving"))?.payload, "true",
         "a leaving transition publishes true to the vehicleleaving MQTT topic");
@@ -116,7 +117,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
       ratgdo.updateState({ id: "binary_sensor-vehicle_leaving", state: "OFF" });
 
       assert.equal(mqtt.publishes.some((entry) => entry.topic.endsWith("vehicleleaving")), false, "an unchanged OFF leaving event publishes nothing to MQTT");
-      assert.equal(entries.some((entry) => String(entry.parameters[0]).includes("Vehicle leaving")), false, "an unchanged OFF leaving event logs nothing");
+      assert.equal(entries.some((entry) => formatLogEntry(entry).includes("Vehicle leaving")), false, "an unchanged OFF leaving event logs nothing");
     });
   });
 
@@ -135,7 +136,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
       assert.ok(service, "the vehicle presence occupancy sensor service exists when the feature is enabled");
       assert.equal(service.getCharacteristic(Characteristic.OccupancyDetected).value, true,
         "an ON vehicle-detected event writes true to the OccupancyDetected characteristic");
-      assert.equal(entries.some((entry) => (entry.level === "info") && String(entry.parameters[0]).includes("Vehicle detected.")), true,
+      assert.equal(loggedAt(entries, "info", "Vehicle detected."), true,
         "a presence transition logs at info when Log.VehiclePresence is enabled");
       assert.equal(mqtt.publishes.find((entry) => entry.topic.endsWith("vehiclepresence"))?.payload, "true",
         "a presence transition publishes true to the vehiclepresence MQTT topic");
@@ -154,7 +155,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       assert.equal(service?.getCharacteristic(Characteristic.OccupancyDetected).value, false,
         "the following OFF event writes false to the OccupancyDetected characteristic");
-      assert.equal(entries.some((entry) => (entry.level === "info") && String(entry.parameters[0]).includes("Vehicle no longer detected.")), true,
+      assert.equal(loggedAt(entries, "info", "Vehicle no longer detected."), true,
         "the OFF presence transition logs the no-longer-detected message at info");
       assert.equal(mqtt.publishes.filter((entry) => entry.topic.endsWith("vehiclepresence")).at(-1)?.payload, "false",
         "the OFF presence transition publishes false to the vehiclepresence MQTT topic");
@@ -169,7 +170,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
       ratgdo.updateState({ id: "binary_sensor-vehicle_detected", state: "OFF" });
 
       assert.equal(mqtt.publishes.some((entry) => entry.topic.endsWith("vehiclepresence")), false, "an unchanged OFF vehicle-detected event publishes nothing to MQTT");
-      assert.equal(entries.some((entry) => String(entry.parameters[0]).includes("Vehicle")), false, "an unchanged OFF vehicle-detected event logs nothing");
+      assert.equal(entries.some((entry) => formatLogEntry(entry).includes("Vehicle")), false, "an unchanged OFF vehicle-detected event logs nothing");
     });
   });
 
@@ -186,7 +187,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
       const service = accessory.getService(Service.Lightbulb);
 
       assert.equal(service?.getCharacteristic(Characteristic.On).value, true, "an ON light event writes true to the On characteristic");
-      assert.equal(entries.some((entry) => (entry.level === "info") && String(entry.parameters[0]).includes("Light on.")), true,
+      assert.equal(loggedAt(entries, "info", "Light on."), true,
         "a light transition logs at info when Log.Light is enabled");
       assert.equal(mqtt.publishes.find((entry) => entry.topic.endsWith("light"))?.payload, "true", "a light ON transition publishes true to the light MQTT topic");
     });
@@ -203,7 +204,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
       const service = accessory.getService(Service.Lightbulb);
 
       assert.equal(service?.getCharacteristic(Characteristic.On).value, false, "the following OFF light event writes false to the On characteristic");
-      assert.equal(entries.some((entry) => (entry.level === "info") && String(entry.parameters[0]).includes("Light off.")), true,
+      assert.equal(loggedAt(entries, "info", "Light off."), true,
         "the OFF light transition logs at info");
       assert.equal(mqtt.publishes.filter((entry) => entry.topic.endsWith("light")).at(-1)?.payload, "false",
         "the OFF light transition publishes false to the light MQTT topic");
@@ -218,7 +219,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
       ratgdo.updateState({ id: "light-light", state: "OFF" });
 
       assert.equal(mqtt.publishes.some((entry) => entry.topic.endsWith("light")), false, "an unchanged OFF light event publishes nothing to MQTT");
-      assert.equal(entries.some((entry) => String(entry.parameters[0]).includes("Light o")), false, "an unchanged OFF light event logs nothing");
+      assert.equal(entries.some((entry) => formatLogEntry(entry).includes("Light o")), false, "an unchanged OFF light event logs nothing");
     });
 
     test("suppresses the log but still publishes and flips the characteristic when Log.Light is disabled", () => {
@@ -231,7 +232,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       const service = accessory.getService(Service.Lightbulb);
 
-      assert.equal(entries.some((entry) => String(entry.parameters[0]).includes("Light on.")), false, "disabling Log.Light suppresses the light-on log entirely");
+      assert.equal(entries.some((entry) => formatLogEntry(entry).includes("Light on.")), false, "disabling Log.Light suppresses the light-on log entirely");
       assert.equal(service?.getCharacteristic(Characteristic.On).value, true, "the characteristic still flips to true with light logging disabled");
       assert.equal(mqtt.publishes.find((entry) => entry.topic.endsWith("light"))?.payload, "true", "MQTT still publishes with light logging disabled");
     });
@@ -361,7 +362,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       const service = accessory.getService(Service.Battery);
 
-      assert.equal(entries.some((entry) => (entry.level === "error") && String(entry.parameters[0]).includes("Unknown battery state received")), true,
+      assert.equal(loggedAt(entries, "error", "Unknown battery state received"), true,
         "an unrecognized battery state logs at error");
       assert.equal(service?.getCharacteristic(Characteristic.ChargingState).value, Characteristic.ChargingState.CHARGING,
         "an unrecognized battery state returns early and leaves the prior charging state in place");

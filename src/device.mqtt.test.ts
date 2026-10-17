@@ -9,12 +9,13 @@
  * subscription is present exactly when its feature option is enabled and absent otherwise. The per-device topic prefix ("<mac>/<suffix>") is asserted across the whole
  * registered surface in one sweep.
  */
-import { buildRatgdoAccessory, loggedAt, makeBinarySensorEvent, makeCoverEvent, makeKonnectedInitialState, makeLightEvent, makeLockEvent,
+import { buildRatgdoAccessory, makeBinarySensorEvent, makeCoverEvent, makeKonnectedInitialState, makeLightEvent, makeLockEvent,
   makeRatgdoInitialState } from "./testing.helpers.ts";
 import { describe, test } from "node:test";
 import { LockState } from "esphome-client";
 import { RatgdoVariant } from "./types.ts";
 import assert from "node:assert/strict";
+import { loggedAt } from "homebridge-plugin-utils/testing";
 
 // The default device MAC the harness stamps onto every accessory. configureMqtt prefixes every topic with "<mac>/", so this is the prefix every recorded subscription
 // must carry.

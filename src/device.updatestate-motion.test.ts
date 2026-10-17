@@ -8,9 +8,10 @@
  * real time, so every timer-dependent assertion drives node:test mock.timers rather than waiting on the wall clock. MQTT is enabled on every build so the publish side
  * effects are observable, and the log capture buffer is asserted against the production log strings verbatim.
  */
-import { Characteristic, Service, buildRatgdoAccessory, loggedAt } from "./testing.helpers.ts";
+import { Characteristic, Service, buildRatgdoAccessory } from "./testing.helpers.ts";
 import { RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION } from "./settings.ts";
 import { afterEach, beforeEach, describe, mock, test } from "node:test";
+import { logCount, loggedAt } from "homebridge-plugin-utils/testing";
 import { RatgdoService } from "./types.ts";
 import assert from "node:assert/strict";
 
@@ -68,7 +69,7 @@ describe("RatgdoAccessory.updateState() motion and obstruction handling", () => 
 
       assert.ok(mqtt, "the MQTT client double is present when MQTT is enabled");
 
-      const countMotionLogs = (): number => entries.filter((entry) => (entry.level === "info") && String(entry.parameters[0]).includes("Motion detected.")).length;
+      const countMotionLogs = (): number => logCount(entries, "info", "Motion detected.");
 
       const motionPayloads = (): string[] => mqtt.publishes.filter((entry) => entry.topic.endsWith("/motion")).map((entry) => entry.payload);
 
