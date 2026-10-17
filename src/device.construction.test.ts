@@ -102,6 +102,32 @@ describe("RatgdoAccessory construction", () => {
 
       assert.equal(accessory.getService(Service.Lightbulb), undefined, "disabling the Light feature option leaves no light service on the accessory");
     });
+
+    /* The light and the automation dimmer are both Lightbulb services, the light without a subtype and the dimmer with one. HAP refuses a subtype-less service
+     * beside a same-type subtyped one, and the accessory double refuses the same way, so a fresh accessory constructs only when the light is acquired first.
+     */
+    test("is acquired ahead of the automation dimmer, so a fresh accessory with the dimmer enabled carries both", () => {
+
+      const { accessory } = buildRatgdoAccessory({ userOptions: ["Enable.Opener.Dimmer"] });
+      const lightIndex = accessory.services.findIndex((service) => (service.type === Service.Lightbulb) && (service.subtype === undefined));
+      const dimmerIndex = accessory.services.findIndex((service) => (service.type === Service.Lightbulb) &&
+        (service.subtype === RatgdoService.DIMMER_OPENER_AUTOMATION));
+
+      assert.notEqual(lightIndex, -1, "the fresh accessory carries the light's own Lightbulb, with no subtype");
+      assert.notEqual(dimmerIndex, -1, "the fresh accessory carries the dimmer's subtyped Lightbulb");
+      assert.ok(lightIndex < dimmerIndex, "the light's Lightbulb is added before the dimmer's, the only order HAP accepts on a fresh accessory");
+    });
+
+    // The light's presence gate matches a Lightbulb by type and subtype together, so turning the light off finds no light to remove and leaves the dimmer's
+    // subtyped Lightbulb alone. A lookup by type alone would answer the dimmer here and take it off the accessory.
+    test("leaves the automation dimmer in place when the Light feature is disabled", () => {
+
+      const { accessory } = buildRatgdoAccessory({ userOptions: [ "Disable.Light", "Enable.Opener.Dimmer" ] });
+
+      assert.ok(accessory.getServiceById(Service.Lightbulb, RatgdoService.DIMMER_OPENER_AUTOMATION), "the dimmer's subtyped Lightbulb survives the light's off verdict");
+      assert.equal(accessory.services.some((service) => (service.type === Service.Lightbulb) && (service.subtype === undefined)), false,
+        "the accessory carries no Lightbulb without a subtype, since the light is disabled");
+    });
   });
 
   describe("the wireless remote lock", () => {

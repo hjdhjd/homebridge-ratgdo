@@ -215,6 +215,20 @@ describe("TestAccessory and makeTestAccessory", () => {
     assert.equal(accessory.getServiceById(Service.Switch, "tag"), subtyped, "getServiceById returns the service matching both type and subtype");
   });
 
+  test("addService refuses a subtype-less service beside a same-type subtyped one, as HAP does, and admits a distinct subtype", () => {
+
+    const accessory = makeTestAccessory();
+
+    accessory.addService(new Service.Lightbulb("dimmer", "dimmer"));
+
+    const before = accessory.services.length;
+
+    assert.throws(() => accessory.addService(new Service.Lightbulb("light")), { message: /^Cannot add a Service with the same UUID/ },
+      "a subtype-less service beside a same-type subtyped one is refused in HAP's own words");
+    assert.equal(accessory.services.length, before, "the refused service is never appended");
+    assert.doesNotThrow(() => accessory.addService(new Service.Lightbulb("other", "other")), "a second subtyped service with a distinct subtype is admitted");
+  });
+
   test("removeService removes the instance", () => {
 
     const accessory = makeTestAccessory();

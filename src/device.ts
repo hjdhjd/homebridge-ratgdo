@@ -207,12 +207,14 @@ export class RatgdoAccessory implements Disposable {
     // Configure ourselves. Hints are already resolved by the constructor, so configureDevice only walks the HomeKit-facing services.
     this.configureInfo();
     this.configureGarageDoor();
-    this.configureMqtt();
+
+    // HomeKit refuses a service without a subtype beside another service of the same type, so the light (a Lightbulb without a subtype) is acquired before the
+    // dimmer (a subtyped Lightbulb).
+    this.configureLight();
     this.configureAutomationDoorPositionDimmer();
     this.configureAutomationDoorSwitch();
     this.configureAutomationLockoutSwitch();
     this.configureDoorOpenOccupancySensor();
-    this.configureLight();
     this.configureMotionSensor();
     this.configureMotionOccupancySensor();
 
@@ -227,6 +229,10 @@ export class RatgdoAccessory implements Disposable {
     // Configure Konnected-specific features.
     this.configureKonnectedPcwSwitch();
     this.configureKonnectedStrobeSwitch();
+
+    // MQTT comes last. Its registrations live on the shared MQTT client and are released only through mqttAbort, which a constructor that throws never hands to
+    // anyone, so we make them only once every step that can throw has run...a failed construction registers nothing.
+    this.configureMqtt();
   }
 
   /* Translate the captured initial telemetry into a fully-populated RatgdoStatus. Called exactly once from the constructor; the result becomes `this.status` and is
@@ -548,7 +554,7 @@ export class RatgdoAccessory implements Disposable {
   // Configure the garage door service for HomeKit.
   private configureGarageDoor(): boolean {
 
-    const service = acquireService(this.accessory, this.hap.Service.GarageDoorOpener, this.name);
+    const { service } = acquireService({ accessory: this.accessory, name: this.name, serviceType: this.hap.Service.GarageDoorOpener });
 
     this.services[RatgdoService.GARAGE_DOOR] = service;
 
@@ -602,12 +608,12 @@ export class RatgdoAccessory implements Disposable {
 
     this.logFeature("Light", "Light");
 
-    if(!validService(this.accessory, this.hap.Service.Lightbulb, this.hints.light)) {
+    const { service } = validService({ accessory: this.accessory, name: this.name, serviceType: this.hap.Service.Lightbulb, validate: this.hints.light });
+
+    if(!service) {
 
       return false;
     }
-
-    const service = acquireService(this.accessory, this.hap.Service.Lightbulb, this.name);
 
     this.services[RatgdoService.LIGHT] = service;
 
@@ -638,13 +644,13 @@ export class RatgdoAccessory implements Disposable {
     subtype?: string;
   }): boolean {
 
-    if(!validService(this.accessory, opts.service, opts.hint, opts.subtype)) {
+    const displayName = (opts.nameSuffix !== undefined) ? (this.name + opts.nameSuffix) : this.name;
+    const { service } = validService({ accessory: this.accessory, name: displayName, serviceType: opts.service, subtype: opts.subtype, validate: opts.hint });
+
+    if(!service) {
 
       return false;
     }
-
-    const displayName = (opts.nameSuffix !== undefined) ? (this.name + opts.nameSuffix) : this.name;
-    const service = acquireService(this.accessory, opts.service, displayName, opts.subtype);
 
     this.services[opts.cacheKey] = service;
 
@@ -675,13 +681,13 @@ export class RatgdoAccessory implements Disposable {
 
     this.logFeature("Opener.Dimmer", "Automation door position dimmer");
 
-    if(!validService(this.accessory, this.hap.Service.Lightbulb, this.hints.automationDimmer, RatgdoService.DIMMER_OPENER_AUTOMATION)) {
+    const { service } = validService({ accessory: this.accessory, name: this.name + " Automation Door Position", serviceType: this.hap.Service.Lightbulb,
+      subtype: RatgdoService.DIMMER_OPENER_AUTOMATION, validate: this.hints.automationDimmer });
+
+    if(!service) {
 
       return false;
     }
-
-    const service = acquireService(this.accessory, this.hap.Service.Lightbulb, this.name + " Automation Door Position",
-      RatgdoService.DIMMER_OPENER_AUTOMATION);
 
     this.services[RatgdoService.DIMMER_OPENER_AUTOMATION] = service;
 
@@ -733,12 +739,13 @@ export class RatgdoAccessory implements Disposable {
 
     this.logFeature("Opener.Switch", "Automation door opener switch");
 
-    if(!validService(this.accessory, this.hap.Service.Switch, this.hints.automationSwitch, RatgdoService.SWITCH_OPENER_AUTOMATION)) {
+    const { service } = validService({ accessory: this.accessory, name: this.name + " Automation Opener", serviceType: this.hap.Service.Switch,
+      subtype: RatgdoService.SWITCH_OPENER_AUTOMATION, validate: this.hints.automationSwitch });
+
+    if(!service) {
 
       return false;
     }
-
-    const service = acquireService(this.accessory, this.hap.Service.Switch, this.name + " Automation Opener", RatgdoService.SWITCH_OPENER_AUTOMATION);
 
     this.services[RatgdoService.SWITCH_OPENER_AUTOMATION] = service;
 
@@ -767,12 +774,12 @@ export class RatgdoAccessory implements Disposable {
 
     this.logFeature("Disco.Battery", "Ratgdo (ESP32) backup battery status");
 
-    if(!validService(this.accessory, this.hap.Service.Battery, this.hints.discoBattery)) {
+    const { service } = validService({ accessory: this.accessory, name: this.name, serviceType: this.hap.Service.Battery, validate: this.hints.discoBattery });
+
+    if(!service) {
 
       return false;
     }
-
-    const service = acquireService(this.accessory, this.hap.Service.Battery, this.name);
 
     this.services[RatgdoService.BATTERY] = service;
 
@@ -787,12 +794,13 @@ export class RatgdoAccessory implements Disposable {
 
     this.logFeature("Disco.Switch.Laser", "Ratgdo (ESP32) Disco parking assistance laser switch");
 
-    if(!validService(this.accessory, this.hap.Service.Switch, this.hints.discoLaserSwitch, RatgdoService.SWITCH_DISCO_LASER)) {
+    const { service } = validService({ accessory: this.accessory, name: this.name + " Laser", serviceType: this.hap.Service.Switch,
+      subtype: RatgdoService.SWITCH_DISCO_LASER, validate: this.hints.discoLaserSwitch });
+
+    if(!service) {
 
       return false;
     }
-
-    const service = acquireService(this.accessory, this.hap.Service.Switch, this.name + " Laser", RatgdoService.SWITCH_DISCO_LASER);
 
     this.services[RatgdoService.SWITCH_DISCO_LASER] = service;
 
@@ -808,12 +816,13 @@ export class RatgdoAccessory implements Disposable {
 
     this.logFeature("Disco.Switch.Led", "Ratgdo (ESP32) Disco LED switch");
 
-    if(!validService(this.accessory, this.hap.Service.Switch, this.hints.discoLedSwitch, RatgdoService.SWITCH_DISCO_LED)) {
+    const { service } = validService({ accessory: this.accessory, name: this.name + " LED", serviceType: this.hap.Service.Switch,
+      subtype: RatgdoService.SWITCH_DISCO_LED, validate: this.hints.discoLedSwitch });
+
+    if(!service) {
 
       return false;
     }
-
-    const service = acquireService(this.accessory, this.hap.Service.Switch, this.name + " LED", RatgdoService.SWITCH_DISCO_LED);
 
     this.services[RatgdoService.SWITCH_DISCO_LED] = service;
 
@@ -880,12 +889,13 @@ export class RatgdoAccessory implements Disposable {
 
     this.logFeature("Konnected.Switch.Pcw", "Konnected pre-close warning switch");
 
-    if(!validService(this.accessory, this.hap.Service.Switch, this.hints.konnectedPcwSwitch, RatgdoService.SWITCH_KONNECTED_PCW)) {
+    const { service } = validService({ accessory: this.accessory, name: this.name + " Pre Close Warning", serviceType: this.hap.Service.Switch,
+      subtype: RatgdoService.SWITCH_KONNECTED_PCW, validate: this.hints.konnectedPcwSwitch });
+
+    if(!service) {
 
       return false;
     }
-
-    const service = acquireService(this.accessory, this.hap.Service.Switch, this.name + " Pre Close Warning", RatgdoService.SWITCH_KONNECTED_PCW);
 
     this.services[RatgdoService.SWITCH_KONNECTED_PCW] = service;
 
@@ -916,12 +926,13 @@ export class RatgdoAccessory implements Disposable {
 
     this.logFeature("Konnected.Switch.Strobe", "Konnected strobe switch");
 
-    if(!validService(this.accessory, this.hap.Service.Switch, this.hints.konnectedStrobeSwitch, RatgdoService.SWITCH_KONNECTED_STROBE)) {
+    const { service } = validService({ accessory: this.accessory, name: this.name + " Strobe", serviceType: this.hap.Service.Switch,
+      subtype: RatgdoService.SWITCH_KONNECTED_STROBE, validate: this.hints.konnectedStrobeSwitch });
+
+    if(!service) {
 
       return false;
     }
-
-    const service = acquireService(this.accessory, this.hap.Service.Switch, this.name + " Strobe", RatgdoService.SWITCH_KONNECTED_STROBE);
 
     this.services[RatgdoService.SWITCH_KONNECTED_STROBE] = service;
 
@@ -937,12 +948,13 @@ export class RatgdoAccessory implements Disposable {
 
     this.logFeature("Opener.Switch.RemoteLockout", "Automation wireless remote lockout switch");
 
-    if(!validService(this.accessory, this.hap.Service.Switch, this.hints.lock && this.hints.lockoutSwitch, RatgdoService.SWITCH_LOCKOUT)) {
+    const { service } = validService({ accessory: this.accessory, name: this.name + " Lockout", serviceType: this.hap.Service.Switch,
+      subtype: RatgdoService.SWITCH_LOCKOUT, validate: this.hints.lock && this.hints.lockoutSwitch });
+
+    if(!service) {
 
       return false;
     }
-
-    const service = acquireService(this.accessory, this.hap.Service.Switch, this.name + " Lockout", RatgdoService.SWITCH_LOCKOUT);
 
     this.services[RatgdoService.SWITCH_LOCKOUT] = service;
 

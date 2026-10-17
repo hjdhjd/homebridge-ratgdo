@@ -452,9 +452,12 @@ export const Service = {
   Switch: SwitchServiceType
 } as const;
 
-/* One accessory. Carries an AccessoryInformation service from construction (every HomeKit accessory has one); subsequent addService calls append more. getService /
- * getServiceById mirror HAP's distinction between "the bare service of this type" and "the service of this type with a specific subtype". The mutable context and
- * displayName are the fields the production accessory path reads; the _associatedHAPAccessory mirror is retained for HAP-shape parity.
+/* One accessory. Carries an AccessoryInformation service from construction (every HomeKit accessory has one); subsequent addService calls append more. addService
+ * and getService mirror HAP's own rule and HAP's own lookup: HAP refuses a service of a type the accessory already carries unless the new one has a subtype no
+ * service of that type shares, and HAP's getService matches by type alone, whatever the subtype. The double carries both because the suite must see what the runtime
+ * would do - a configure order that adds a service HAP refuses throws here as it throws in the field, and a lookup that leans on getService skipping a subtyped
+ * sibling fails here as it would there. getServiceById is the lookup that matches type and subtype together. The mutable context and displayName are the fields the
+ * production accessory path reads; the _associatedHAPAccessory mirror is retained for HAP-shape parity.
  */
 export class TestAccessory {
 
@@ -475,6 +478,10 @@ export class TestAccessory {
   /* Add a new service in either form HAP's real addService accepts: a service INSTANCE (what acquireService passes after constructing a namespace marker), or the
    * legacy (type, name?, subtype?) form. The instanceof check is sound because a marker CLASS is never an instance of TestService - only constructed services
    * are. Returns the service so production can immediately bind characteristics on it.
+   *
+   * Before it appends, the double refuses as HAP's addService does, in HAP's own words: a service of a type the accessory already carries is admitted only when it
+   * has a subtype and no service of that type shares it. The suite must see an add order that would throw at runtime, and a double that appended anything would
+   * let such an order pass here and fail only in the field.
    */
   public addService(service: TestService): TestService;
   public addService(type: ServiceType, name?: string, subtype?: string): TestService;
@@ -482,15 +489,35 @@ export class TestAccessory {
 
     const service = (typeOrService instanceof TestService) ? typeOrService : new TestService(typeOrService, name ?? this.displayName, subtype);
 
+    for(const existing of this.services) {
+
+      if(existing.type !== service.type) {
+
+        continue;
+      }
+
+      if(!service.subtype) {
+
+        throw new Error("Cannot add a Service with the same UUID '" + existing.UUID +
+          "' as another Service in this Accessory without also defining a unique 'subtype' property.");
+      }
+
+      if(service.subtype === existing.subtype) {
+
+        throw new Error("Cannot add a Service with the same UUID '" + existing.UUID + "' and subtype '" + existing.subtype + "' as another Service in this Accessory.");
+      }
+    }
+
     this.services.push(service);
 
     return service;
   }
 
-  // Find the first service of the given type with no subtype. Production uses this for the "primary" service of a type.
+  // Find the first service of the given type, whatever its subtype. HAP's getService matches by type alone, so a test reading a service through this lookup gets
+  // what production would: the first service of the type the accessory carries, which is a subtyped sibling when that sibling was added first.
   public getService(type: ServiceType): TestService | undefined {
 
-    return this.services.find((service) => (service.type === type) && (service.subtype === undefined));
+    return this.services.find((service) => service.type === type);
   }
 
   // Find the service of the given type AND subtype. Production uses subtypes to disambiguate among multiple Switch services on one accessory.
