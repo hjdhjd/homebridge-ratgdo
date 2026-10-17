@@ -59,10 +59,8 @@ export function translateTelemetry(data: TelemetryEvent): EspHomeEvent {
 
         default: {
 
-          // Compile-time exhaustiveness: if esphome-client ever extends CoverOperation, this assignment fails to type-check and we are forced to handle the new value.
-          const _exhaust: never = data.currentOperation;
-
-          void _exhaust;
+          // Compile-time exhaustiveness: if esphome-client ever extends CoverOperation, this statement fails to type-check and we are forced to handle the new value.
+          data.currentOperation satisfies never;
 
           // eslint-disable-next-line camelcase
           payload.current_operation = "IDLE";

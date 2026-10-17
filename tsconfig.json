@@ -11,6 +11,6 @@
   },
 
   "exclude": [ "dist", "node_modules" ],
-  "extends": "./node_modules/homebridge-plugin-utils/build/tsconfig.json",
+  "extends": "./node_modules/homebridge-plugin-utils/build/tsconfig.plugin.json",
   "include": [ "eslint.config.mjs", "homebridge-ui", "src" ]
 }

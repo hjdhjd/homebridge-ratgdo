@@ -544,13 +544,6 @@ export class RatgdoAccessory {
 
     const service = acquireService(this.accessory, this.hap.Service.GarageDoorOpener, this.name);
 
-    if(!service) {
-
-      this.log.error("Unable to add the garage door.");
-
-      return false;
-    }
-
     this.services[RatgdoService.GARAGE_DOOR] = service;
 
     service.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.status.door);
@@ -607,13 +600,6 @@ export class RatgdoAccessory {
 
     const service = acquireService(this.accessory, this.hap.Service.Lightbulb, this.name);
 
-    if(!service) {
-
-      this.log.error("Unable to add the light.");
-
-      return false;
-    }
-
     this.services[RatgdoService.LIGHT] = service;
 
     service.updateCharacteristic(this.hap.Characteristic.On, this.status.light);
@@ -635,7 +621,6 @@ export class RatgdoAccessory {
   private configureAvailabilitySensor(opts: {
 
     cacheKey: RatgdoService;
-    errorMessage: string;
     hint: boolean;
     initialCharacteristic: CharacteristicTarget;
     initialState: boolean;
@@ -651,13 +636,6 @@ export class RatgdoAccessory {
 
     const displayName = (opts.nameSuffix !== undefined) ? (this.name + opts.nameSuffix) : this.name;
     const service = acquireService(this.accessory, opts.service, displayName, opts.subtype);
-
-    if(!service) {
-
-      this.log.error(opts.errorMessage);
-
-      return false;
-    }
 
     this.services[opts.cacheKey] = service;
 
@@ -676,7 +654,6 @@ export class RatgdoAccessory {
     return this.configureAvailabilitySensor({
 
       cacheKey: RatgdoService.MOTION_SENSOR,
-      errorMessage: "Unable to add the motion sensor.",
       hint: this.hints.motionSensor,
       initialCharacteristic: this.hap.Characteristic.MotionDetected,
       initialState: this.status.motion,
@@ -696,13 +673,6 @@ export class RatgdoAccessory {
 
     const service = acquireService(this.accessory, this.hap.Service.Lightbulb, this.name + " Automation Door Position",
       RatgdoService.DIMMER_OPENER_AUTOMATION);
-
-    if(!service) {
-
-      this.log.error("Unable to add the automation door position dimmer.");
-
-      return false;
-    }
 
     this.services[RatgdoService.DIMMER_OPENER_AUTOMATION] = service;
 
@@ -761,13 +731,6 @@ export class RatgdoAccessory {
 
     const service = acquireService(this.accessory, this.hap.Service.Switch, this.name + " Automation Opener", RatgdoService.SWITCH_OPENER_AUTOMATION);
 
-    if(!service) {
-
-      this.log.error("Unable to add the automation door opener switch.");
-
-      return false;
-    }
-
     this.services[RatgdoService.SWITCH_OPENER_AUTOMATION] = service;
 
     // The switch is on whenever the opener is in any state other than closed, which covers open and stopped.
@@ -802,13 +765,6 @@ export class RatgdoAccessory {
 
     const service = acquireService(this.accessory, this.hap.Service.Battery, this.name);
 
-    if(!service) {
-
-      this.log.error("Unable to add the Ratgdo (ESP32) backup battery status.");
-
-      return false;
-    }
-
     this.services[RatgdoService.BATTERY] = service;
 
     service.getCharacteristic(this.hap.Characteristic.ChargingState).onGet(() => this.status.discoBatteryState);
@@ -828,13 +784,6 @@ export class RatgdoAccessory {
     }
 
     const service = acquireService(this.accessory, this.hap.Service.Switch, this.name + " Laser", RatgdoService.SWITCH_DISCO_LASER);
-
-    if(!service) {
-
-      this.log.error("Unable to add the Ratgdo (ESP32) Disco laser switch.");
-
-      return false;
-    }
 
     this.services[RatgdoService.SWITCH_DISCO_LASER] = service;
 
@@ -857,13 +806,6 @@ export class RatgdoAccessory {
 
     const service = acquireService(this.accessory, this.hap.Service.Switch, this.name + " LED", RatgdoService.SWITCH_DISCO_LED);
 
-    if(!service) {
-
-      this.log.error("Unable to add the Ratgdo (ESP32) Disco LED switch.");
-
-      return false;
-    }
-
     this.services[RatgdoService.SWITCH_DISCO_LED] = service;
 
     service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.status.discoLed);
@@ -881,7 +823,6 @@ export class RatgdoAccessory {
     return this.configureAvailabilitySensor({
 
       cacheKey: RatgdoService.CONTACT_DISCO_VEHICLE_ARRIVING,
-      errorMessage: "Unable to add the vehicle arriving contact sensor.",
       hint: this.hints.discoVehicleArriving,
       initialCharacteristic: this.hap.Characteristic.ContactSensorState,
       initialState: this.status.discoVehicleArriving,
@@ -899,7 +840,6 @@ export class RatgdoAccessory {
     return this.configureAvailabilitySensor({
 
       cacheKey: RatgdoService.CONTACT_DISCO_VEHICLE_LEAVING,
-      errorMessage: "Unable to add the vehicle leaving contact sensor.",
       hint: this.hints.discoVehicleLeaving,
       initialCharacteristic: this.hap.Characteristic.ContactSensorState,
       initialState: this.status.discoVehicleLeaving,
@@ -917,7 +857,6 @@ export class RatgdoAccessory {
     return this.configureAvailabilitySensor({
 
       cacheKey: RatgdoService.OCCUPANCY_DISCO_VEHICLE_PRESENCE,
-      errorMessage: "Unable to add the vehicle presence occupancy sensor.",
       hint: this.hints.discoVehiclePresence,
       initialCharacteristic: this.hap.Characteristic.OccupancyDetected,
       initialState: this.status.discoVehiclePresence,
@@ -938,13 +877,6 @@ export class RatgdoAccessory {
     }
 
     const service = acquireService(this.accessory, this.hap.Service.Switch, this.name + " Pre Close Warning", RatgdoService.SWITCH_KONNECTED_PCW);
-
-    if(!service) {
-
-      this.log.error("Unable to add the Konnected pre-close warning switch.");
-
-      return false;
-    }
 
     this.services[RatgdoService.SWITCH_KONNECTED_PCW] = service;
 
@@ -982,13 +914,6 @@ export class RatgdoAccessory {
 
     const service = acquireService(this.accessory, this.hap.Service.Switch, this.name + " Strobe", RatgdoService.SWITCH_KONNECTED_STROBE);
 
-    if(!service) {
-
-      this.log.error("Unable to add the Konnected strobe switch.");
-
-      return false;
-    }
-
     this.services[RatgdoService.SWITCH_KONNECTED_STROBE] = service;
 
     service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.status.konnectedStrobe);
@@ -1009,13 +934,6 @@ export class RatgdoAccessory {
     }
 
     const service = acquireService(this.accessory, this.hap.Service.Switch, this.name + " Lockout", RatgdoService.SWITCH_LOCKOUT);
-
-    if(!service) {
-
-      this.log.error("Unable to add the automation wireless remote lockout switch.");
-
-      return false;
-    }
 
     this.services[RatgdoService.SWITCH_LOCKOUT] = service;
 
@@ -1044,7 +962,6 @@ export class RatgdoAccessory {
     return this.configureAvailabilitySensor({
 
       cacheKey: RatgdoService.OCCUPANCY_SENSOR_DOOR_OPEN,
-      errorMessage: "Unable to add the door open occupancy sensor.",
       hint: this.hints.doorOpenOccupancySensor,
       initialCharacteristic: this.hap.Characteristic.OccupancyDetected,
       initialState: this.status.doorOpenOccupancy,
@@ -1062,7 +979,6 @@ export class RatgdoAccessory {
     return this.configureAvailabilitySensor({
 
       cacheKey: RatgdoService.OCCUPANCY_SENSOR_MOTION,
-      errorMessage: "Unable to add the occupancy sensor.",
       hint: this.hints.motionOccupancySensor,
       initialCharacteristic: this.hap.Characteristic.OccupancyDetected,
       initialState: this.status.motionOccupancy,

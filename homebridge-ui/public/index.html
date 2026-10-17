@@ -98,7 +98,7 @@
     <p data-boot-bucket="browser" style="display: none;">Your browser doesn't support features this interface requires. Please use a current version of Safari or Chrome.</p>
     <p data-boot-bucket="delivery" style="display: none;">The interface files couldn't be retrieved from the Homebridge server. Reload the page to try again. If this keeps happening, log out of the Homebridge interface and log back in.</p>
     <p data-boot-bucket="generic" style="display: none;">An unexpected error occurred while starting the interface.</p>
-    <p data-boot-bucket="reload" style="display: none;">The settings interface was updated while this page was open, so this page is pinned to a version that is no longer installed. Reload the page to load the current version.</p>
+    <p data-boot-bucket="reload" style="display: none;">The settings interface was updated while this page was open, so this page is still on a version that is no longer installed. Reload the page to load the current version.</p>
   </div>
   <details open>
     <summary>Technical details</summary>
@@ -131,8 +131,8 @@
     let settled = false;
     let watchdog;
 
-    // The bundle stamp the first successful boot in this window pinned its importmap to. Undefined until a boot reports one; see checkStamp below.
-    let pinnedStamp;
+    // The bundle stamp the first successful boot in this window locked its importmap to. Undefined until a boot reports one; see checkStamp below.
+    let lockedStamp;
 
     // Set an element's display by id, tolerating an absent node so a stamped region missing a panel element never throws from the monitor.
     const setDisplay = (id, value) => {
@@ -183,8 +183,8 @@
       }
     };
 
-    // Stop watching: clear the watchdog and remove both window listeners. Called from the first failure and from ready(), so nothing is left open once the boot has
-    // resolved one way or the other.
+    // Stop watching: clear the watchdog and remove both window listeners. Called from every terminal path, so nothing is left open once the boot has resolved one
+    // way or the other.
     const stop = () => {
 
       clearTimeout(watchdog);
@@ -228,28 +228,28 @@
       setDisplay("pageBootError", "none");
     };
 
-    /* Compare this boot's bundle stamp against the one an earlier boot in this window pinned its importmap to, and answer whether the boot may proceed.
+    /* Compare this boot's bundle stamp against the one an earlier boot in this window locked its importmap to, and answer whether the boot may proceed.
      *
      * The settings frame outlives a single boot: a panel re-open runs the loader again in the same window, while the importmap the FIRST run injected is the one
      * still in force - a browser applies the first map and every bare specifier resolves through it for the document's life. That is harmless until the bundle is
-     * regenerated underneath the page, at which point the pinned subdir no longer exists on disk: the re-run would fetch the new manifest, inject a map nothing
+     * regenerated underneath the page, at which point the locked subdir no longer exists on disk: the re-run would fetch the new manifest, inject a map nothing
      * consults, and import an entry whose every bare-specifier request 404s, leaving the user on the previous bundle's already-loaded code with no sign anything
      * was wrong. Stopping here is the only honest outcome, because no amount of retrying inside this document can reach the current bundle.
      *
-     * The first call pins and proceeds; a later call matching the pin proceeds too, which is the ordinary re-open. A later call that differs is terminal, and it
+     * The first call locks the stamp in and proceeds; a later match proceeds too, which is the ordinary re-open. A later call that differs is terminal, and it
      * deliberately overrides settled: the earlier boot's ready() is exactly what settles a window that then goes stale, so honoring it would suppress the one
      * message the user needs.
      */
     const checkStamp = (stamp) => {
 
-      if(pinnedStamp === undefined) {
+      if(lockedStamp === undefined) {
 
-        pinnedStamp = stamp;
+        lockedStamp = stamp;
 
         return true;
       }
 
-      if(pinnedStamp === stamp) {
+      if(lockedStamp === stamp) {
 
         return true;
       }
@@ -259,7 +259,7 @@
       stop();
 
       showBucket("reload");
-      writeDetails([ "Loaded: " + pinnedStamp, "Available: " + stamp ]);
+      writeDetails([ "Loaded: " + lockedStamp, "Available: " + stamp ]);
 
       setDisplay("bootSlowNotice", "none");
       setDisplay("pageBootError", "block");

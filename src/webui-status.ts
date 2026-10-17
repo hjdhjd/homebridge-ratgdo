@@ -229,9 +229,7 @@ function mapRowValue(rowId: StatusRowId, event: EspHomeEvent): string {
     default: {
 
       // Compile-time exhaustiveness: a new StatusRowId fails to type-check here until it is handled.
-      const _exhaust: never = rowId;
-
-      void _exhaust;
+      rowId satisfies never;
 
       return "";
     }
@@ -647,9 +645,7 @@ export class StatusFeed {
           default: {
 
             // Compile-time exhaustiveness: a new ConnectionFailureReason fails to type-check here until it is handled.
-            const _exhaust: never = outcome.reason;
-
-            void _exhaust;
+            outcome.reason satisfies never;
 
             return;
           }
@@ -720,9 +716,7 @@ export class StatusFeed {
             default: {
 
               // Compile-time exhaustiveness: a new LifecycleEvent kind fails to type-check here until it is handled.
-              const _exhaust: never = lifecycle;
-
-              void _exhaust;
+              lifecycle satisfies never;
 
               return;
             }

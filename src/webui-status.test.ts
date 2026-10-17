@@ -333,7 +333,8 @@ describe("StatusFeed pool connect", () => {
 
     const motionRow = snapshot.rows.find((row) => row.id === "motion");
 
-    assert.deepEqual(motionRow?.latch, { seconds: RATGDO_MOTION_DURATION, value: "Detected" },
+    assert.ok(motionRow && (motionRow.kind !== "choices"), "the motion row is present and is a text row - ratgdo composes text rows only");
+    assert.deepEqual(motionRow.latch, { seconds: RATGDO_MOTION_DURATION, value: "Detected" },
       "the motion row carries the momentary-value latch keyed to the motion-latch duration from the single source of truth");
     assert.deepEqual(snapshot.rows, [
 
@@ -1017,7 +1018,12 @@ describe("StatusFeed snapshot sizers", () => {
 
     assert.ok(snapshot?.kind === "snapshot", "the connect completes through a snapshot push");
 
-    const sizers = Object.fromEntries(snapshot.rows.map((row) => [ row.id, row.sizer ]));
+    const sizers = Object.fromEntries(snapshot.rows.map((row) => {
+
+      assert.ok(row.kind !== "choices", "every snapshot row is a text row - ratgdo composes text rows only");
+
+      return [ row.id, row.sizer ];
+    }));
 
     assert.deepEqual(sizers, { door: "Stopped (100%)", light: "Off", lock: "Unlocked", motion: "Detected", obstruction: "Obstructed" },
       "every snapshot row carries its column's widest-possible value as the sizer, covering every row id");
@@ -1113,7 +1119,7 @@ describe("StatusFeed connection failures", () => {
     // The first connect defers. A re-warm with a changed key supersedes it - tearing its session down and aborting its signal - then the deferred connect fails. With the
     // session's signal aborted, openConnection classifies the outcome as a shutdown, which the pool stands down on silently rather than surfacing an error.
     const deferredFirst = deferred<FakeClient>();
-    const openClient = makeOpenClient((options, index) => (index === 0) ? deferredFirst.promise : Promise.resolve(new FakeClient({ cache: restingCache() })));
+    const openClient = makeOpenClient((_options, index) => (index === 0) ? deferredFirst.promise : Promise.resolve(new FakeClient({ cache: restingCache() })));
     const { browse, feed, pushes } = makeFeed({ openClient });
 
     browse.queue(makeService());
@@ -1513,7 +1519,7 @@ describe("StatusFeed supersede", () => {
     const first = new FakeClient({ cache: restingCache() });
     const second = new FakeClient({ cache: restingCache() });
     const deferredFirst = deferred<FakeClient>();
-    const openClient = makeOpenClient((options, index) => (index === 0) ? deferredFirst.promise : Promise.resolve(second));
+    const openClient = makeOpenClient((_options, index) => (index === 0) ? deferredFirst.promise : Promise.resolve(second));
     const { browse, feed, pushes } = makeFeed({ openClient });
 
     browse.queue(makeService());

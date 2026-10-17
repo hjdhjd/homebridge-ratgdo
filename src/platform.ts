@@ -5,14 +5,13 @@
 import type { API, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
 import type { EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
 import { FeatureOptions, createMqttClient, prefixedLog, sanitizeName } from "homebridge-plugin-utils";
+import type { MqttClient, Nullable } from "homebridge-plugin-utils";
 import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_AUTODISCOVERY_INTERVAL, RATGDO_AUTODISCOVERY_TYPES, RATGDO_AUTODISCOVERY_WARMUP_OFFSETS } from "./settings.ts";
 import { consolidatedFlag, consolidatedValue, featureOptionCategories, featureOptions, normalizeConfig } from "./options.ts";
 import { isEncryptionError, openConnection } from "./connection.ts";
 import { setInterval as setIntervalAsync, setTimeout as setTimeoutAsync } from "node:timers/promises";
 import { Bonjour } from "bonjour-service";
 import { LogLevel } from "esphome-client";
-import type { MqttClient } from "homebridge-plugin-utils";
-import type { Nullable } from "homebridge-plugin-utils";
 import { RatgdoAccessory } from "./device.ts";
 import type { RatgdoDevice } from "./types.ts";
 import type { RatgdoResolvedConfig } from "./options.ts";
@@ -434,10 +433,8 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
         default: {
 
-          // Compile-time exhaustiveness: if a new LifecycleEvent kind is added upstream, this assignment fails to type-check and forces us to handle it explicitly.
-          const _exhaust: never = event;
-
-          void _exhaust;
+          // Compile-time exhaustiveness: if a new LifecycleEvent kind is added upstream, this statement fails to type-check and forces us to handle it explicitly.
+          event satisfies never;
 
           return;
         }
