@@ -9,6 +9,8 @@ import { consolidatedFlag, describeCategoryScope, describeOptionScope, featureOp
 import { describe, test } from "node:test";
 import { FeatureOptions } from "homebridge-plugin-utils";
 import type { PlatformConfig } from "homebridge";
+import type { RatgdoOptionMeta } from "./options.ts";
+import { RatgdoVariant } from "./types.ts";
 import assert from "node:assert/strict";
 
 /* normalizeConfig accepts a Homebridge PlatformConfig (an open index-signature shape sourced from user JSON). We build plain objects and cast them at the call seam to
@@ -23,7 +25,7 @@ const SCOPE_VOCABULARY: string[] = [ "device", "global" ];
 /* Locate one catalog entry by its category and option name. A miss throws rather than answering undefined, so a pin naming an entry the catalog does not carry fails
  * as a missing entry instead of quietly asserting against nothing.
  */
-function entryFor(category: string, name: string): FeatureOptionEntry {
+function entryFor(category: string, name: string): FeatureOptionEntry<RatgdoOptionMeta> {
 
   const entry = featureOptions[category]?.find((candidate) => candidate.name === name);
 
@@ -36,7 +38,7 @@ function entryFor(category: string, name: string): FeatureOptionEntry {
 }
 
 // Locate one catalog category by name, throwing on a miss for the same reason entryFor does.
-function categoryFor(name: string): FeatureCategoryEntry {
+function categoryFor(name: string): FeatureCategoryEntry<RatgdoOptionMeta> {
 
   const category = featureOptionCategories.find((candidate) => candidate.name === name);
 
@@ -311,6 +313,86 @@ describe("the feature-option catalog", () => {
       for(const category of featureOptionCategories) {
 
         assert.equal(describeCategoryScope(category), undefined, category.name + " carries no category-level scope sentence of its own");
+      }
+    });
+  });
+
+  describe("the group declarations", () => {
+
+    /* A grouped option names its parent by the parent's own name within the same category, and the library composes the two into the parent it looks up. A name that
+     * matches no sibling is accepted in silence and the child then renders nowhere, so this walk is what turns a mistyped parent into a failing test rather than an
+     * option a user can never reach.
+     */
+    test("every grouped option names a sibling that exists in its own category", () => {
+
+      for(const [ category, entries ] of Object.entries(featureOptions)) {
+
+        for(const entry of entries) {
+
+          if(entry.group === undefined) {
+
+            continue;
+          }
+
+          const parent = entries.find((candidate) => candidate.name === entry.group);
+
+          assert.ok(parent, category + "." + entry.name + " groups under \"" + entry.group + "\", which is a sibling entry in the " + category + " category");
+        }
+      }
+    });
+  });
+
+  describe("the variant declarations", () => {
+
+    /* Every variant the catalog declares, gathered from both halves and keyed by the entry carrying it - a category by its bare name, an option by its
+     * category-qualified one. Reading the whole catalog rather than probing the declaring entries by name is what makes the assertion below a census: a declaration
+     * added to or dropped from any entry moves this map, so what the settings page hides from a device cannot change without a line changing here.
+     */
+    const declaredVariants = (): Record<string, RatgdoVariant> => {
+
+      const declared: Record<string, RatgdoVariant> = {};
+
+      for(const category of featureOptionCategories) {
+
+        if(category.meta) {
+
+          declared[category.name] = category.meta.variant;
+        }
+      }
+
+      for(const [ category, entries ] of Object.entries(featureOptions)) {
+
+        for(const entry of entries) {
+
+          if(entry.meta) {
+
+            declared[category + (entry.name.length ? ("." + entry.name) : "")] = entry.meta.variant;
+          }
+        }
+      }
+
+      return declared;
+    };
+
+    test("exactly the hardware-specific entries name a variant, each naming the one whose firmware serves it", () => {
+
+      assert.deepEqual(declaredVariants(), {
+
+        "Disco": RatgdoVariant.RATGDO,
+        "Konnected": RatgdoVariant.KONNECTED,
+        "Log.VehiclePresence": RatgdoVariant.RATGDO,
+        "Motion": RatgdoVariant.RATGDO
+      }, "the Disco and Motion categories and the vehicle-presence log belong to Ratgdo hardware, the Konnected category to Konnected hardware, and nothing else " +
+        "narrows to a variant");
+    });
+
+    test("every declared variant is one the plugin knows", () => {
+
+      const vocabulary: string[] = Object.values(RatgdoVariant);
+
+      for(const [ entry, variant ] of Object.entries(declaredVariants())) {
+
+        assert.ok(vocabulary.includes(variant), entry + " names a variant RatgdoVariant declares, which is the vocabulary the settings page tests a device against");
       }
     });
   });

@@ -278,6 +278,29 @@ const deviceList = async () => {
   return result;
 };
 
+/* Whether one catalog entry - a category or an option - applies to the device whose page is being rendered. An entry applies when there is no device at all, which is
+ * the global page and offers everything; when the entry names no variant, which is a concern every opener has; or when the device's own variant is the one named. The
+ * device's variant is read from its sidebar group word, the family word its Model opens with and the same word SIDEBAR_GROUP_ORDER above ranks the sections by: that
+ * word is the variant's label, and the variant key is the label lowercased, a pairing src/types.ts establishes by declaring the label beside the variant it belongs to.
+ * A device whose Model the page could not read carries no group word and is offered everything, because a row that does not apply costs a reader far less than a page
+ * that hides the row they came to set.
+ */
+const entryAppliesToDevice = (device, entry) => {
+
+  if(!device || (device.sidebarGroup === undefined) || (entry.meta?.variant === undefined)) {
+
+    return true;
+  }
+
+  return device.sidebarGroup.toLowerCase() === entry.meta.variant;
+};
+
+// Whether a device's page offers one feature option, which is the entry-level reading of the variant rule above.
+const validOption = (device, option) => entryAppliesToDevice(device, option);
+
+// Whether a device's page offers one feature option category, the same rule applied to the section the framework is about to render.
+const validOptionCategory = (device, category) => entryAppliesToDevice(device, category);
+
 /* The feature-options parameters. onLoaded is the page's first warm: the framework announces it once per show cycle that reaches a loaded model, with the status panel's
  * handle already minted and the configuration session established, which is exactly the state the recompute's own establishment gate waits for. The statusPanel
  * configuration supplies exactly the parts ratgdo owns and inherits the shared homebridge-plugin-utils panel around them:
@@ -326,7 +349,8 @@ const featureOptionsParams = {
       { id: "light", label: "Light", sizer: "Off" },
       { id: "obstruction", label: "Obstruction", sizer: "Obstructed" }
     ]
-  }
+  },
+  ui: { validOption, validOptionCategory }
 };
 
 const ui = new webUi({ featureOptions: featureOptionsParams, name: "Ratgdo" });

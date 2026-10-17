@@ -8,10 +8,12 @@
  * so the feature-option engine that resolves each device's key and the configuration session that stages the migration are the library's own. What the fakes observe
  * is therefore the page's behavior rather than a restatement of it - the host's request log, the double's handler store and counters, and the fake document's state.
  */
-import type { FakeCatalog, FakeConfigEntry } from "./webui-double.helpers.ts";
+import type { FakeCatalog, FakeConfigEntry, FakeDevice } from "./webui-double.helpers.ts";
 import { STATUS_ADDRESSES_ROUTE, STATUS_WARM_ROUTE, defaultConfig, defaultDevices, realCatalog } from "./webui-double.helpers.ts";
 import { describe, test } from "node:test";
+import { featureOptionCategories, featureOptions } from "./options.ts";
 import type { LoadedUi } from "./webui.helpers.ts";
+import { RATGDO_VARIANT_LABELS } from "./types.ts";
 import assert from "node:assert/strict";
 import { loadUi } from "./webui.helpers.ts";
 import { settle } from "homebridge-plugin-utils/testing";
@@ -430,6 +432,90 @@ describe("the ratgdo settings page", () => {
 
       assert.deepEqual(warmSends(page)[0], { devices: [ { mac: MAC, psk: KEY }, { mac: MAC_TWO } ] },
         "tagging a row for the sidebar adds nothing to the warm body the server receives");
+    });
+  });
+
+  describe("the variant visibility hooks", () => {
+
+    // One sidebar device of each variant as the page's own device source tags them, plus the row whose Model the page could not read and therefore left untagged.
+    const ratgdoDevice: FakeDevice = { model: "Ratgdo Disco", name: "Garage", serialNumber: MAC, sidebarGroup: "Ratgdo" };
+    const konnectedDevice: FakeDevice = { model: "Konnected GDOv2-Q", name: "Side Door", serialNumber: MAC_TWO, sidebarGroup: "Konnected" };
+    const untaggedDevice: FakeDevice = { model: 42, name: "Nameless", serialNumber: "AABBCCDDEE02" };
+
+    /* The categories a device's page offers, and the options one of its sections offers, read off the REAL served catalog through the very hooks the page handed the
+     * framework. Driving the whole catalog rather than a fixture of its own is what ties these assertions to what a user actually sees: a category or option whose
+     * declaration moves shows up here without a line changing.
+     */
+    const visibleCategories = (page: LoadedUi, device: FakeDevice | undefined): string[] => {
+
+      return featureOptionCategories.filter((category) => page.double.params.ui?.validOptionCategory?.(device, category)).map((category) => category.name);
+    };
+
+    const visibleOptions = (page: LoadedUi, device: FakeDevice | undefined, category: string): string[] => {
+
+      return (featureOptions[category] ?? []).filter((option) => page.double.params.ui?.validOption?.(device, option)).map((option) => option.name);
+    };
+
+    test("hands the framework both hooks", async () => {
+
+      using page = await loadUi();
+
+      assert.ok(page.double.params.ui?.validOption, "the page declares the option visibility hook");
+      assert.ok(page.double.params.ui?.validOptionCategory, "the page declares the category visibility hook");
+    });
+
+    test("offers a Ratgdo device its own hardware sections and withholds the other variant's", async () => {
+
+      using page = await loadUi();
+
+      assert.deepEqual(visibleCategories(page, ratgdoDevice), [ "Device", "Log", "Opener", "Light", "Motion", "Mqtt", "Disco" ],
+        "a Ratgdo device is offered every shared section plus Motion and Disco, and is not offered the Konnected section");
+    });
+
+    test("offers a Konnected device its own hardware section and withholds the Ratgdo-only ones", async () => {
+
+      using page = await loadUi();
+
+      assert.deepEqual(visibleCategories(page, konnectedDevice), [ "Device", "Log", "Opener", "Light", "Mqtt", "Konnected" ],
+        "a Konnected device is offered every shared section plus Konnected, and is offered neither Motion nor Disco");
+    });
+
+    test("offers the global page every section, since it configures no one device", async () => {
+
+      using page = await loadUi();
+
+      assert.deepEqual(visibleCategories(page, undefined), [ "Device", "Log", "Opener", "Light", "Motion", "Mqtt", "Disco", "Konnected" ],
+        "with no device in scope every section is offered, which is what the global page means");
+    });
+
+    test("offers a device it could not classify every section rather than none", async () => {
+
+      using page = await loadUi();
+
+      assert.deepEqual(visibleCategories(page, untaggedDevice), [ "Device", "Log", "Opener", "Light", "Motion", "Mqtt", "Disco", "Konnected" ],
+        "a device carrying no group word is offered everything, so an unreadable Model costs a user rows they can ignore rather than rows they cannot reach");
+    });
+
+    test("withholds the vehicle-presence log from a Konnected device and keeps every other logging row", async () => {
+
+      using page = await loadUi();
+
+      assert.deepEqual(visibleOptions(page, konnectedDevice, "Log"), [ "Debug", "Opener", "Light", "Motion", "Obstruction" ],
+        "the vehicle-presence log names the Ratgdo variant and drops off a Konnected device's page, while the motion log - the door-open indicator Konnected drives " +
+        "too - stays");
+      assert.deepEqual(visibleOptions(page, ratgdoDevice, "Log"), [ "Debug", "Opener", "Light", "Motion", "Obstruction", "VehiclePresence" ],
+        "a Ratgdo device is offered the whole logging section, the vehicle-presence row included");
+      assert.deepEqual(visibleOptions(page, undefined, "Log"), [ "Debug", "Opener", "Light", "Motion", "Obstruction", "VehiclePresence" ],
+        "the global page is offered the whole logging section");
+    });
+
+    test("bridges a device's group word to a variant key by lowercasing it, which is the pairing the plugin declares", () => {
+
+      for(const [ variant, label ] of Object.entries(RATGDO_VARIANT_LABELS)) {
+
+        assert.equal(label.toLowerCase(), variant,
+          "the " + label + " family word lowercases to the variant key the catalog declares, which is the fold the page's visibility rule rests on");
+      }
     });
   });
 

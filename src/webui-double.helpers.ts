@@ -10,8 +10,8 @@
  * The fixtures sit beside the double because both describe one imagined install - a host holding a configuration and an option catalog, a sidebar holding devices -
  * and a test that varies one of them wants the rest to follow from the same description.
  */
+import type { FeatureCategoryEntry, FeatureOptionEntry, Nullable } from "homebridge-plugin-utils";
 import { featureOptionCategories, featureOptions } from "./options.ts";
-import type { Nullable } from "homebridge-plugin-utils";
 
 /* The shared route module, read the way every browser module is read from TypeScript here: through a specifier held in a variable, so the import resolves at runtime
  * against a module that publishes no declarations. The fake host answers the addresses route by this identity rather than by a literal of its own, which is what keeps
@@ -96,6 +96,15 @@ export interface FeatureOptionsParams {
   onOptionsEdited?: () => void;
   sidebar?: { deviceLabel?: string; groupOrder?: (a: string, b: string) => number };
   statusPanel?: StatusPanelParams;
+
+  /* The framework's two visibility hooks as the page hands them over: one asked whether a device's page should render a given option, the other whether it should
+   * render a given category. Both receive no device at the global scope, which is the case that offers everything.
+   */
+  ui?: {
+
+    validOption?: (device: FakeDevice | undefined, option: FeatureOptionEntry) => boolean;
+    validOptionCategory?: (device: FakeDevice | undefined, category: FeatureCategoryEntry) => boolean;
+  };
 }
 
 // The feature-options facade the page reaches through `ui.featureOptions`.
