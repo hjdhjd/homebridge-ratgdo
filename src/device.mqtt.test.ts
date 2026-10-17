@@ -7,11 +7,14 @@
  * single set topic (garagedoor). The recording MqttClient double retains every registered handler by topic, so these tests invoke a get handler and assert its returned
  * string, invoke a set handler and assert the resulting setDoorState -> client command dispatch (or the error log on an unrecognized verb), and confirm that every gated
  * subscription is present exactly when its feature option is enabled and absent otherwise. The per-device topic prefix ("<mac>/<suffix>") is asserted across the whole
- * registered surface in one sweep.
+ * registered surface in one sweep. The opener's availability statement and what its connect registration restates when a broker session begins are netted here too,
+ * driven through the double's connection lever.
  */
 import { MQTT_GET_SUFFIX, MQTT_SET_SUFFIX } from "homebridge-plugin-utils";
+import { RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION } from "./settings.ts";
+import type { TestMqttClient, TestMqttPublish } from "homebridge-plugin-utils/testing";
 import { buildRatgdoAccessory, makeBinarySensorEvent, makeCoverEvent, makeKonnectedInitialState, makeLightEvent, makeLockEvent,
-  makeRatgdoInitialState } from "./testing.helpers.ts";
+  makeRatgdoInitialState, makeSwitchEvent } from "./testing.helpers.ts";
 import { describe, test } from "node:test";
 import { LockState } from "esphome-client";
 import { RatgdoVariant } from "./types.ts";
@@ -21,6 +24,24 @@ import { loggedAt } from "homebridge-plugin-utils/testing";
 // The default device MAC the harness stamps onto every accessory. configureMqtt prefixes every topic with "<mac>/", so this is the prefix every recorded subscription
 // must carry.
 const DEVICE_MAC = "AABBCCDDEEFF";
+
+/* Drive the MQTT double through one broker session and answer every publish the session recorded, in order. The lever's false-to-true edge is a session restored:
+ * the double records the plugin-level statement on the bare availability tail and then runs every connect registration the accessory holds.
+ */
+const restoreSession = (mqtt: TestMqttClient): TestMqttPublish[] => {
+
+  const before = mqtt.published.length;
+
+  mqtt.connected = false;
+  mqtt.connected = true;
+
+  return mqtt.published.slice(before);
+};
+
+// The state topics a session restated, read past the plugin-level and opener availability statements that open it and reduced to [tail, payload, retain] triples,
+// sorted by tail because the order the accessory restates in is not part of the contract.
+const restatedIn = (session: readonly TestMqttPublish[]): (boolean | string)[][] => session.slice(2)
+  .map((entry) => [ entry.topic.slice((DEVICE_MAC + "/").length), entry.payload.toString(), entry.retain ]).sort();
 
 describe("RatgdoAccessory MQTT configuration", () => {
 
@@ -318,6 +339,155 @@ describe("RatgdoAccessory MQTT configuration", () => {
       assert.equal(await mqtt.invokeGet("motion" + MQTT_GET_SUFFIX), "false", "a Ratgdo device registers the motion subscription, which reports the resting state");
       assert.equal(await mqtt.invokeGet("/occupancy" + MQTT_GET_SUFFIX), "false",
         "a Ratgdo device registers the motion occupancy subscription, which reports the cleared state");
+    });
+  });
+
+  describe("the availability topic", () => {
+
+    /* The first event is the online the platform dispatches for a new connection, which lands on a status construction already started at online. It must still
+     * produce a statement, since it is the one that connection makes, so this sequence fails for a publish gated on a change as well as for a missing one.
+     */
+    test("states each availability event once, retained, on the opener's availability topic", () => {
+
+      const { mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true });
+
+      assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
+
+      ratgdo.updateState({ id: "availability", state: "online" });
+
+      assert.deepEqual(mqtt.publishedTo(DEVICE_MAC + "/availability"), [{ payload: "online", retain: true, topic: DEVICE_MAC + "/availability" }],
+        "an online availability event records exactly one retained online statement, even on a status that already read online");
+
+      ratgdo.updateState({ id: "availability", state: "offline" });
+
+      assert.deepEqual(mqtt.publishedTo(DEVICE_MAC + "/availability"), [ { payload: "online", retain: true, topic: DEVICE_MAC + "/availability" },
+        { payload: "offline", retain: true, topic: DEVICE_MAC + "/availability" } ],
+      "an offline availability event records exactly one more statement, retained and reading offline");
+    });
+
+    test("states the opener's availability behind the plugin's own statement when a broker session begins", () => {
+
+      const { mqtt } = buildRatgdoAccessory({ mqtt: true });
+
+      assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
+
+      // The lever's false-to-true edge is a session restored: the double records the plugin-level statement on the bare tail and then runs every connect registration.
+      mqtt.connected = false;
+      mqtt.connected = true;
+
+      assert.deepEqual(mqtt.published.slice(0, 2), [ { payload: "online", retain: true, topic: "availability" },
+        { payload: "online", retain: true, topic: DEVICE_MAC + "/availability" } ],
+      "the plugin-level statement is recorded first, and the opener's own retained statement follows it");
+    });
+  });
+
+  /* The restatement covers exactly the state topics each opener's transition paths can publish, gated as those paths are, and each payload is read from the status
+   * the test drove, so a payload answered from the wrong field fails here. Every state below differs from the resting snapshot, and paired topics are driven apart
+   * (laser on, LED off; occupancy raised while motion has cleared), so no two topics can swap payloads unseen.
+   */
+  describe("the session restatement", () => {
+
+    test("restates a default Ratgdo opener's state topics with their current payloads, behind both availability statements", () => {
+
+      const { mqtt } = buildRatgdoAccessory({ initialState: makeRatgdoInitialState([ makeCoverEvent("door", 1), makeLightEvent("light", true),
+        makeBinarySensorEvent("obstruction", true), makeLockEvent("lock_remotes", LockState.LOCKED), makeSwitchEvent("laser", true),
+        makeBinarySensorEvent("vehicle_detected", true) ]), mqtt: true });
+
+      assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
+
+      const session = restoreSession(mqtt);
+
+      assert.deepEqual(session.slice(0, 2), [ { payload: "online", retain: true, topic: "availability" },
+        { payload: "online", retain: true, topic: DEVICE_MAC + "/availability" } ],
+      "the session opens with the plugin-level statement and the opener's own availability, ahead of every state topic");
+      assert.deepEqual(restatedIn(session), [ [ "garagedoor", "open", false ], [ "laser", "true", false ], [ "led", "false", false ], [ "light", "true", false ],
+        [ "lock", "1", false ], [ "obstruction", "true", false ], [ "vehiclepresence", "true", false ] ],
+      "a default Ratgdo opener restates the door, light, and obstruction, the lock its default option enables, and its Disco laser, LED, and vehicle presence");
+    });
+
+    test("restates a default Konnected opener's state topics with their current payloads", () => {
+
+      const { mqtt } = buildRatgdoAccessory({ device: { variant: RatgdoVariant.KONNECTED }, initialState: makeKonnectedInitialState([
+        makeLightEvent("garage_light", true), makeLockEvent("lock", LockState.LOCKED), makeSwitchEvent("str_output", true) ]), mqtt: true });
+
+      assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
+
+      assert.deepEqual(restatedIn(restoreSession(mqtt)), [ [ "garagedoor", "closed", false ], [ "light", "true", false ], [ "lock", "1", false ],
+        [ "obstruction", "false", false ], [ "strobe", "true", false ] ],
+      "a default Konnected opener restates the door, light, obstruction, and lock, and its strobe in place of the Disco topics");
+    });
+
+    test("leaves the lock out when the lock option is disabled", () => {
+
+      const { mqtt } = buildRatgdoAccessory({ mqtt: true, userOptions: ["Disable.Opener.Lock"] });
+
+      assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
+
+      assert.deepEqual(restatedIn(restoreSession(mqtt)), [ [ "garagedoor", "closed", false ], [ "laser", "false", false ], [ "led", "false", false ],
+        [ "light", "false", false ], [ "obstruction", "false", false ], [ "vehiclepresence", "false", false ] ],
+      "an opener whose lock option is disabled never publishes the lock, so no session restates it");
+    });
+
+    test("adds the door-open occupancy topic when its option is enabled, reading the raised indicator", () => {
+
+      const { clock, mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true, userOptions: ["Enable.Opener.OccupancySensor"] });
+
+      assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
+
+      // Open the door and hold it open for the configured duration, which raises the door-open indicator.
+      // eslint-disable-next-line camelcase
+      ratgdo.updateState({ current_operation: "IDLE", id: "cover-door", position: 1, state: "OPEN" });
+      clock.advance(RATGDO_OCCUPANCY_DURATION * 1000);
+
+      assert.deepEqual(restatedIn(restoreSession(mqtt)), [ [ "dooropenoccupancy", "true", false ], [ "garagedoor", "open", false ], [ "laser", "false", false ],
+        [ "led", "false", false ], [ "light", "false", false ], [ "lock", "0", false ], [ "obstruction", "false", false ], [ "vehiclepresence", "false", false ] ],
+      "enabling the door-open occupancy sensor adds its topic, restated with the raised indicator");
+    });
+
+    test("adds the motion occupancy topic when its option is enabled, reading occupancy rather than motion", () => {
+
+      const { clock, mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true, userOptions: ["Enable.Motion.OccupancySensor"] });
+
+      assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
+
+      // A motion event raises both motion and occupancy. Motion clears after its own short window while occupancy holds for far longer, so they read apart here.
+      ratgdo.updateState({ id: "binary_sensor-motion", state: "ON" });
+      clock.advance(RATGDO_MOTION_DURATION * 1000);
+
+      assert.deepEqual(restatedIn(restoreSession(mqtt)), [ [ "garagedoor", "closed", false ], [ "laser", "false", false ], [ "led", "false", false ],
+        [ "light", "false", false ], [ "lock", "0", false ], [ "obstruction", "false", false ], [ "occupancy", "true", false ], [ "vehiclepresence", "false", false ] ],
+      "enabling the motion occupancy sensor adds its topic, restated with occupancy still raised after motion has cleared");
+    });
+
+    test("never restates the momentary motion and vehicle arriving and leaving events, even mid-event", () => {
+
+      const { mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true, userOptions: [ "Enable.Disco.ContactSensor.Vehicle.Arriving",
+        "Enable.Disco.ContactSensor.Vehicle.Leaving" ] });
+
+      assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
+
+      ratgdo.updateState({ id: "binary_sensor-motion", state: "ON" });
+      ratgdo.updateState({ id: "binary_sensor-vehicle_arriving", state: "ON" });
+      ratgdo.updateState({ id: "binary_sensor-vehicle_leaving", state: "ON" });
+
+      const tails = restatedIn(restoreSession(mqtt)).map(([tail]) => tail);
+
+      for(const momentary of [ "motion", "vehiclearriving", "vehicleleaving" ]) {
+
+        assert.equal(tails.includes(momentary), false, "a momentary event is never restated, since a replayed event is the event happening a second time");
+      }
+    });
+
+    test("records nothing for a disposed accessory on the next session", () => {
+
+      const { mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true });
+
+      assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
+
+      ratgdo[Symbol.dispose]();
+
+      assert.deepEqual(restoreSession(mqtt), [{ payload: "online", retain: true, topic: "availability" }],
+        "disposing the accessory releases its connect registration, so the session records the plugin-level statement alone");
     });
   });
 

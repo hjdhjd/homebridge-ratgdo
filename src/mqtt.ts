@@ -2,7 +2,7 @@
  *
  * mqtt.ts: The single source of truth for the MQTT topics ratgdo publishes and subscribes to.
  */
-import { mqttTopicCatalog } from "homebridge-plugin-utils";
+import { mqttAvailabilityEntry, mqttTopicCatalog } from "homebridge-plugin-utils";
 
 /* The plugin's whole MQTT topic surface, declared once and read from here by everything that spells a topic. Each publish and subscribe site in the device class
  * takes its tail and its log label from this catalog, and the documentation build projects it into the two marked regions of docs/MQTT.md, so what the document
@@ -21,6 +21,7 @@ import { mqttTopicCatalog } from "homebridge-plugin-utils";
  */
 export const mqttTopics = mqttTopicCatalog({
 
+  availability: mqttAvailabilityEntry,
   doorOpenOccupancy: { get: "`true` will trigger a publish event of the current garage door opener door open indicator occupancy status.",
     label: "Door Open Indicator Occupancy",
     publish: "`true` when the garage door open indicator occupancy is detected. `false` when the garage door open indicator occupancy event is reset.",

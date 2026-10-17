@@ -3,14 +3,15 @@
  * device.ts: Ratgdo device accessory for HomeKit.
  */
 import type { API, Characteristic, CharacteristicValue, HAP, PlatformAccessory, Service, WithUUID } from "homebridge";
-import type { AcquireServiceTarget, HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
+import type { AcquireServiceTarget, HomebridgePluginLogging, MqttAvailabilityPayload, Nullable } from "homebridge-plugin-utils";
 import type { EntityId, TelemetryEvent } from "esphome-client";
 import type { EspHomeEvent, RatgdoDevice } from "./types.ts";
 import { LockCommand, LockState } from "esphome-client";
+import { MQTT_AVAILABILITY_OFFLINE, MQTT_AVAILABILITY_ONLINE, TimerRegistry, acquireService, debugGatedLog, mqttTopic, prefixedLog, validCharacteristic,
+  validService } from "homebridge-plugin-utils";
 import { RATGDO_ENTITIES, idFor } from "./entities.ts";
 import { RATGDO_KONNECTED_PCW_DURATION, RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION, RATGDO_UI_REVERT_DELAY } from "./settings.ts";
 import { RATGDO_VARIANT_LABELS, RatgdoService, RatgdoVariant } from "./types.ts";
-import { TimerRegistry, acquireService, debugGatedLog, mqttTopic, prefixedLog, validCharacteristic, validService } from "homebridge-plugin-utils";
 import type { RatgdoEntityRef } from "./entities.ts";
 import type { RatgdoPlatform } from "./platform.ts";
 import { mqttTopics } from "./mqtt.ts";
@@ -96,15 +97,17 @@ interface RatgdoStatus {
 // helper below can declare its initial-state characteristic parameter with the same precision the rest of the codebase applies to services.
 type CharacteristicTarget = WithUUID<new () => Characteristic>;
 
-/* Wiring for every timer-derived occupancy indicator. Each kind maps to its RatgdoStatus field, its HomeKit OccupancySensor subtype, its topic from the MQTT catalog,
- * and its log label, so the shared setOccupancy() writer stays generic across both paths. Adding a future occupancy kind is a single descriptor entry plus its trigger
- * wiring - the write (status, characteristic, log, MQTT) lives in one place and cannot drift. This mirrors the RATGDO_ENTITIES registry in entities.ts.
+// A catalog key naming one of the opener's state topics: every topic in the MQTT catalog except the availability statement, which the opener publishes on its own.
+type StateTopic = Exclude<keyof typeof mqttTopics, "availability">;
+
+/* Wiring for every timer-derived occupancy indicator. Each kind maps to its RatgdoStatus field, its HomeKit OccupancySensor subtype, the key of its topic in the MQTT
+ * catalog, and its log label, so the shared setOccupancy() writer stays generic across both paths. Adding a future occupancy kind is a single descriptor entry plus
+ * its trigger wiring - the write (status, characteristic, log, MQTT) lives in one place and cannot drift. This mirrors the RATGDO_ENTITIES registry in entities.ts.
  */
 const RATGDO_OCCUPANCY = {
 
-  doorOpen: { field: "doorOpenOccupancy", label: "Garage door open occupancy", service: RatgdoService.OCCUPANCY_SENSOR_DOOR_OPEN,
-    topic: mqttTopics.doorOpenOccupancy.topic },
-  motion: { field: "motionOccupancy", label: "Occupancy", service: RatgdoService.OCCUPANCY_SENSOR_MOTION, topic: mqttTopics.occupancy.topic }
+  doorOpen: { field: "doorOpenOccupancy", label: "Garage door open occupancy", service: RatgdoService.OCCUPANCY_SENSOR_DOOR_OPEN, topicKey: "doorOpenOccupancy" },
+  motion: { field: "motionOccupancy", label: "Occupancy", service: RatgdoService.OCCUPANCY_SENSOR_MOTION, topicKey: "occupancy" }
 } as const;
 
 type OccupancyKind = keyof typeof RATGDO_OCCUPANCY;
@@ -454,11 +457,84 @@ export class RatgdoAccessory implements Disposable {
     info?.updateCharacteristic(this.hap.Characteristic.FirmwareRevision, this.device.firmwareVersion);
   }
 
-  // Publish a status update to MQTT. The library's guarded publish owns the failure routing: a broker we are disconnected from and a shutdown abort are both reported
-  // at debug level, while a genuine failure is reported at error. Publishing is fire-and-forget by design, so nothing here waits on delivery.
-  private publishStatus(topic: string, message: string): void {
+  /* The wire payload of a state topic, read from this.status alone: each topic answers from the status field its transition path writes. The transition publish, the
+   * session restatement, and every /get reply read a payload here, so no topic can be encoded two ways. The switch is exhaustive over the state topics, so a topic
+   * added to the catalog fails compilation here until it has a payload.
+   */
+  private topicPayload(key: StateTopic): string {
 
-    this.platform.mqtt?.publishGuarded(mqttTopic(this.device.mac, topic), message);
+    switch(key) {
+
+      case "doorOpenOccupancy":
+
+        return this.status.doorOpenOccupancy.toString();
+
+      case "garageDoor":
+
+        return this.translateCurrentDoorState(this.status.door);
+
+      case "laser":
+
+        return this.status.discoLaser.toString();
+
+      case "led":
+
+        return this.status.discoLed.toString();
+
+      case "light":
+
+        return this.status.light.toString();
+
+      case "lock":
+
+        return this.status.lock.toString();
+
+      case "motion":
+
+        return this.status.motion.toString();
+
+      case "obstruction":
+
+        return this.status.obstruction.toString();
+
+      case "occupancy":
+
+        return this.status.motionOccupancy.toString();
+
+      case "strobe":
+
+        return this.status.konnectedStrobe.toString();
+
+      case "vehicleArriving":
+
+        return this.status.discoVehicleArriving.toString();
+
+      case "vehicleLeaving":
+
+        return this.status.discoVehicleLeaving.toString();
+
+      case "vehiclePresence":
+
+        return this.status.discoVehiclePresence.toString();
+    }
+  }
+
+  // Publish a state topic's current payload to MQTT. The library's guarded publish owns the failure routing: a broker we are disconnected from and a shutdown abort
+  // are both reported at debug level, while a genuine failure is reported at error. Publishing is fire-and-forget by design, so nothing here waits on delivery.
+  private publishTopic(key: StateTopic): void {
+
+    this.platform.mqtt?.publishGuarded(mqttTopic(this.device.mac, mqttTopics[key].topic), this.topicPayload(key));
+  }
+
+  /* Publish the opener's availability statement, read from the one status field the availability event writes, so the statement and the reachability the device
+   * owns cannot disagree. It is retained, so a subscriber attaching mid-session reads the last statement without waiting for the next one, and it composes with the
+   * plugin-level statement the MQTT client makes: the opener is available only when both read online.
+   */
+  private publishAvailability(): void {
+
+    const payload: MqttAvailabilityPayload = this.status.availability ? MQTT_AVAILABILITY_ONLINE : MQTT_AVAILABILITY_OFFLINE;
+
+    this.platform.mqtt?.publishGuarded(mqttTopic(this.device.mac, mqttTopics.availability.topic), payload, { retain: true });
   }
 
   // Configure MQTT services. Every subscribe* call passes the per-accessory `mqttAbort.signal` so the MqttClient removes our handlers when this accessory disposes -
@@ -468,10 +544,8 @@ export class RatgdoAccessory implements Disposable {
     const signal = this.mqttAbort.signal;
 
     // Return our garage door state.
-    this.platform.mqtt?.subscribeGet(mqttTopic(this.device.mac, mqttTopics.garageDoor.topic), mqttTopics.garageDoor.label, () => {
-
-      return this.translateCurrentDoorState(this.status.door);
-    }, { signal });
+    this.platform.mqtt?.subscribeGet(mqttTopic(this.device.mac, mqttTopics.garageDoor.topic), mqttTopics.garageDoor.label, () => this.topicPayload("garageDoor"),
+      { signal });
 
     // Set our garage door state.
     this.platform.mqtt?.subscribeSet(mqttTopic(this.device.mac, mqttTopics.garageDoor.topic), mqttTopics.garageDoor.label, (value: string) => {
@@ -514,11 +588,11 @@ export class RatgdoAccessory implements Disposable {
     }, { signal });
 
     // Return our lock state.
-    this.platform.mqtt?.subscribeGet(mqttTopic(this.device.mac, mqttTopics.lock.topic), mqttTopics.lock.label, () => String(this.status.lock), { signal });
+    this.platform.mqtt?.subscribeGet(mqttTopic(this.device.mac, mqttTopics.lock.topic), mqttTopics.lock.label, () => this.topicPayload("lock"), { signal });
 
     // Return our obstruction state.
-    this.platform.mqtt?.subscribeGet(mqttTopic(this.device.mac, mqttTopics.obstruction.topic), mqttTopics.obstruction.label,
-      () => this.status.obstruction.toString(), { signal });
+    this.platform.mqtt?.subscribeGet(mqttTopic(this.device.mac, mqttTopics.obstruction.topic), mqttTopics.obstruction.label, () => this.topicPayload("obstruction"),
+      { signal });
 
     // Return our door open occupancy state if configured to do so. We read from status rather than from the HAP characteristic so MQTT and HomeKit share the same
     // source of truth - the status field is updated atomically with the characteristic write at every transition site (the open-door timer fire and the door-closed
@@ -526,27 +600,65 @@ export class RatgdoAccessory implements Disposable {
     if(this.hints.doorOpenOccupancySensor) {
 
       this.platform.mqtt?.subscribeGet(mqttTopic(this.device.mac, mqttTopics.doorOpenOccupancy.topic), mqttTopics.doorOpenOccupancy.label,
-        () => this.status.doorOpenOccupancy.toString(), { signal });
+        () => this.topicPayload("doorOpenOccupancy"), { signal });
     }
 
     // Return our light state if configured to do so.
     if(this.hints.light) {
 
-      this.platform.mqtt?.subscribeGet(mqttTopic(this.device.mac, mqttTopics.light.topic), mqttTopics.light.label, () => this.status.light.toString(), { signal });
+      this.platform.mqtt?.subscribeGet(mqttTopic(this.device.mac, mqttTopics.light.topic), mqttTopics.light.label, () => this.topicPayload("light"), { signal });
     }
 
     // Return our motion occupancy state if configured to do so. See the doorOpenOccupancy reader above for the rationale on reading from status rather than HAP.
     if(this.hints.motionOccupancySensor) {
 
-      this.platform.mqtt?.subscribeGet(mqttTopic(this.device.mac, mqttTopics.occupancy.topic), mqttTopics.occupancy.label,
-        () => this.status.motionOccupancy.toString(), { signal });
+      this.platform.mqtt?.subscribeGet(mqttTopic(this.device.mac, mqttTopics.occupancy.topic), mqttTopics.occupancy.label, () => this.topicPayload("occupancy"),
+        { signal });
     }
 
     // Return our motion state if configured to do so.
     if(this.hints.motionSensor) {
 
-      this.platform.mqtt?.subscribeGet(mqttTopic(this.device.mac, mqttTopics.motion.topic), mqttTopics.motion.label, () => this.status.motion.toString(), { signal });
+      this.platform.mqtt?.subscribeGet(mqttTopic(this.device.mac, mqttTopics.motion.topic), mqttTopics.motion.label, () => this.topicPayload("motion"), { signal });
     }
+
+    /* The state topics this opener restates on each broker session: exactly the ones its transition paths can publish, gated as those paths gate them. Hints and
+     * variant are fixed for the accessory's life, so the set is resolved once here rather than on every session. The record names every state topic, so a topic
+     * added to the catalog fails compilation here until its restatement is decided. Motion and the vehicle arriving and leaving contacts are momentary events, and a
+     * replayed event is the event happening a second time, so none of them is ever restated.
+     */
+    const isRatgdo = this.device.variant === RatgdoVariant.RATGDO;
+    const restatement: Record<StateTopic, boolean> = {
+
+      doorOpenOccupancy: this.hints.doorOpenOccupancySensor,
+      garageDoor: true,
+      laser: isRatgdo,
+      led: isRatgdo,
+      light: true,
+      lock: this.hints.lock,
+      motion: false,
+      obstruction: true,
+      occupancy: this.hints.motionOccupancySensor,
+      strobe: this.device.variant === RatgdoVariant.KONNECTED,
+      vehicleArriving: false,
+      vehicleLeaving: false,
+      vehiclePresence: isRatgdo
+    };
+    const restated = (Object.keys(restatement) as StateTopic[]).filter((key) => restatement[key]);
+
+    /* Restate what this opener holds each time the client establishes a broker session: its availability first, then every state topic above. Nothing published
+     * during an outage is replayed later, so a subscriber that missed a statement hears the current one when the session begins. The registration carries the same
+     * per-accessory signal as every subscription above, so disposing this accessory releases it.
+     */
+    this.platform.mqtt?.onConnect(() => {
+
+      this.publishAvailability();
+
+      for(const key of restated) {
+
+        this.publishTopic(key);
+      }
+    }, { signal });
 
     return true;
   }
@@ -1129,6 +1241,10 @@ export class RatgdoAccessory implements Disposable {
 
         this.status.availability = isOnline;
 
+        // We state the opener's reachability on every availability event rather than only on a change. Construction starts the field at true, so the online the
+        // platform dispatches for a new connection changes nothing here, and it is exactly the statement that connection must make.
+        this.publishAvailability();
+
         if(wasOnline && !isOnline) {
 
           this.log.info("Ratgdo disconnected.");
@@ -1191,7 +1307,7 @@ export class RatgdoAccessory implements Disposable {
             this.log.info("Motion detected.");
           }
 
-          this.publishStatus(mqttTopics.motion.topic, this.status.motion.toString());
+          this.publishTopic("motion");
         }
 
         // Arm (or re-arm) the motion reset timer. Registering under "motion" clears any prior motion timer first, so a fresh motion event restarts the window from now.
@@ -1200,7 +1316,7 @@ export class RatgdoAccessory implements Disposable {
           this.status.motion = false;
           motionService?.updateCharacteristic(this.hap.Characteristic.MotionDetected, this.status.motion);
 
-          this.publishStatus(mqttTopics.motion.topic, this.status.motion.toString());
+          this.publishTopic("motion");
         }, RATGDO_MOTION_DURATION * 1000);
 
         // If we don't have occupancy sensor support configured, we're done.
@@ -1239,7 +1355,7 @@ export class RatgdoAccessory implements Disposable {
             this.log.info("Obstruction %sdetected.", this.status.obstruction ? "" : "no longer ");
           }
 
-          this.publishStatus(mqttTopics.obstruction.topic, this.status.obstruction.toString());
+          this.publishTopic("obstruction");
         }
 
         break;
@@ -1247,22 +1363,21 @@ export class RatgdoAccessory implements Disposable {
       case "binary_sensor-vehicle_arriving":
 
         discoVehicleArrivingContactService?.updateCharacteristic(this.hap.Characteristic.ContactSensorState, event.state === "ON");
-        this.status.discoVehicleArriving = this.updateVehicleSensorState(this.status.discoVehicleArriving, event.state, "Vehicle arriving",
-          mqttTopics.vehicleArriving.topic);
+        this.updateVehicleSensorState("discoVehicleArriving", event.state, "Vehicle arriving", "vehicleArriving");
 
         break;
 
       case "binary_sensor-vehicle_detected":
 
         discoVehiclePresenceOccupancyService?.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, event.state === "ON");
-        this.status.discoVehiclePresence = this.updateVehicleSensorState(this.status.discoVehiclePresence, event.state, "Vehicle", mqttTopics.vehiclePresence.topic);
+        this.updateVehicleSensorState("discoVehiclePresence", event.state, "Vehicle", "vehiclePresence");
 
         break;
 
       case "binary_sensor-vehicle_leaving":
 
         discoVehicleLeavingContactService?.updateCharacteristic(this.hap.Characteristic.ContactSensorState, event.state === "ON");
-        this.status.discoVehicleLeaving = this.updateVehicleSensorState(this.status.discoVehicleLeaving, event.state, "Vehicle leaving", mqttTopics.vehicleLeaving.topic);
+        this.updateVehicleSensorState("discoVehicleLeaving", event.state, "Vehicle leaving", "vehicleLeaving");
 
         break;
 
@@ -1374,7 +1489,7 @@ export class RatgdoAccessory implements Disposable {
           }
         }
 
-        this.publishStatus(mqttTopics.garageDoor.topic, this.translateCurrentDoorState(this.status.door));
+        this.publishTopic("garageDoor");
 
         break;
       }
@@ -1393,7 +1508,7 @@ export class RatgdoAccessory implements Disposable {
             this.log.info("Light %s.", event.state.toLowerCase());
           }
 
-          this.publishStatus(mqttTopics.light.topic, this.status.light.toString());
+          this.publishTopic("light");
         }
 
         break;
@@ -1432,25 +1547,25 @@ export class RatgdoAccessory implements Disposable {
 
         this.log.info("Wireless remotes are %s.", (event.state === "LOCKED") ? "locked out" : "permitted");
 
-        this.publishStatus(mqttTopics.lock.topic, this.status.lock.toString());
+        this.publishTopic("lock");
 
         break;
 
       case "switch-laser":
 
-        this.status.discoLaser = this.updateSwitchState(discoLaserSwitchService, this.status.discoLaser, event.state, mqttTopics.laser.topic);
+        this.updateSwitchState(discoLaserSwitchService, "discoLaser", event.state, "laser");
 
         break;
 
       case "switch-led":
 
-        this.status.discoLed = this.updateSwitchState(discoLedSwitchService, this.status.discoLed, event.state, mqttTopics.led.topic);
+        this.updateSwitchState(discoLedSwitchService, "discoLed", event.state, "led");
 
         break;
 
       case "switch-str_output":
 
-        this.status.konnectedStrobe = this.updateSwitchState(konnectedStrobeSwitchService, this.status.konnectedStrobe, event.state, mqttTopics.strobe.topic);
+        this.updateSwitchState(konnectedStrobeSwitchService, "konnectedStrobe", event.state, "strobe");
 
         break;
 
@@ -1757,39 +1872,43 @@ export class RatgdoAccessory implements Disposable {
     }
   }
 
-  // Utility function to update a switch state, publish to MQTT, and return the new state. Used by the switch-* event handlers in updateState() to avoid repeating
-  // the same state-change, characteristic-update, and MQTT-publish pattern.
-  private updateSwitchState(service: Service | undefined, currentState: boolean, eventState: string, topicSuffix: string): boolean {
+  /* Utility function to move a switch's status field, its characteristic, and its MQTT topic together on a state change. Used by the switch-* event handlers in
+   * updateState() to avoid repeating the same state-change, characteristic-update, and MQTT-publish pattern. The status field is written before the publish, since
+   * the publish reads its payload from status.
+   */
+  private updateSwitchState(service: Service | undefined, field: "discoLaser" | "discoLed" | "konnectedStrobe", eventState: string, topicKey: StateTopic): void {
 
     const newState = eventState === "ON";
 
-    if(currentState !== newState) {
+    if(this.status[field] !== newState) {
 
+      this.status[field] = newState;
       service?.updateCharacteristic(this.hap.Characteristic.On, newState);
 
-      this.publishStatus(topicSuffix, newState.toString());
+      this.publishTopic(topicKey);
     }
-
-    return newState;
   }
 
-  // Utility function to update a vehicle sensor state, log the event, publish to MQTT, and return the new state. Used by the binary_sensor-vehicle_* event handlers in
-  // updateState() to avoid repeating the same state-change, logging, and MQTT-publish pattern.
-  private updateVehicleSensorState(currentState: boolean, eventState: string, logPrefix: string, topicSuffix: string): boolean {
+  /* Utility function to move a vehicle sensor's status field, its log line, and its MQTT topic together on a state change. Used by the binary_sensor-vehicle_* event
+   * handlers in updateState() to avoid repeating the same state-change, logging, and MQTT-publish pattern. The status field is written before the publish, since the
+   * publish reads its payload from status.
+   */
+  private updateVehicleSensorState(field: "discoVehicleArriving" | "discoVehicleLeaving" | "discoVehiclePresence", eventState: string, logPrefix: string,
+    topicKey: StateTopic): void {
 
     const newState = eventState === "ON";
 
-    if(currentState !== newState) {
+    if(this.status[field] !== newState) {
+
+      this.status[field] = newState;
 
       if(this.hints.logVehiclePresence) {
 
         this.log.info("%s %sdetected.", logPrefix, newState ? "" : "no longer ");
       }
 
-      this.publishStatus(topicSuffix, newState.toString());
+      this.publishTopic(topicKey);
     }
-
-    return newState;
   }
 
   /* Single source of truth for an occupancy-indicator transition. From the RATGDO_OCCUPANCY descriptor for the given kind, it writes the status field, the HomeKit
@@ -1809,7 +1928,7 @@ export class RatgdoAccessory implements Disposable {
       this.log.info("%s %sdetected.", descriptor.label, detected ? "" : "no longer ");
     }
 
-    this.publishStatus(descriptor.topic, detected.toString());
+    this.publishTopic(descriptor.topicKey);
   }
 
   // Utility function to capitalize the first character of a string. Indexed access returns string | undefined under noUncheckedIndexedAccess - the optional-chain

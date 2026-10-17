@@ -4,8 +4,8 @@
  */
 import type { API, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
 import type { Clock, HomebridgePluginLogging, MdnsDiscovery, MdnsDiscoveryEvent, MqttClient, Nullable } from "homebridge-plugin-utils";
-import { CoalescingTask, FeatureOptions, HbpuAbortError, WakeableWait, createMqttClient, debugGatedLog, discoverServices, formatErrorMessage,
-  mqttConnectionSettings, prefixedLog, sanitizeName, superviseLoop, systemClock } from "homebridge-plugin-utils";
+import { CoalescingTask, FeatureOptions, HbpuAbortError, MQTT_AVAILABILITY_OFFLINE, WakeableWait, createMqttClient, debugGatedLog, discoverServices,
+  formatErrorMessage, mqttConnectionSettings, mqttTopic, prefixedLog, sanitizeName, superviseLoop, systemClock } from "homebridge-plugin-utils";
 import type { EntityId, EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
 import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_MANUAL_RETRY_INTERVAL, RATGDO_MDNS_SERVICE_TYPE } from "./settings.ts";
 import { applyDeviceInfo, isEncryptionError, openConnection, openManualConnection } from "./connection.ts";
@@ -18,6 +18,7 @@ import type { ManualDialOutcome } from "./manual.ts";
 import { RatgdoAccessory } from "./device.ts";
 import type { RatgdoDevice } from "./types.ts";
 import type { RatgdoResolvedConfig } from "./options.ts";
+import { mqttTopics } from "./mqtt.ts";
 import { parseBatteryState } from "./protocol/battery.ts";
 import { ratgdoInitialStateEntityIds } from "./entities.ts";
 import { translateTelemetry } from "./protocol/telemetry.ts";
@@ -133,6 +134,10 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
     this.mqtt = settings && createMqttClient({ ...settings, log: this.log }, { signal: this.shutdownController.signal });
 
+    // On every broker session, state each opener this run holds but has not configured as unreachable. The client's lifetime is the platform's, so the registration
+    // carries no signal of its own.
+    this.mqtt?.onConnect(() => this.publishUnconfiguredAvailability());
+
     this.log.debug("Debug logging on. Expect a lot of data.");
 
     // Fire up the Ratgdo API once Homebridge has loaded all the cached accessories it knows about and called configureAccessory() on each.
@@ -165,6 +170,43 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
         device[Symbol.dispose]();
       }
     });
+  }
+
+  /* The platform's only availability statement: a retained offline for every MAC this run knows and has not configured, stated on each broker session. A MAC this
+   * run has not configured cannot be reached, and nothing else speaks for it...a configured opener states its own reachability, so no MAC is stated by both. The
+   * targets are derived here from state the platform already holds and are kept nowhere else. A held accessory's MAC is the serial number the device wrote on its
+   * information service, which Homebridge restores from its cache before the first session can arrive, and a device removed as disabled before the first session
+   * is still stated here, since the disabled set keeps its MAC for the rest of the run. A MAC reached both ways is stated once.
+   */
+  private publishUnconfiguredAvailability(): void {
+
+    const macs = new Set<string>();
+
+    for(const [ uuid, accessory ] of this.accessories) {
+
+      if(this.configuredDevices.has(uuid)) {
+
+        continue;
+      }
+
+      const serial = accessory.getService(this.hap.Service.AccessoryInformation)?.getCharacteristic(this.hap.Characteristic.SerialNumber).value;
+
+      if(typeof serial === "string") {
+
+        macs.add(serial);
+      }
+    }
+
+    // discoveredDevices means "settled as disabled this run"; this read depends on that, so a writer adding a MAC for any other reason would state it offline here.
+    for(const macColon of this.discoveredDevices) {
+
+      macs.add(macColon.replace(/:/g, ""));
+    }
+
+    for(const mac of macs) {
+
+      this.mqtt?.publishGuarded(mqttTopic(mac, mqttTopics.availability.topic), MQTT_AVAILABILITY_OFFLINE, { retain: true });
+    }
   }
 
   // This gets called when homebridge restores cached accessories at startup. We intentionally avoid doing anything significant here, and save all that logic for device

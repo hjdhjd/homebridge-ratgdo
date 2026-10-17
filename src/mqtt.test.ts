@@ -8,11 +8,12 @@
  */
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
+import { mqttAvailabilityEntry } from "homebridge-plugin-utils";
 import { mqttTopics } from "./mqtt.ts";
 
 // The wire tails the plugin ships, written out rather than derived, so this list is the receipt a reader compares the declaration against.
-const TAILS = [ "dooropenoccupancy", "garagedoor", "laser", "led", "light", "lock", "motion", "obstruction", "occupancy", "strobe", "vehiclearriving",
-  "vehicleleaving", "vehiclepresence" ];
+const TAILS = [ "availability", "dooropenoccupancy", "garagedoor", "laser", "led", "light", "lock", "motion", "obstruction", "occupancy", "strobe",
+  "vehiclearriving", "vehicleleaving", "vehiclepresence" ];
 
 // The tails the plugin answers a /get on, and the tail it accepts a /set on.
 const GET_TAILS = [ "dooropenoccupancy", "garagedoor", "light", "lock", "motion", "obstruction", "occupancy" ];
@@ -57,5 +58,15 @@ describe("the MQTT topic catalog", () => {
     const labels = entries.filter((entry) => ("get" in entry) || ("set" in entry)).map((entry) => [ entry.topic, entry.label ]).sort();
 
     assert.deepEqual(labels, SUBSCRIPTION_LABELS, "each subscribed tail carries its own label, which is what a user reads in the client's get and set log lines");
+  });
+
+  // The per-opener availability entry is the library's, spread unchanged, so every plugin in the family states a device's reachability on the same tail, in the same
+  // words, with the same document text. It is compared against the library's own entry rather than a restated literal, so its text is written in the library alone.
+  test("carries the library's availability entry unchanged", () => {
+
+    const { label, publish, topic } = mqttTopics.availability;
+
+    assert.deepEqual({ label, publish, topic }, { label: mqttAvailabilityEntry.label, publish: mqttAvailabilityEntry.publish, topic: mqttAvailabilityEntry.topic },
+      "the availability entry carries the library entry's label, publish text, and topic");
   });
 });
