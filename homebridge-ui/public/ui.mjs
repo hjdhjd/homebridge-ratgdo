@@ -8,6 +8,7 @@ import { canonicalManualAddress, isZonedAddress, makeRatgdoConfig } from "./ratg
 import { createActionGuard, withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
 import { PluginConfigSession } from "homebridge-plugin-utils/pluginConfigSession.mjs";
 import { STATUS_EVENT } from "homebridge-plugin-utils/webui-status.js";
+import { createSaveFlow } from "homebridge-plugin-utils/webUi-saveFlow.mjs";
 import { webUi } from "homebridge-plugin-utils/webUi.mjs";
 
 // The motion-latch fallback duration, in seconds, for the placeholder skeleton only. The authoritative snapshot rows carry the server's RATGDO_MOTION_DURATION on their
@@ -367,10 +368,18 @@ const card = {
   // these are the same elements for the page's life.
   address: null,
 
-  /* The latest-action-wins guard for the current open, and the single mechanism that retires a stale answer. Every action - a connection test, a save - starts on it
-   * at its click, and starting one retires whatever action was still in flight, so a slow answer never paints over newer input. Each open mints the guard on that
-   * open's takeover signal, so the takeover ending - a Cancel, a save that released the card, a navigation, a later open, or the page cycle ending - retires the
-   * action in flight too, rather than leaving it to answer into a card the user has left. Null until the first open.
+  // The card's save flow, minted at mount directly after the guard and kept for the page's life. It owns the delivery decision, the card or a toast, and the one fact
+  // no single action holds, whether a write is in flight; the card keeps its guard, its takeover, and its copy. The flow holds the card's Save button disabled while
+  // a write is in flight. Null until mount.
+  flow: null,
+
+  /* The latest-action-wins guard, minted once at mount and kept for the page's life, and the one place the card decides which action is current. A connection test
+   * starts on it at its click, a save starts on it through the card's flow, and starting one retires whatever action was still in flight - except that a save pressed
+   * while another save's write is in flight is answered busy by the flow, so it begins nothing and retires nothing. An edit to either field cancels the action in
+   * flight as well, so a slow answer never paints over newer input and a save never writes text the user has since changed. An edit, a test, and a save are the only
+   * cancellers. The guard has no parent, so a Cancel, a navigation, a later open, and the page cycle ending all leave a pressed save running to its write: the card's
+   * lifetime decides only where that save's outcome is shown, never whether it writes. A test joins its own open's takeover on top of this guard, which is what drops
+   * a test whose card has closed. Null until mount.
    */
   guard: null,
   key: null,
@@ -400,41 +409,59 @@ const renderVerdict = (message, rows = []) => {
   }
 };
 
-// Close the card by giving the content area back. The release aborts the takeover's signal, which the card's guard is composed on, so a probe or a commit that
-// answers afterward renders nothing.
+// Close the card by giving the content area back. The release ends the takeover the card was opened under, which drops a test in flight - a test joins that takeover -
+// and stops the card presenting a pressed save without stopping it, so the flow's delivery decision sends that save's outcome to a toast.
 const closeCard = () => {
 
   card.takeover.release();
 };
 
 /* Open the card, fresh, in the page's content area. The fields and the verdict are cleared rather than left as the last visit wrote them, because the card is built
- * once and reused - a stale verdict above empty fields would read as a claim about the device the user is about to type. Each open takes the area anew and mints its
- * guard on that takeover, so an open made while the card already holds the area ends the standing takeover first, and whatever the earlier open had in flight
- * retires with it.
+ * once and reused - a stale verdict above empty fields would read as a claim about the device the user is about to type. Each open takes the area anew, so an open
+ * made while the card already holds the area ends the standing takeover first, and a test the earlier open had in flight retires with it. The open cancels nothing
+ * on the guard: a save pressed before it keeps running, and because the takeover it was pressed under has ended, the flow's delivery decision reports its outcome by
+ * toast rather than onto this card.
  */
 const openCard = () => {
 
   card.takeover = ui.featureOptions.takeover(card.region);
-  card.guard = createActionGuard({ signal: card.takeover.signal });
   card.address.value = "";
   card.key.value = "";
   renderVerdict("");
 };
 
-/* Run one connection test and render what came back. Returns the successful result so Save can act on it, and null for every other outcome including a retired one -
- * Save writing nothing unless a device answered is exactly what this return says.
+// Answer an edit to either field. A verdict describes the text that was tested, and a save in flight is about to write that text, so an edit retires whatever action
+// is running and blanks the verdict line - the newest input wins, exactly as it does between two actions.
+const editCard = () => {
+
+  card.guard.cancel();
+  renderVerdict("");
+};
+
+/* Run one connection test and answer with its outcome, leaving where it is shown to the caller. The outcome is a discriminated union on `kind`, and each one's words
+ * are composed once, here:
  *
- * The typed address takes its canonical form ONCE, here, and the value this returns alongside the answer is what Save writes - so the address that was tested and the
- * address that is saved cannot be two different strings. A zoned address is refused before any request goes out, because a zone identifier means nothing without the
- * link it was heard on and nothing could dial it; the user is told on the card rather than left watching a probe that was always going to fail.
+ *   - `answered`: the device identified itself as an opener this plugin supports. It carries the device's answer, the canonical address and the key that were tested,
+ *     and the verdict and readout rows that describe what answered.
+ *   - `refused`: the test cannot stand behind a save, and the message says why. The one refusal that follows a device answering carries that device's rows too.
+ *   - `retired`: the test's signal aborted before it finished, so there is nothing to show.
  *
- * The signal is the action's own, started on the card's guard at the click: a newer action, a closed card, and a navigation away all retire it, and a retired probe
- * renders nothing and reports nothing. The request is bounded by the page's own deadline, which is longer than the server's own probe budget so the server's
- * classified answer wins a race with it, and by that signal, so a retired probe stops waiting at once rather than when the deadline runs out.
+ * A test paints its outcome on the card it was pressed on, and a save hands its outcome to its flow's delivery decision, so this function paints only the interim
+ * connecting line, at the press, while the card is necessarily open. Save writing nothing unless a device answered is exactly what the `answered` kind says.
+ *
+ * The typed address takes its canonical form ONCE, here, and the answered outcome carries that value and the typed key to the Save that writes them - so the address
+ * and the key that were tested and the ones that are saved cannot be two different strings. A zoned address is refused before any request goes out, because a zone
+ * identifier means nothing without the link it was heard on and nothing could dial it; the user is told rather than left watching a probe that was always going to
+ * fail.
+ *
+ * The signal is the action's own, started by the caller at the click: an edit to either field and a newer action retire it, and so does the card closing for a test,
+ * which joins its open's takeover, while a save's signal outlasts the card. A retired probe answers `retired` and reports nothing. The request is bounded by the
+ * page's own deadline, which is longer than the server's own probe budget so the server's classified answer wins a race with it, and by that signal, so a retired
+ * probe stops waiting at once rather than when the deadline runs out.
  *
  * One answer is a success on the wire and a refusal here: an encrypted device whose firmware does not announce its MAC, tested with a typed key other than the global
- * encryption key. The plugin reaches such a device only with the global encryption key, so a key saved for it could never be used; the verdict says so and names the
- * fix, and the null this answers is what keeps Save from writing it.
+ * encryption key. The plugin reaches such a device only with the global encryption key, so a key saved for it could never be used; the refusal says so and names the
+ * fix, and its kind is what keeps Save from writing it.
  */
 const runProbe = async (signal) => {
 
@@ -443,16 +470,12 @@ const runProbe = async (signal) => {
 
   if(!address.length) {
 
-    renderVerdict("Please enter the device's address.");
-
-    return null;
+    return { kind: "refused", message: "Please enter the device's address." };
   }
 
   if(isZonedAddress(address)) {
 
-    renderVerdict("An address with a zone identifier cannot be dialed. List the device's routable address or hostname instead.");
-
-    return null;
+    return { kind: "refused", message: "An address with a zone identifier cannot be dialed. List the device's routable address or hostname instead." };
   }
 
   renderVerdict("Connecting to the device...");
@@ -464,14 +487,12 @@ const runProbe = async (signal) => {
     // Two overlapping tests must leave the NEWER one's verdict on the card, whichever of them the network answers first, so a retired probe's answer is dropped here.
     if(signal.aborted) {
 
-      return null;
+      return { kind: "retired" };
     }
 
     if(answer?.kind !== "ok") {
 
-      renderVerdict(PROBE_MESSAGES[answer?.reason] ?? PROBE_MESSAGES.unreachable);
-
-      return null;
+      return { kind: "refused", message: PROBE_MESSAGES[answer?.reason] ?? PROBE_MESSAGES.unreachable };
     }
 
     // The readout names what answered, so a user who typed the wrong address of two openers can see which one they reached. Encrypted is shown only when the
@@ -489,102 +510,179 @@ const runProbe = async (signal) => {
 
       if(signal.aborted) {
 
-        return null;
+        return { kind: "retired" };
       }
 
       if(psk !== ratgdoConfig.globalKey(ui.featureOptions.editedConfig[0])) {
 
-        renderVerdict("This device answered, but its firmware does not announce its MAC address, so the plugin can reach it only with the global encryption key. " +
-          "Update the device to ESPHome 2025.4.0 or newer, or set the global encryption key to this key.", rows);
-
-        return null;
+        return { kind: "refused", message: "This device answered, but its firmware does not announce its MAC address, so the plugin can reach it only with the global " +
+          "encryption key. Update the device to ESPHome 2025.4.0 or newer, or set the global encryption key to this key.", rows };
       }
     }
 
-    renderVerdict("This device answered.", rows);
-
-    return answer;
+    return { address, answer, key: psk, kind: "answered", message: "This device answered.", rows };
   } catch(error) {
 
-    // A retired probe's await rejects with its signal's abort rather than with a failure, and the action that retired it owns the card, so there is nothing to render
-    // and nothing to report.
+    // A retired probe's await rejects with its signal's abort rather than with a failure, and whatever retired it - an edit, a newer action, or a test's card closing -
+    // leaves it nothing to show and nothing to report.
     if(signal.aborted) {
 
-      return null;
+      return { kind: "retired" };
     }
 
-    renderVerdict(PROBE_MESSAGES.unreachable);
-
-    // console is the browser panel's diagnostic transport; the user already has the verdict, and this is for whoever is reading the console.
+    // console is the browser panel's diagnostic transport; the user is shown the refusal, and this is for whoever is reading the console.
     // eslint-disable-next-line no-console
     console.error("The device connection test failed.", error);
 
-    return null;
+    return { kind: "refused", message: PROBE_MESSAGES.unreachable };
   }
+};
+
+/* Test: run one connection test and paint its outcome on the card it was pressed on. The action starts on the card's guard joined with the takeover of the open it was
+ * pressed in, so an edit, a newer action, a Cancel, a navigation, and a later open all retire it at once. A retired test paints nothing and raises nothing: a test
+ * answers a question about the card in front of the user, so a test whose card has closed is dropped rather than reported by toast.
+ */
+const testCard = async () => {
+
+  const signal = AbortSignal.any([ card.guard.start(), card.takeover.signal ]);
+  const outcome = await runProbe(signal);
+
+  if(signal.aborted) {
+
+    return;
+  }
+
+  renderVerdict(outcome.message, outcome.rows);
+};
+
+/* Begin a Save's action: the starter the card's flow calls for every press it does not answer busy. It captures the takeover the press is made under, starts the
+ * action on the card's guard, retiring whatever test or save was in flight, and answers the action's signal, that takeover, and whether the card still presents the
+ * press, which holds for as long as that takeover stands. The flow reads the signal itself, so presented() says only what the card shows, and the flow hands the
+ * whole answer back on the press's result, which is where a saved press reaches the takeover it releases.
+ */
+const startSave = () => {
+
+  const takeover = card.takeover;
+  const signal = card.guard.start();
+
+  return { presented: () => !takeover.signal.aborted, signal, takeover };
 };
 
 /* Save: test first, then write, and write nothing at all if the device did not answer. That ordering is the whole promise of the card - an address only reaches the
  * configuration once something at it has identified itself as an opener this plugin supports.
  *
- * The decision about whether anything would change is made BEFORE any commit, against the configuration the page is holding: a composer answering null means the
- * address is listed and its key is already what the user typed, so the card says so and never opens a write. The composer runs a second time inside the commit,
- * against whatever entry the framework hands it there, and its `?? {}` covers only the narrow case of the configuration having moved between the two.
+ * Every press runs through the card's save flow, which owns the delivery decision and the in-flight-write fact, while the card owns its guard, its takeover, and
+ * its copy. A press begins on the card's guard alone, so an edit to either field, a test, or another save retires it before its write, and a retired save writes
+ * nothing and shows nothing. Closing the card is not among those. The takeover the save was pressed under is captured at the press and read only through the press's
+ * presented(), which the flow's delivery decision reads to choose where each outcome is shown: the verdict line while the card still presents this save, and the
+ * host's toast once a Cancel, a navigation, a later open, or the page cycle has ended that takeover, or an edit or a newer action has taken the card over since. So
+ * the card's lifetime never decides whether a pressed save writes. A save pressed while another save's write is in flight begins nothing - no probe, no paint, and no
+ * toast - and the write's own outcome lands as it would have. The flow holds the Save button disabled for that span, so the busy answer is what stands behind a press
+ * that reaches the flow anyway.
+ *
+ * Whether anything would change is decided inside the commit, against the entry the write would land on: the composer answers null when the address is listed and
+ * its key is already what the user typed, and the framework's commit then answers unchanged, writing nothing. The composer reads whether the address was already
+ * listed from that same entry, which decides the confirmation copy. Every listed entry is canonicalized for that comparison, so a list holding the bracketed spelling
+ * of this address reads as already carrying it - the same rule withManualDevice applies, which is what keeps the copy and the write from disagreeing.
  */
 const saveCard = async () => {
 
-  const signal = card.guard.start();
-  const answered = await runProbe(signal);
+  // Whether the tested address was already listed in the entry the write lands on, which picks the confirmation copy. Only the press that reaches its write composes,
+  // so the value belongs to that press alone and a press overlapping it never reads it.
+  let wasListed = false;
 
-  if(!answered) {
+  const result = await card.flow.save({
 
-    return;
-  }
+    /* The check runs the probe under the press's signal. Any outcome but an answer is declined with that outcome as its reason - a retired probe included, which the
+     * flow answers as superseded before it reads the reason - so a refusal reaches the delivery below with its message and rows. An answer names what answered on the
+     * card for as long as the write takes, while the press is presented, and passes the address and the key the probe tested, the MAC the device answered with, and the
+     * interpreter the composer writes through. The address and the key are the tested ones rather than a fresh read of their fields: an edit retires the press before
+     * its write, but a later open empties the fields without firing one, so a re-read could save an empty address or key in place of the ones that were tested.
+     */
+    check: async ({ presented, signal }) => {
 
-  // The address the probe tested, not a fresh read of the field: the canonical form was settled once before the request went out, so what is saved is exactly what
-  // answered. Re-reading here would let a keystroke landing during the probe save an address nothing ever tested.
-  const address = answered.address;
-  const key = card.key.value.trim();
-  const ratgdoConfig = await configInterpreter();
+      const outcome = await runProbe(signal);
 
-  if(signal.aborted) {
+      if(outcome.kind !== "answered") {
 
-    return;
-  }
+        return { kind: "declined", reason: outcome };
+      }
 
-  const listed = ratgdoConfig.manualAddresses(ui.featureOptions.editedConfig[0]);
+      if(presented()) {
 
-  if(!ratgdoConfig.withManualDevice(ui.featureOptions.editedConfig[0], { address, key, mac: answered.mac })) {
+        renderVerdict(outcome.message, outcome.rows);
+      }
 
-    renderVerdict("This device is already listed.");
+      const { address, answer, key } = outcome;
+      const ratgdoConfig = await configInterpreter();
 
-    return;
-  }
+      return { kind: "passed", value: { address, key, mac: answer.mac, ratgdoConfig } };
+    },
 
-  /* Whether this address was already in the list decides the confirmation copy, and it is read BEFORE the write, while the answer is still the truth. Every listed
-   * entry is canonicalized for the comparison, so a list holding the bracketed spelling of this address reads as already carrying it - the same rule the composer
-   * itself applies, which is what keeps the copy and the write from disagreeing.
-   */
-  const wasListed = listed.some((entry) => (canonicalManualAddress(entry) === address));
-  const result = await ui.featureOptions.commitConfig((platform) => ratgdoConfig.withManualDevice(platform, { address, key, mac: answered.mac }) ?? {});
+    // The composer runs inside the commit, against the entry the write would land on, so the copy's reading of the list and the patch come from one entry. Its null
+    // is the already-listed answer, which the commit reports as unchanged.
+    compose: (platform, { address, key, mac, ratgdoConfig }) => {
 
-  // A commit already in flight cannot be recalled, so a save retired across it - by a newer action, a closed card, or a navigation away - still leaves the
-  // configuration written, once. What the retired save suppresses is everything AFTER the write: the confirmation, the release, and the warm recompute.
-  if(signal.aborted) {
+      wasListed = ratgdoConfig.manualAddresses(platform).some((entry) => (canonicalManualAddress(entry) === address));
 
-    return;
-  }
+      return ratgdoConfig.withManualDevice(platform, { address, key, mac });
+    }
+  });
 
-  /* The outcome decides where the answer is shown. A write that changed the configuration confirms through the host's toast and gives the content area back, which
-   * is what the framework asks of a card whose save has resolved; a staged write reached the host's memory but not the disk, so it warns and asks for the user's own
-   * save, and it schedules the warm exactly as a committed one does because the page is reconciled on what the host holds. A failed write changed nothing, so its
-   * message stays on the card and the card stays open for another try.
+  /* What became of the press. A busy press and a superseded one are owed nothing: the first began nothing and left the in-flight write's presentation alone, and the
+   * second was retired before its write by the action that owns the card since. A refusal, the already-listed notice, and a failed write changed nothing, so each goes
+   * through the press's delivery decision - onto the verdict line while the card still presents this save, which stays open for another try, and into a toast once
+   * that card has closed or an edit or a newer action has taken it over. Each paint carries only the rows that belong to its own sentence, so the identity readout of
+   * the interim answer never stands under a verdict about something else.
+   *
+   * A started write always completes and always reports. A write that changed the configuration confirms through the host's toast and releases the takeover this save
+   * was pressed under, which is what the framework asks of a card whose save has resolved; a handle that has already ended releases nothing, so a card the user has
+   * opened since stays open. A staged write reached the host's memory but not the disk, so it warns and asks for the user's own save, and it schedules the warm
+   * exactly as a committed one does because the page is reconciled on what the host holds.
    */
   switch(result.kind) {
+
+    case "busy": {
+
+      return;
+    }
+
+    case "superseded": {
+
+      return;
+    }
+
+    case "declined": {
+
+      const { message, rows } = result.reason;
+
+      result.deliver({ channel: "error", paint: () => renderVerdict(message, rows), text: message });
+
+      return;
+    }
+
+    case "unchanged": {
+
+      const notice = "This device is already listed.";
+
+      result.deliver({ channel: "info", paint: () => renderVerdict(notice), text: notice });
+
+      return;
+    }
+
+    case "failed": {
+
+      const message = String(result.error?.message ?? result.error);
+
+      result.deliver({ channel: "error", paint: () => renderVerdict(message), text: message });
+
+      return;
+    }
 
     case "committed": {
 
       homebridge.toast.success(wasListed ? "Updated the key for this device." : "Saved. Restart Homebridge to add this device.");
-      closeCard();
+      result.action.takeover.release();
       scheduleRecompute();
 
       return;
@@ -593,15 +691,8 @@ const saveCard = async () => {
     case "staged": {
 
       homebridge.toast.warning("This device has been saved, but Homebridge could not write the configuration file. Save the plugin's settings to keep the change.");
-      closeCard();
+      result.action.takeover.release();
       scheduleRecompute();
-
-      return;
-    }
-
-    case "failed": {
-
-      renderVerdict(String(result.error?.message ?? result.error));
 
       return;
     }
@@ -639,6 +730,19 @@ const mountCard = () => {
   const save = buildElement("button", { attributes: { type: "button" }, className: "btn btn-primary me-2", text: "Save" });
   const cancel = buildElement("button", { attributes: { type: "button" }, className: "btn btn-secondary", text: "Cancel" });
 
+  card.guard = createActionGuard();
+
+  // The commit is a call through the feature-options instance rather than a reference to its method, so the method runs with its instance and is read at the moment
+  // a press reaches its write. The flow is handed the Save button as its control and holds it disabled for the span of each write, restoring what it found when the
+  // write settles, so the page carries no disable logic of its own.
+  card.flow = createSaveFlow({
+
+    commit: (compose, options) => ui.featureOptions.commitConfig(compose, options),
+    control: save,
+    start: startSave,
+    toast: homebridge.toast
+  });
+
   card.region = buildElement("div", { children: [
 
     buildElement("h5", { text: "Add a device by address" }),
@@ -660,9 +764,11 @@ const mountCard = () => {
   card.mounted = true;
 
   open.addEventListener("click", openCard);
-  test.addEventListener("click", () => void runProbe(card.guard.start()));
+  test.addEventListener("click", () => void testCard());
   save.addEventListener("click", () => void saveCard());
   cancel.addEventListener("click", closeCard);
+  card.address.addEventListener("input", editCard);
+  card.key.addEventListener("input", editCard);
 };
 
 /* The feature-options parameters. onLoaded is the page's first warm: the framework announces it once per show cycle that reaches a loaded model, with the status panel's

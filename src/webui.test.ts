@@ -1399,14 +1399,256 @@ describe("the ratgdo settings page's Add Device card", () => {
         "and it renders nothing into it - the verdict is still whatever the card last said while open");
       assert.equal(page.double.featureOptions.commits.length, 0, "a probe that never reached a save writes nothing");
       assert.equal(warmSends(page).length, warms, "and schedules no warm recompute, since nothing was saved");
+      assert.deepEqual(page.host.toasts, [], "and raises no toast, since a test whose card has closed is dropped rather than reported");
     });
 
-    test("leaves a commit that lands after the card closed written exactly once, raising no toast and scheduling no warm", async (t) => {
+    test("writes a save whose card closed mid-check once the device answers, confirming it by toast and scheduling the warm", async (t) => {
 
-      /* A commit already in flight cannot be recalled, so the configuration IS written - what the close suppresses is everything after the write: the confirmation,
-       * the release, and the warm recompute. The distinguishing observation is the commit COUNT, because an implementation that retried or re-entered on the late
-       * result would write twice. The debounce is released before the warms are counted, because the write moved the address list, so a warm the page wrongly
-       * scheduled would send rather than hide inside the window.
+      /* Closing the card decides only where a pressed save reports, never whether it writes: the check keeps running across the Cancel, the write lands once, and the
+       * confirmation the closed card cannot show goes to the host's toast. The debounce is released before the warms are counted, because the write moved the
+       * address list, so a warm the page failed to schedule shows as a missing send.
+       */
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+
+      const answer = Promise.withResolvers<unknown>();
+
+      using page = await loadUi({ probe: () => answer.promise });
+
+      const card = openCard(page);
+      const warms = warmSends(page).length;
+
+      card.address.value = "10.0.0.20";
+      fire(card.save, "click");
+
+      await settle();
+
+      fire(byText(page, "Cancel"), "click");
+
+      assert.equal(isHeld(page, card.region), false, "the card is closed while the save's check is still running");
+
+      answer.resolve(ANSWERED);
+
+      await settle();
+
+      assert.equal(page.double.featureOptions.commits.length, 1, "the save writes once its check passes, closed card or not");
+      assert.deepEqual(page.host.toasts, [{ channel: "success", message: "Saved. Restart Homebridge to add this device." }],
+        "and one success toast confirms it, since the card that would have shown it is gone");
+      assert.equal(isHeld(page, card.region), false, "the card stays closed");
+
+      await releaseDebounce(t.mock.timers);
+
+      assert.equal(warmSends(page).length, warms + 1, "and the warm carrying the new address sends once");
+    });
+
+    test("writes a save whose page cycle ended mid-check once the device answers, confirming it by toast and scheduling the warm", async (t) => {
+
+      // A navigation away ends the page cycle, which the harness models as the next show cycle tearing the standing one down. The page's configuration session
+      // outlives the cycle, so a save pressed before the cycle ended writes and reports exactly as a cancelled card's save does.
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+
+      const answer = Promise.withResolvers<unknown>();
+
+      using page = await loadUi({ probe: () => answer.promise });
+
+      const card = openCard(page);
+
+      card.address.value = "10.0.0.20";
+      fire(card.save, "click");
+
+      await settle();
+
+      await page.double.show();
+      await settle();
+
+      assert.equal(isHeld(page, card.region), false, "the cycle's end closed the card while the save's check is still running");
+
+      const warms = warmSends(page).length;
+
+      answer.resolve(ANSWERED);
+
+      await settle();
+
+      assert.equal(page.double.featureOptions.commits.length, 1, "the save writes once its check passes");
+      assert.deepEqual(page.host.toasts, [{ channel: "success", message: "Saved. Restart Homebridge to add this device." }], "and one success toast confirms it");
+      assert.equal(isHeld(page, card.region), false, "the card stays closed");
+
+      await releaseDebounce(t.mock.timers);
+
+      assert.equal(warmSends(page).length, warms + 1, "and the warm carrying the new address sends once");
+    });
+
+    test("toasts a closed card's save refusal as an error in that reason's own sentence, and writes nothing", async () => {
+
+      const answer = Promise.withResolvers<unknown>();
+
+      using page = await loadUi({ probe: () => answer.promise });
+
+      const card = openCard(page);
+
+      card.address.value = "10.0.0.20";
+      fire(card.save, "click");
+
+      await settle();
+
+      fire(byText(page, "Cancel"), "click");
+      answer.resolve({ kind: "error", reason: "auth-invalid" });
+
+      await settle();
+
+      const refusal = "The device refused that encryption key. Check the key in this device's YAML configuration and try again.";
+
+      assert.equal(page.double.featureOptions.commits.length, 0, "a device that refused the check is never written");
+      assert.deepEqual(page.host.toasts, [{ channel: "error", message: refusal }],
+        "and one error toast carries the card's own sentence for that reason, since the card is gone");
+    });
+
+    test("toasts a closed card's already-listed notice as info, and writes nothing", async () => {
+
+      // The configuration already lists the address and no key is typed, so the device answering leaves nothing to change and the save ends in the already-listed notice.
+      const answer = Promise.withResolvers<unknown>();
+
+      using page = await loadUi({ config: configWith("Enable.Device.Address=10.0.0.20"), probe: () => answer.promise });
+
+      const card = openCard(page);
+
+      card.address.value = "10.0.0.20";
+      fire(card.save, "click");
+
+      await settle();
+
+      fire(byText(page, "Cancel"), "click");
+
+      assert.equal(isHeld(page, card.region), false, "the card is closed while the save's check is still running");
+
+      answer.resolve(ANSWERED);
+
+      await settle();
+
+      assert.equal(page.double.featureOptions.commits.length, 0, "an address already listed with nothing to change is never written");
+      assert.deepEqual(page.host.toasts, [{ channel: "info", message: "This device is already listed." }],
+        "and one info toast says so, since the card is gone");
+      assert.equal(card.verdict.textContent, "Connecting to the device...",
+        "and the notice never reaches the closed card's verdict line, which still reads what the card last said while open");
+    });
+
+    test("toasts a closed card's failed write as an error carrying the host's own message", async () => {
+
+      const answer = Promise.withResolvers<unknown>();
+
+      using page = await loadUi({ probe: () => answer.promise });
+
+      const card = openCard(page);
+
+      page.double.featureOptions.nextCommit = { error: new Error("the host refused the write"), kind: "failed" };
+      card.address.value = "10.0.0.20";
+      fire(card.save, "click");
+
+      await settle();
+
+      fire(byText(page, "Cancel"), "click");
+      answer.resolve(ANSWERED);
+
+      await settle();
+
+      assert.equal(page.double.featureOptions.commits.length, 1, "the check passed, so the write was attempted once");
+      assert.deepEqual(page.host.toasts, [{ channel: "error", message: "the host refused the write" }],
+        "and its failure reaches the user as one error toast carrying the host's own words, since the card is gone");
+    });
+
+    test("writes a save whose card was closed and reopened mid-check, confirming it by toast and leaving the reopened card held and untouched", async (t) => {
+
+      /* A reopen is not among the actions that cancel a pressed save, so the save writes when its check passes. The takeover it was pressed under ended with the
+       * Cancel, so its outcome goes to the toast and nothing of it reaches the reopened card, and the release its confirmation makes is of that ended takeover, so
+       * the reopened card stays held. The reopen empties the key field without an edit, which is what shows the commit carrying the key that was tested rather than
+       * a fresh read of the field.
+       */
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+
+      const answer = Promise.withResolvers<unknown>();
+
+      using page = await loadUi({ probe: () => answer.promise });
+
+      const card = openCard(page);
+      const warms = warmSends(page).length;
+
+      card.address.value = "10.0.0.20";
+      card.key.value = KEY;
+      fire(card.save, "click");
+
+      await settle();
+
+      fire(byText(page, "Cancel"), "click");
+
+      const reopened = openCard(page);
+
+      answer.resolve(ANSWERED);
+
+      await settle();
+
+      assert.equal(page.double.featureOptions.commits.length, 1, "the save writes once its check passes, across the close and the reopen");
+      assert.ok(committedOptions(page, "the save's commit").includes(keyEntry(MAC, KEY)), "carrying the key that was tested, not the field the reopen emptied");
+      assert.deepEqual(page.host.toasts, [{ channel: "success", message: "Saved. Restart Homebridge to add this device." }],
+        "and one success toast confirms it, since the card it was pressed on is gone");
+      assert.ok(isHeld(page, reopened.region), "the reopened card is still held, because the save released only the takeover it was pressed under");
+      assert.equal(reopened.address.value, "", "with its cleared address");
+      assert.equal(reopened.key.value, "", "and its cleared key");
+      assert.equal(reopened.verdict.textContent, "", "and its blank verdict, which the save never painted");
+
+      await releaseDebounce(t.mock.timers);
+
+      assert.equal(warmSends(page).length, warms + 1, "and the warm carrying the new address sends once");
+    });
+
+    test("keeps a card reopened while a save's write is in flight held when that write lands, and confirms the write by toast", async () => {
+
+      const answer = Promise.withResolvers<unknown>();
+      const held = Promise.withResolvers<boolean>();
+      let started = false;
+
+      using page = await loadUi({ probe: () => answer.promise });
+
+      const card = openCard(page);
+      const original = page.double.featureOptions.commitConfig;
+
+      // The commit is held open so the card can be reopened after the write has started, then released.
+      page.double.featureOptions.commitConfig = async (compose): Promise<CommitResult> => {
+
+        started = true;
+
+        await held.promise;
+
+        return original(compose);
+      };
+
+      card.address.value = "10.0.0.20";
+      fire(card.save, "click");
+
+      await settle();
+
+      fire(byText(page, "Cancel"), "click");
+      answer.resolve(ANSWERED);
+
+      await settle();
+
+      assert.ok(started, "the save's write has started while the card is closed");
+
+      const reopened = openCard(page);
+
+      held.resolve(true);
+
+      await settle();
+
+      assert.equal(page.double.featureOptions.commits.length, 1, "the write lands exactly once");
+      assert.deepEqual(page.host.toasts, [{ channel: "success", message: "Saved. Restart Homebridge to add this device." }], "and one success toast confirms it");
+      assert.ok(isHeld(page, reopened.region), "while the card opened after the write started stays held, since the save releases only its own takeover");
+    });
+
+    test("writes a commit that lands after the card closed exactly once, confirming it by toast and scheduling the warm", async (t) => {
+
+      /* A started write always completes and always reports, so a card closed across the commit changes only where the confirmation goes. The distinguishing
+       * observations are the commit COUNT, because an implementation that retried or re-entered on the late result would write twice, and the toast and the warm,
+       * because an implementation that let the close suppress what follows the write would drop both. The debounce is released before the warms are counted, because
+       * the write moved the address list, so a warm the page failed to schedule shows as a missing send.
        */
       t.mock.timers.enable({ apis: ["setTimeout"] });
 
@@ -1440,13 +1682,394 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       await settle();
 
-      assert.equal(page.double.featureOptions.commits.length, 1, "the write that was already in flight still happened, exactly once");
-      assert.deepEqual(page.host.toasts, [], "but no confirmation is raised, since the card is closed");
+      assert.equal(page.double.featureOptions.commits.length, 1, "the write that was already in flight happened, exactly once");
+      assert.deepEqual(page.host.toasts, [{ channel: "success", message: "Saved. Restart Homebridge to add this device." }],
+        "and one success toast confirms it, since the card is closed");
 
       await releaseDebounce(t.mock.timers);
 
-      assert.equal(warmSends(page).length, warms, "and no warm recompute is scheduled for a card the user dismissed");
+      assert.equal(warmSends(page).length, warms + 1, "and the warm carrying the new address sends once");
     });
+
+    test("reports a write that an edit lands across and schedules the warm, since nothing recalls a started write", async (t) => {
+
+      /* An edit retires the save it lands on, but a save whose write has started has nothing left to retire: the commit lands once, it confirms by toast, releases
+       * the card it was pressed on, and schedules the warm. An implementation that let the save's retirement decide whether to report after the write would drop all
+       * three, which is the observation that tells the two apart - a close alone never retires a save, so only an edit or a newer action landing across the write can.
+       */
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+
+      const held = Promise.withResolvers<boolean>();
+      let started = false;
+
+      using page = await loadUi({ probe: async () => ANSWERED });
+
+      const card = openCard(page);
+      const original = page.double.featureOptions.commitConfig;
+
+      // The commit is held open so the address field can be edited across it, then released.
+      page.double.featureOptions.commitConfig = async (compose): Promise<CommitResult> => {
+
+        started = true;
+
+        await held.promise;
+
+        return original(compose);
+      };
+
+      const warms = warmSends(page).length;
+
+      card.address.value = "10.0.0.20";
+      fire(card.save, "click");
+
+      await settle();
+
+      assert.ok(started, "the save's write has started");
+
+      card.address.value = "10.0.0.21";
+      fire(card.address, "input");
+      held.resolve(true);
+
+      await settle();
+
+      assert.equal(page.double.featureOptions.commits.length, 1, "the write lands exactly once");
+      assert.ok(committedOptions(page, "the save's commit").includes("Enable.Device.Address=10.0.0.20"), "carrying the address that was tested, not the edited one");
+      assert.deepEqual(page.host.toasts, [{ channel: "success", message: "Saved. Restart Homebridge to add this device." }], "and one success toast confirms it");
+      assert.equal(isHeld(page, card.region), false, "the save releases the card it was pressed on, as every resolved save does");
+
+      await releaseDebounce(t.mock.timers);
+
+      assert.equal(warmSends(page).length, warms + 1, "and the warm carrying the new address sends once");
+    });
+
+    test("toasts a failed write that an edit lands across, and leaves the edited card's verdict line blank", async () => {
+
+      /* A failed write reports on the verdict line only while the card still presents the save that made it. An edit landing across the write takes the line over
+       * and blanks it, so the host's error goes to a toast and the line stays as the edit left it, even though the card itself is still open.
+       */
+      const held = Promise.withResolvers<boolean>();
+      let started = false;
+
+      using page = await loadUi({ probe: async () => ANSWERED });
+
+      const card = openCard(page);
+      const original = page.double.featureOptions.commitConfig;
+
+      // The commit is held open so the address field can be edited across it, then released into a failure.
+      page.double.featureOptions.commitConfig = async (compose): Promise<CommitResult> => {
+
+        started = true;
+
+        await held.promise;
+
+        return original(compose);
+      };
+
+      page.double.featureOptions.nextCommit = { error: new Error("the host refused the write"), kind: "failed" };
+      card.address.value = "10.0.0.20";
+      fire(card.save, "click");
+
+      await settle();
+
+      assert.ok(started, "the save's write has started");
+
+      card.address.value = "10.0.0.21";
+      fire(card.address, "input");
+
+      assert.equal(card.verdict.textContent, "", "the edit blanks the verdict line");
+
+      held.resolve(true);
+
+      await settle();
+
+      assert.equal(page.double.featureOptions.commits.length, 1, "the write was attempted once");
+      assert.deepEqual(page.host.toasts, [{ channel: "error", message: "the host refused the write" }],
+        "and its failure reaches the user as one error toast carrying the host's own words");
+      assert.ok(isHeld(page, card.region), "the card stays open, since a failed write releases nothing");
+      assert.equal(card.verdict.textContent, "", "and its verdict line is still blank from the edit, which took the line over");
+    });
+
+    for(const field of [ "address", "key" ] as const) {
+
+      test("writes nothing and shows nothing for a save whose " + field + " field is edited during its check, and blanks the verdict", async () => {
+
+        const answer = Promise.withResolvers<unknown>();
+
+        using page = await loadUi({ probe: () => answer.promise });
+
+        const card = openCard(page);
+
+        card.address.value = "10.0.0.20";
+        card.key.value = KEY;
+        fire(card.save, "click");
+
+        await settle();
+
+        assert.equal(card.verdict.textContent, "Connecting to the device...", "the save's check is in flight");
+
+        card[field].value += "0";
+        fire(card[field], "input");
+
+        assert.equal(card.verdict.textContent, "", "the edit blanks the verdict line at once");
+
+        answer.resolve(ANSWERED);
+
+        await settle();
+
+        assert.equal(page.double.featureOptions.commits.length, 0, "the edit retired the save, so the text it was pressed with is never written");
+        assert.deepEqual(page.host.toasts, [], "and a retired save raises nothing");
+        assert.equal(card.verdict.textContent, "", "nor paints anything over the blanked line");
+      });
+    }
+
+    for(const field of [ "address", "key" ] as const) {
+
+      test("renders nothing and raises no toast for a test whose " + field + " field is edited while it is in flight", async () => {
+
+        const answer = Promise.withResolvers<unknown>();
+
+        using page = await loadUi({ probe: () => answer.promise });
+
+        const card = openCard(page);
+
+        card.address.value = "10.0.0.20";
+        card.key.value = KEY;
+        fire(card.test, "click");
+
+        await settle();
+
+        assert.equal(card.verdict.textContent, "Connecting to the device...", "the test's check is in flight");
+
+        card[field].value += "0";
+        fire(card[field], "input");
+
+        assert.equal(card.verdict.textContent, "", "the edit blanks the verdict line at once");
+
+        answer.resolve(ANSWERED);
+
+        await settle();
+
+        // The edit blanks the line whether or not it retired the test, so it is the line staying blank once the held answer lands that shows the test was retired.
+        assert.equal(card.verdict.textContent, "", "the edit retired the test, so its late answer paints nothing over the blanked line");
+        assert.ok(isHeld(page, card.region), "and the card stays open, since an edit closes nothing");
+        assert.deepEqual(page.host.toasts, [], "and a retired test raises no toast");
+        assert.equal(page.double.featureOptions.commits.length, 0, "nor writes anything, since a test never saves");
+        assert.deepEqual(probeDiagnostics(page), [], "and the retired test has no failure to report, so nothing reaches the console");
+      });
+    }
+
+    test("writes nothing for a save that a test pressed during its check retires", async () => {
+
+      // The first probe is the save's, held open; the test's own probe answers at once.
+      const saved = Promise.withResolvers<unknown>();
+      let issued = 0;
+
+      using page = await loadUi({ probe: () => ((issued++ === 0) ? saved.promise : Promise.resolve(ANSWERED)) });
+
+      const card = openCard(page);
+
+      card.address.value = "10.0.0.20";
+      fire(card.save, "click");
+
+      await settle();
+
+      fire(card.test, "click");
+
+      await settle();
+
+      assert.equal(card.verdict.textContent, "This device answered.", "the test runs and paints its own verdict");
+
+      saved.resolve(ANSWERED);
+
+      await settle();
+
+      assert.equal(page.double.featureOptions.commits.length, 0, "the test retired the save, so nothing is written");
+      assert.deepEqual(page.host.toasts, [], "and the retired save reports nothing");
+    });
+
+    test("commits once for two saves in a row when the first answers last", async () => {
+
+      const answers = [ Promise.withResolvers<unknown>(), Promise.withResolvers<unknown>() ];
+      let issued = 0;
+
+      using page = await loadUi({ probe: () => answers[issued++]?.promise ?? Promise.resolve(ANSWERED) });
+
+      const card = openCard(page);
+
+      card.address.value = "10.0.0.20";
+      fire(card.save, "click");
+
+      await settle();
+
+      fire(card.save, "click");
+
+      await settle();
+
+      // The SECOND save's check answers first and writes, then the first one's answers late and must write nothing.
+      answers[1]?.resolve(ANSWERED);
+
+      await settle();
+
+      answers[0]?.resolve(ANSWERED);
+
+      await settle();
+
+      assert.equal(page.double.featureOptions.commits.length, 1, "the second save retired the first, so only the newer one writes");
+      assert.deepEqual(page.host.toasts, [{ channel: "success", message: "Saved. Restart Homebridge to add this device." }],
+        "and one toast confirms that one write, with nothing from the retired save beside it");
+    });
+
+    test("starts nothing for a save pressed while another save's write is in flight", async () => {
+
+      /* A write cannot be recalled once it has started, so a second press during it begins nothing at all: it sends no probe, repaints nothing, raises nothing, and
+       * leaves the card held, and the first save's outcome lands as it would have. The readout is compared by identity as well as by text, so a press that repainted
+       * the same answer over itself would still read as a repaint.
+       */
+      const held = Promise.withResolvers<boolean>();
+
+      using page = await loadUi({ probe: async () => ANSWERED });
+
+      const card = openCard(page);
+      const original = page.double.featureOptions.commitConfig;
+
+      // The commit is held open so a second save can be pressed while the first one's write is in flight, then released.
+      page.double.featureOptions.commitConfig = async (compose): Promise<CommitResult> => {
+
+        await held.promise;
+
+        return original(compose);
+      };
+
+      card.address.value = "10.0.0.20";
+      card.key.value = KEY;
+      fire(card.save, "click");
+
+      await settle();
+
+      const readout = page.findElement((element) => (element.textContent === "MAC: "));
+
+      assert.equal(card.verdict.textContent, "This device answered.", "the save names the device that answered while its write runs");
+      assert.ok(readout, "with the identity readout beneath it");
+
+      const probes = page.host.requests.filter((entry) => (entry.route === STATUS_PROBE_ROUTE)).length;
+
+      fire(card.save, "click");
+
+      await settle();
+
+      assert.equal(page.host.requests.filter((entry) => (entry.route === STATUS_PROBE_ROUTE)).length, probes, "the second press sends no probe");
+      assert.equal(card.verdict.textContent, "This device answered.", "and leaves the verdict line as the first save painted it");
+      assert.equal(page.findElement((element) => (element.textContent === "MAC: ")), readout, "with the same identity readout beneath it");
+      assert.deepEqual(page.host.toasts, [], "and raises no toast");
+      assert.ok(isHeld(page, card.region), "while the card stays held");
+
+      held.resolve(true);
+
+      await settle();
+
+      assert.equal(page.double.featureOptions.commits.length, 1, "the first save's write lands exactly once");
+      assert.deepEqual(page.host.toasts, [{ channel: "success", message: "Saved. Restart Homebridge to add this device." }], "and one success toast confirms it");
+      assert.equal(isHeld(page, card.region), false, "and the saved card gives the content area back");
+    });
+
+    test("holds the Save button, and no other, disabled for as long as a save's write is in flight", async () => {
+
+      /* The page states which button saves and the library's flow does the rest, so this row reads the button itself and never a flag of the page's own: the Save
+       * button is disabled from the turn its write starts until that write settles, and no other element of the page is disabled while it runs.
+       */
+      const held = Promise.withResolvers<boolean>();
+
+      using page = await loadUi({ probe: async () => ANSWERED });
+
+      const card = openCard(page);
+      const original = page.double.featureOptions.commitConfig;
+
+      // The commit is held open so the card can be read while the save's write is in flight, then released.
+      page.double.featureOptions.commitConfig = async (compose): Promise<CommitResult> => {
+
+        await held.promise;
+
+        return original(compose);
+      };
+
+      card.address.value = "10.0.0.20";
+      card.key.value = KEY;
+
+      assert.equal(card.save.disabled, false, "the Save button is enabled before it is pressed");
+
+      fire(card.save, "click");
+
+      await settle();
+
+      assert.equal(page.findElement((element) => (element.disabled === true) && (element !== card.save)), null,
+        "no element of the page but the Save button is disabled while the write is in flight");
+      assert.equal(card.save.disabled, true, "and the Save button is disabled for as long as the write runs");
+
+      held.resolve(true);
+
+      await settle();
+
+      // The saved card has given the content area back and left the page, so the button is read through the reference the open took rather than by a search.
+      assert.equal(card.save.disabled, false, "the Save button is enabled again once the write settles");
+      assert.equal(page.double.featureOptions.commits.length, 1, "and exactly one commit landed");
+    });
+
+    // The outcomes of a save that write nothing, each arranged as the rows above arrange it: a device refusing the test, an address already listed with no key
+    // typed, and a write the host refuses.
+    const unwritten: { commit?: CommitResult; config?: FakeConfigEntry[]; name: string; probe: unknown; verdict: string }[] = [
+
+      { name: "the device refused", probe: { kind: "error", reason: "auth-missing" },
+        verdict: "This device requires its API encryption key. Enter the key from the device's YAML configuration and test again." },
+      { config: configWith("Enable.Device.Address=10.0.0.20"), name: "found the device already listed", probe: ANSWERED, verdict: "This device is already listed." },
+      { commit: { error: new Error("the host refused the write"), kind: "failed" }, name: "failed to write", probe: ANSWERED, verdict: "the host refused the write" }
+    ];
+
+    for(const outcome of unwritten) {
+
+      test("keeps the card open for a save that " + outcome.name, async () => {
+
+        using page = await loadUi({ config: outcome.config, probe: async () => outcome.probe });
+
+        const card = openCard(page);
+
+        if(outcome.commit) {
+
+          page.double.featureOptions.nextCommit = outcome.commit;
+        }
+
+        card.address.value = "10.0.0.20";
+        fire(card.save, "click");
+
+        await settle();
+
+        assert.ok(isHeld(page, card.region), "the card stays held, since the save wrote nothing and the user may want to try again");
+        assert.equal(card.verdict.textContent, outcome.verdict, "the verdict line reads that outcome's own sentence");
+        assert.equal(page.findElement((element) => (element.textContent === "MAC: ")), null, "and no identity readout stands beneath it");
+      });
+    }
+
+    for(const field of [ "address", "key" ] as const) {
+
+      test("blanks a standing verdict when the " + field + " field is edited with nothing in flight", async () => {
+
+        using page = await loadUi({ probe: async () => ANSWERED });
+
+        const card = openCard(page);
+
+        card.address.value = "10.0.0.20";
+        fire(card.test, "click");
+
+        await settle();
+
+        assert.equal(card.verdict.textContent, "This device answered.", "a verdict stands with nothing in flight");
+
+        card[field].value += "0";
+        fire(card[field], "input");
+
+        assert.equal(card.verdict.textContent, "", "the edit blanks it, since it describes the text that was tested rather than what the field holds");
+        assert.equal(page.findElement((element) => (element.textContent === "MAC: ")), null, "and the readout beneath it goes with it");
+      });
+    }
   });
 });
 

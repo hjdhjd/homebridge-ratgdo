@@ -109,9 +109,10 @@ export interface FeatureOptionsParams {
 }
 
 /* What a coordinated configuration write became, as the framework's own `commitConfig` reports it. `committed` and `staged` both mean the configuration changed -
- * `staged` reached the host's memory and not the disk - while `failed` means nothing changed.
+ * `staged` reached the host's memory and not the disk - while `failed` means nothing changed, and `unchanged` means the composer answered null, so nothing was
+ * written: its change was already in place, or it refused the change against the configuration as it stands.
  */
-export type CommitResult = { kind: "committed" } | { error: unknown; kind: "failed" } | { error: unknown; kind: "staged" };
+export type CommitResult = { kind: "committed" } | { error: unknown; kind: "failed" } | { error: unknown; kind: "staged" } | { kind: "unchanged" };
 
 /* One recorded `commitConfig` call: the patch the page's composer produced against the fixture's primary entry, and what the double answered. Recording the composed
  * patch rather than the composer itself is what lets a test assert WHAT would be written without running the write twice.
@@ -126,11 +127,12 @@ export interface RecordedCommit {
 export interface FeatureOptionsDouble {
 
   catalog: () => Promise<FakeCatalog>;
-  commitConfig: (compose: (platform: FakeConfigEntry) => Record<string, unknown>) => Promise<CommitResult>;
+  commitConfig: (compose: (platform: FakeConfigEntry) => Nullable<Record<string, unknown>>, options?: { rename?: unknown }) => Promise<CommitResult>;
   commits: RecordedCommit[];
   editedConfig: FakeConfigEntry[];
   getHomebridgeDevices: () => Promise<DeviceListResult>;
-  // What the next commitConfig call answers. A test sets it to drive the staged and failed arms the page renders differently.
+  // What the next commitConfig call answers. A test sets it to drive the staged and failed arms the page renders differently. `unchanged` is never driven through it,
+  // because that answer comes from a composer returning null.
   nextCommit: CommitResult;
   statusPanel: StatusPanelDouble;
   takeover: (element: FakeElement) => { release: () => void; signal: AbortSignal };
@@ -179,6 +181,10 @@ export interface FakeHost {
  * the DOM says `parentElement` - accepts page code no browser would run, and the suite then goes green on a card that cannot open. So the names are the DOM's, the
  * behavior is the DOM's wherever it is observable, and anything the DOM does not offer is deliberately absent so that reaching for it throws here instead.
  *
+ * `disabled` follows that rule: it stands only on the form controls, and an element of any other tag carries no such member, so reading it off a `div` answers
+ * undefined as a browser does. The library's save flow accepts a control by its boolean `disabled`, so a card that handed it a `div` must fail here as it fails in a
+ * browser.
+ *
  * `children` is a frozen view rather than the live array for that same reason: the real thing is an HTMLCollection whose `length` is a getter, so `children.length = 0`
  * throws in a browser and has to throw here too. The tree is mutated through `append`, `prepend`, `before`, `remove`, and `replaceChildren`, exactly as it is in a
  * browser.
@@ -193,6 +199,7 @@ export interface FakeElement {
   before: (...nodes: FakeElement[]) => void;
   readonly children: readonly FakeElement[];
   className: string;
+  disabled?: boolean;
   id: string;
   parentElement: Nullable<FakeElement>;
   prepend: (...nodes: FakeElement[]) => void;
@@ -297,8 +304,10 @@ const recordListener = (target: ListenerTarget, type: string, listener: FakeList
 };
 
 /* Fire one event at one fake: every listener the page registered on that target for that type runs, in registration order, and each receives the payload. That is
- * what a click on one button, a host broadcast, or a document event is. A target with no listener for the type is a test's own mistake, or a page that registered on
- * the wrong target, so it is named rather than silently doing nothing.
+ * a dispatched event - a click sent to one button, a host broadcast, or a document event - and like one it reaches a disabled control's listeners where a user's
+ * click would not. So a row that fires a click at a disabled button states a press that reached the handler anyway, which is how the suite exercises the flow's busy
+ * answer behind the disabled Save button. A target with no listener for the type is a test's own mistake, or a page that registered on the wrong target, so it is
+ * named rather than silently doing nothing.
  */
 export const fire = (target: ListenerTarget, type: string, payload?: unknown): void => {
 
@@ -405,6 +414,9 @@ const liveChildren = new WeakMap<FakeElement, FakeElement[]>();
 // The live child list of one element, which every insertion goes through. An element this file did not build has none, and an empty array keeps the walk total.
 const childrenOf = (element: FakeElement): FakeElement[] => liveChildren.get(element) ?? [];
 
+// The tags of the form controls, the only elements whose fake carries `disabled`, under the rule FakeElement states.
+const FORM_CONTROL_TAGS: ReadonlySet<string> = new Set([ "button", "fieldset", "input", "optgroup", "option", "select", "textarea" ]);
+
 export const makeDocument = (): FakeDom => {
 
   const seeded = new Map<string, FakeElement>();
@@ -481,6 +493,7 @@ export const makeDocument = (): FakeDom => {
         return Object.freeze([...kids]);
       },
       className: "",
+      ...FORM_CONTROL_TAGS.has(tag) ? { disabled: false } : {},
       id: "",
       parentElement: null,
       prepend: (...nodes) => {
@@ -718,6 +731,10 @@ export class webUi {
       /* The framework's coordinated configuration write. The composer is handed the fixture's primary platform entry - the live one, as the real contract hands the
        * live entry - and whatever it composes is merged onto that entry, so a later read by the page sees the write exactly as it would after a real commit. The
        * composed patch and the answer are both recorded, which is what lets a test assert the call count and the resulting options in one place.
+       *
+       * A composer answering null writes nothing, whether its change was already in place or it refused the change, and the call answers unchanged at once, as the
+       * framework's does: nothing is merged and nothing is recorded, because `commits` lists the writes the framework opened and that answer opens none. The
+       * framework's optional second argument, the rename a write declares, has no parameter here, since the card's save declares no rename.
        */
       commitConfig: async (compose): Promise<CommitResult> => {
 
@@ -729,6 +746,12 @@ export class webUi {
         }
 
         const patch = compose(primary);
+
+        if(patch === null) {
+
+          return { kind: "unchanged" };
+        }
+
         const result = this.featureOptions.nextCommit;
 
         this.featureOptions.commits.push({ patch, result });

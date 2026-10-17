@@ -225,8 +225,8 @@ export const makeRatgdoConfig = ({ FeatureOptions, catalog, formatValueList }) =
      * a device that was hand-added to the list without one finally gets one. An EMPTY key never clears a stored one - a user who leaves the field blank is saying
      * nothing about the key, not asking to delete it, and the options editor is where a deletion belongs.
      *
-     * Returning null when neither entry moved is what lets the caller skip the commit entirely and tell the user their device is already listed, rather than writing
-     * a configuration identical to the one on disk and making the host offer a restart for nothing.
+     * Null when neither entry moved is the already-listed answer: the framework's commit reports it as unchanged and writes nothing, so the card tells the user their
+     * device is already listed rather than writing a configuration identical to the one on disk and making the host offer a restart for nothing.
      *
      * @param config         - The platform configuration entry.
      * @param device.address - The address the user typed.
