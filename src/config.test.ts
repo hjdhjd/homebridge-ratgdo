@@ -10,8 +10,8 @@
  * Object.hasOwn and absence with its negation - never with a comparison against undefined.
  */
 import { FeatureOptions, formatValueList, mqttConnectionSettings, scopeSafeId } from "homebridge-plugin-utils";
-import { consolidatedFlag, featureOptionCategories, featureOptions, manualAddressScope } from "./options.ts";
 import { describe, test } from "node:test";
+import { featureOptionCategories, featureOptions, manualAddressScope } from "./options.ts";
 import { makeRatgdoConfig, canonicalManualAddress as pageCanonical, isZonedAddress as pageIsZoned } from "../homebridge-ui/public/ratgdo-config.mjs";
 import { manualAddressList, canonicalManualAddress as runtimeCanonical, isZonedAddress as runtimeIsZoned } from "./manual.ts";
 import { RATGDO_MQTT_TOPIC } from "./settings.ts";
@@ -224,11 +224,12 @@ describe("the ratgdo webUI configuration migration", () => {
 
     assert.deepEqual(beforeSettings, { brokerUrl: OPTION_URL, topicPrefix: "garage" },
       "the legacy shape resolves its broker and its custom prefix through its own properties, away from every default");
-    assert.equal(consolidatedFlag(before, "Log.Debug", legacy.debug), true, "the legacy shape resolves debug on, so the comparisons below are not two defaults agreeing");
+    assert.equal(before.consolidatedFlag({ fallback: legacy.debug, option: "Log.Debug" }), true,
+      "the legacy shape resolves debug on, so the comparisons below are not two defaults agreeing");
 
     assert.deepEqual(mqttConnectionSettings({ config: migrated, featureOptions: after }), beforeSettings,
       "the migrated config resolves the same effective broker URL and topic prefix");
-    assert.equal(consolidatedFlag(after, "Log.Debug", migrated.debug), consolidatedFlag(before, "Log.Debug", legacy.debug),
+    assert.equal(after.consolidatedFlag({ fallback: migrated.debug, option: "Log.Debug" }), before.consolidatedFlag({ fallback: legacy.debug, option: "Log.Debug" }),
       "the migrated config resolves the same effective debug flag");
   });
 });

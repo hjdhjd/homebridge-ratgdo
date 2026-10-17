@@ -6,19 +6,17 @@
  * for the ESPHome service type, and a connection opened against an address the user typed hands it the device-info record the connected client read. Each reader
  * validates what its own record carries and then composes the identity through one rule: classify the project name against the known-variant registry, normalize the
  * MAC into the two representations downstream code needs, and answer null for anything that is not a Ratgdo (or compatible variant) we configure - which is exactly
- * what the discovery stream reads as "not a device" and what the manual dial reads as "not an opener". The same policy layer answers the one question both connection
- * owners ask of an identity afterward - whether the address a connection was opened at is still one the device advertises - so the rule that decides when a connection
- * has gone stale is stated once here beside the pick rather than at each owner. The platform-state half - UUID generation, the per-run dedup gates, the resolved log
- * name - stays in the platform because it depends on instance state (hap, feature options, the device maps). Keeping the wire-derivation here makes the validity
- * guards, the address pick, the membership test, the project classification, and the MAC normalization unit-testable against arbitrary wire input without a live
- * network or a Homebridge harness.
+ * what the discovery stream reads as "not a device" and what the manual dial reads as "not an opener". A service's dial address is the library's ranked pick out of
+ * everything it advertises, and the identity carries that whole advertised list besides, which each connection owner hands to the library's membership test to decide
+ * whether the address its connection was opened at is still one the device advertises. The platform-state half - UUID generation, the per-run dedup gates, the
+ * resolved log name - stays in the platform because it depends on instance state (hap, feature options, the device maps). Keeping the wire-derivation here makes the
+ * validity guards, the project classification, and the MAC normalization unit-testable against arbitrary wire input without a live network or a Homebridge harness.
  */
-import { BlockList, isIPv4, isIPv6 } from "node:net";
 import type { MdnsService, Nullable } from "homebridge-plugin-utils";
+import { dialAddress, txtEntries } from "homebridge-plugin-utils";
 import type { DeviceInfo } from "esphome-client";
 import { RATGDO_AUTODISCOVERY_PROJECTS } from "./settings.ts";
 import type { RatgdoVariant } from "./types.ts";
-import { txtEntries } from "homebridge-plugin-utils";
 
 /* The closed vocabulary of ESPHome TXT keys this plugin reads. The classify below and the suite's service fixture share this one list, so a misspelled key is a
  * compile error at either site rather than a field that silently reads as absent against a live device.
@@ -36,7 +34,7 @@ export type RatgdoTxtKey = typeof RATGDO_TXT_KEYS[number];
  *                             the device is known to answer on.
  * @property addresses       - Every address the record accounts for. For a service that is what the device advertised, exactly as the browser listed them and
  *                             including any the pick would refuse, because this is the advertisement rather than a list of dial targets. For a device-info record it
- *                             is the single address that answered. isAdvertisedAt reads it.
+ *                             is the single address that answered. The library's isAdvertisedAt reads it.
  * @property firmwareVersion - The device firmware version (the version key, falling back to esphome_version; the guard guarantees one of them is present).
  * @property friendlyName    - The mDNS-advertised friendly name, the fallback for the device's display name before the "Ratgdo" default.
  * @property macColon        - The uppercased colon-delimited MAC (AA:BB:...), the form HomeKit's UUID generator and the discovered-device dedup set consume.
@@ -54,71 +52,6 @@ export interface DiscoveredRatgdo {
   readonly model: string | undefined;
   readonly strippedMac: string;
   readonly variant: RatgdoVariant;
-}
-
-/* The two IPv6 ranges the pick below tells apart, built once at module scope because a BlockList parses its subnets when they are added rather than on every check.
- * fe80::/10 is the link-local range, and the mask is the library's own test for one, so this module and the browser that stamps a zone onto a link-local address
- * always agree about which addresses those are. fc00::/7 is the unique-local range - the addresses a site assigns itself, which do not change when an ISP hands out
- * a new global prefix.
- */
-const IPV6_LINK_LOCAL = new BlockList();
-const IPV6_UNIQUE_LOCAL = new BlockList();
-
-IPV6_LINK_LOCAL.addSubnet("fe80::", 10, "ipv6");
-IPV6_UNIQUE_LOCAL.addSubnet("fc00::", 7, "ipv6");
-
-// The lowest member of a candidate class by plain string comparison, or nothing when the class is empty. One answer for one set, whatever order the set arrived in.
-function lowest(candidates: readonly string[]): string | undefined {
-
-  return candidates.length ? candidates.reduce((best, candidate) => (candidate < best) ? candidate : best) : undefined;
-}
-
-/* Choose the address this plugin dials out of everything a device advertises. The device is dialed over IPv6 where it offers a routable IPv6 address, over IPv4
- * otherwise, and over an unzoned link-local address only when it advertises nothing else.
- *
- * The answer is a function of the whole set of advertised addresses and never of their order, which is the property worth the extra lines here. The browser lists a
- * host's addresses in the order they arrived in its cache, a record that lapses and returns re-enters at the end, and both consumers of this address read any textual
- * change as the device having moved and tear a healthy connection down. Picking "the first IPv6 address" would therefore flip a dual-addressed device between its
- * unique-local and global addresses on ordinary packet loss; ranking the candidates does not. Unique-local leads the ranking because it is the address that survives
- * an ISP prefix rotation, and within one class the lowest string wins - a comparison over the library's one canonical spelling per address, textual rather than
- * numeric because its only job is to give one answer for one set.
- *
- * A zoned address is dropped before anything else looks at it: a link-local address means nothing without the link it was heard on, and the zone the library stamps on
- * it is this module's signal that the address is one of those.
- */
-function dialAddress(addresses: readonly string[]): string | undefined {
-
-  // A zone cannot be part of a connection target, so a zoned candidate leaves before anything is classified.
-  const unzoned = addresses.filter((candidate) => !candidate.includes("%"));
-  const ipv6 = unzoned.filter((candidate) => isIPv6(candidate));
-  const linkLocal = ipv6.filter((candidate) => IPV6_LINK_LOCAL.check(candidate, "ipv6"));
-  const routable = ipv6.filter((candidate) => !IPV6_LINK_LOCAL.check(candidate, "ipv6"));
-  const uniqueLocal = routable.filter((candidate) => IPV6_UNIQUE_LOCAL.check(candidate, "ipv6"));
-
-  /* The ranking, best to last resort. Only the IPv4 arm reads positionally, and it is the one place where order cannot change the answer: a device advertises a
-   * single address of that family, so the first one is the only one.
-   */
-  return lowest(uniqueLocal) ?? lowest(routable) ?? unzoned.find((candidate) => isIPv4(candidate)) ?? lowest(linkLocal);
-}
-
-/* Whether a connection opened at one address is still a connection to this device, which is the question a connection owner means to ask of a fresh advertisement -
- * deliberately not the question the pick above answers. The browser re-derives a host's address list every time one of its records lapses or returns, so the ranked
- * pick moves between a device's own addresses on nothing more than ordinary packet loss; a connection is stale only when the address it was opened at is gone from
- * the advertisement altogether. Comparing a held address against the current pick therefore tears healthy connections down, and a membership test over the advertised
- * list does not.
- *
- * The list is read as the browser gave it, zoned entries and all, because an address this plugin would never dial is still the device saying it answers there. The
- * one case this cannot tell apart is the record of the held address itself lapsing while the socket is healthy: the advertisement alone cannot distinguish that from
- * a device that moved, and the connection is reopened once.
- *
- * @param discovered - The identity derived from the advertisement being reconciled.
- * @param address    - The address the caller's connection was opened at.
- *
- * @returns true when the device still advertises that address.
- */
-export function isAdvertisedAt(discovered: DiscoveredRatgdo, address: string): boolean {
-
-  return discovered.addresses.includes(address);
 }
 
 /* One reading rule for a wire string field, shared by both readers below. Each source distinguishes absent from present-but-empty - `txtEntries` tells apart absent, a
@@ -225,8 +158,8 @@ export function classifyDeviceInfo(info: Nullable<DeviceInfo>, address: string):
   }
 
   /* The dialed address stands in for the advertisement. A device-info record says nothing about where else the device answers, and the one address we know it answers
-   * on is the one that just did - so the singleton list is the honest reading. An empty list would be the dishonest one: isAdvertisedAt would then answer false for
-   * every address, and a connection owner reading that as a device that moved would replace a healthy connection on the next thing it heard about this device.
+   * on is the one that just did - so the singleton list is the honest reading. An empty list would be the dishonest one: the library's isAdvertisedAt would then answer
+   * false for every address, and a connection owner reading that as a device that moved would replace a healthy connection on the next thing it heard about this device.
    */
   return composeIdentity({ address, addresses: [address], firmwareVersion, friendlyName, mac, projectName, projectVersion: advertised(info.projectVersion) });
 }

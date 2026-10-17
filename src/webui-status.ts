@@ -29,16 +29,16 @@
 import type { Clock, HomebridgePluginLogging, MdnsBrowserFactory, MdnsDiscovery, MdnsDiscoveryEvent, Nullable, StatusErrorReason, StatusEvent,
   StatusRow } from "homebridge-plugin-utils";
 import type { EntityId, EspHomeClient, LifecycleEvent, TelemetryEvent } from "esphome-client";
-import { HbpuAbortError, TimerRegistry, composeSignals, discoverServices, prefixedLog, superviseLoop, systemClock } from "homebridge-plugin-utils";
+import { HbpuAbortError, TimerRegistry, composeSignals, discoverServices, isAdvertisedAt, prefixedLog, superviseLoop, systemClock } from "homebridge-plugin-utils";
 import type { ManualConnectionFailureReason, OpenEspHomeClient } from "./connection.ts";
 import { RATGDO_ENTITIES, idFor, presentEntityIds, ratgdoInitialStateEntityIds, ratgdoStatusEntityIds } from "./entities.ts";
 import { RATGDO_MDNS_SERVICE_TYPE, RATGDO_MOTION_DURATION, RATGDO_WEBUI_DISCOVERY_TIMEOUT, RATGDO_WEBUI_PROBE_TIMEOUT } from "./settings.ts";
 import { canonicalManualAddress, governingAddress, isRetryableFailure, isZonedAddress } from "./manual.ts";
-import { isAdvertisedAt, parseRatgdoService } from "./discovery.ts";
 import { openConnection, openManualConnection } from "./connection.ts";
 import type { DiscoveredRatgdo } from "./discovery.ts";
 import type { EspHomeEvent } from "./types.ts";
 import { RatgdoVariant } from "./types.ts";
+import { parseRatgdoService } from "./discovery.ts";
 import { translateTelemetry } from "./protocol/telemetry.ts";
 
 // The panel's row identities, a closed union used internally to type the label and sizer records exhaustively. The wire carries a row id as a plain string; this closed
@@ -1540,7 +1540,7 @@ export class StatusFeed implements Disposable {
           return;
         }
 
-        if((governing === undefined) && !isAdvertisedAt(event.device, session.address)) {
+        if((governing === undefined) && !isAdvertisedAt(event.device.addresses, session.address)) {
 
           this.#teardownSession(mac);
           void this.#connectDevice(mac);

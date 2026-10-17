@@ -6,9 +6,8 @@
  */
 import type { FeatureCategoryEntry, FeatureOptionEntry } from "homebridge-plugin-utils";
 import { FeatureOptions, scopeSafeId } from "homebridge-plugin-utils";
-import { consolidatedFlag, describeCategoryScope, describeOptionScope, featureOptionCategories, featureOptions, manualAddressScope,
-  normalizeConfig } from "./options.ts";
 import { describe, test } from "node:test";
+import { describeCategoryScope, describeOptionScope, featureOptionCategories, featureOptions, manualAddressScope, normalizeConfig } from "./options.ts";
 import type { PlatformConfig } from "homebridge";
 import type { RatgdoOptionMeta } from "./options.ts";
 import { RatgdoVariant } from "./types.ts";
@@ -516,51 +515,6 @@ describe("manual device addresses", () => {
 
       assert.equal(engine.value("Device.Encryption.Key", scope), "by-address", "the address entry answers for the address");
       assert.equal(engine.value("Device.Encryption.Key", manualAddressScope("garage.local")), "by-name", "and the hostname entry answers for the hostname");
-    });
-  });
-});
-
-/* The consolidated-setting resolver, driven through every arm against a REAL engine over the REAL catalog, so the assertions bind to the same grammar the platform
- * constructor resolves against. Each row carries distinct values on its option side and its property side, so an implementation that transposed the two arms - or
- * that reached for the property first - fails rather than agreeing with itself.
- */
-describe("the consolidated setting resolvers", () => {
-
-  // A real engine over the real catalog and the supplied entries, built exactly as the platform constructor builds its own.
-  const engineFor = (entries: string[]): FeatureOptions => new FeatureOptions(featureOptionCategories, featureOptions, entries);
-
-  /* A synthetic catalog whose only flag defaults ON. Log.Debug's own default is off, so against the real catalog a correct implementation, one that hardcoded false,
-   * and one that wrote `||` where `??` belongs all answer identically - the catalog-default arm is only observable through a flag whose default is on. The resolvers
-   * take their engine as a parameter, so any catalog can drive them.
-   */
-  const defaultOnEngine = (entries: string[]): FeatureOptions => new FeatureOptions([{ description: "Logging", name: "Log" }],
-    { "Log": [{ default: true, description: "Enable debug logging.", name: "Debug", scopes: ["global"] }] }, entries);
-
-  describe("consolidatedFlag", () => {
-
-    test("an explicitly configured option rules over the configuration property in both directions", () => {
-
-      assert.equal(consolidatedFlag(engineFor(["Enable.Log.Debug"]), "Log.Debug", false), true, "an enabled option outranks a property that says off");
-      assert.equal(consolidatedFlag(engineFor(["Disable.Log.Debug"]), "Log.Debug", true), false, "a disabled option outranks a property that says on");
-    });
-
-    test("the configuration property decides when no entry exists", () => {
-
-      assert.equal(consolidatedFlag(engineFor([]), "Log.Debug", true), true, "a property carrying true turns the flag on");
-      assert.equal(consolidatedFlag(engineFor([]), "Log.Debug", false), false, "a property carrying false turns the flag off");
-    });
-
-    test("the catalog default closes the chain when neither an entry nor a property exists", () => {
-
-      assert.equal(consolidatedFlag(engineFor([]), "Log.Debug", undefined), false, "debug logging is off until something asks for it");
-    });
-
-    test("a flag whose catalog default is on resolves on, and a property that says off still overrides it", () => {
-
-      assert.equal(consolidatedFlag(defaultOnEngine([]), "Log.Debug", undefined), true,
-        "the default arm reads the catalog's own declared state rather than answering a hardcoded false");
-      assert.equal(consolidatedFlag(defaultOnEngine([]), "Log.Debug", false), false,
-        "a property carrying false decides, which a truthy fallback would discard in favor of the default");
     });
   });
 });

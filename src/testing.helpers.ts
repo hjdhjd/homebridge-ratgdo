@@ -23,7 +23,7 @@ import "homebridge-plugin-utils/polyfills";
 import type { Clock, HomebridgePluginLogging, MdnsService, Nullable } from "homebridge-plugin-utils";
 import { CoverOperation, LockState, entityId } from "esphome-client";
 import type { DeviceInfo, EntityId, EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
-import { TestClock, TestMqttClient, capturingLog, makeService } from "homebridge-plugin-utils/testing";
+import { TestClock, TestMqttClient, capturingLog, makeService, makeTxtStrings } from "homebridge-plugin-utils/testing";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import { FeatureOptions } from "homebridge-plugin-utils";
 import type { OpenEspHomeClient } from "./connection.ts";
@@ -895,16 +895,12 @@ export function makeTestDevice(overrides: Partial<RatgdoDevice> = {}): RatgdoDev
 }
 
 /** Build the resolved mDNS service a browser derives for a Ratgdo advertisement, composed from the library's own fixture so what a test advertises and what the
- * classify reads cannot disagree. Each TXT field becomes one record string: a string value as `key=value`, a `null` value as the bare key (the wire's flag form,
- * which `txtEntries` reads back as `null`), and an undefined value as nothing at all.
+ * classify reads cannot disagree. Each TXT field becomes one record string through the library's `makeTxtStrings`, the inverse of the `txtEntries` read the
+ * classify performs.
  *
  * The instance name is the TXT `mac` when one is present and the fixed "ratgdo" otherwise - one rule, so two devices advertising two MACs get two instance names,
  * which matters because the library keys its snapshot by instance name and a test advertising two devices must not collide them. The friendly name never names
  * the instance.
- *
- * The service type is derived from RATGDO_MDNS_SERVICE_TYPE rather than restated: `discoverServices` takes the fully qualified DNS-SD name while MdnsServiceFixture
- * places its type under a domain of its own (defaulting to "local"), so the constant's trailing `.local` label is trimmed here and the two library conventions meet
- * at one spelling.
  *
  * @param txt       - The TXT fields to advertise, keyed by the ESPHome wire names the classify reads.
  * @param addresses - The advertised IP addresses, in the order the browser would list them. Defaults to a single TEST-NET-1 address.
@@ -914,19 +910,8 @@ export function makeTestDevice(overrides: Partial<RatgdoDevice> = {}): RatgdoDev
 export function makeRatgdoService(txt: Partial<Record<RatgdoTxtKey, Nullable<string>>>, addresses: readonly [string, ...string[]] = ["192.0.2.10"]): MdnsService {
 
   const label = txt.mac ?? "ratgdo";
-  const strings: string[] = [];
 
-  for(const [ key, value ] of Object.entries(txt)) {
-
-    if(value === undefined) {
-
-      continue;
-    }
-
-    strings.push((value === null) ? key : (key + "=" + value));
-  }
-
-  return makeService({ addresses, host: "ratgdo-" + label, instance: label, port: 6053, serviceType: RATGDO_MDNS_SERVICE_TYPE.replace(/\.local$/u, ""), strings });
+  return makeService({ addresses, host: "ratgdo-" + label, instance: label, port: 6053, serviceType: RATGDO_MDNS_SERVICE_TYPE, strings: makeTxtStrings(txt) });
 }
 
 // The platform double's read surface, as the accessory and its configure chain consume it. The construction-boundary cast to RatgdoPlatform happens

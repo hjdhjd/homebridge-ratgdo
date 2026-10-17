@@ -3,7 +3,7 @@
  * discovery.test.ts: Unit tests for the two wire-record readers - the mDNS-service parse and the device-info classification - plus the identity composition,
  * classification, MAC normalization, and validity guards they share.
  */
-import { classifyDeviceInfo, isAdvertisedAt, parseRatgdoService } from "./discovery.ts";
+import { classifyDeviceInfo, parseRatgdoService } from "./discovery.ts";
 import { describe, test } from "node:test";
 import type { DeviceInfo } from "esphome-client";
 import type { Nullable } from "homebridge-plugin-utils";
@@ -108,29 +108,14 @@ describe("parseRatgdoService", () => {
 
   describe("the address this plugin dials", () => {
 
-    /* The pick's whole contract, as a table. Each row is a set of advertised addresses and the one address the plugin dials out of it, and the pairs of rows that
-     * carry the same set in two orders are the rows that hold the pick to the set rather than to the listing order - the property both consumers depend on, since
-     * each reads a changed address as the device having moved. An expectation of null is a service the validity guard refuses for having nothing dialable.
+    /* The ranking is the library's dialAddress. These rows hold the classifier to that pick: a dual-stack set listed either way round is dialed at the address the whole
+     * set ranks first rather than at its first-listed address, and a service whose advertisement offers nothing dialable is refused, which an expectation of null marks.
      */
     const rows: { addresses: string[]; expected: Nullable<string>; why: string }[] = [
 
-      { addresses: ["192.0.2.10"], expected: "192.0.2.10", why: "a device advertising only IPv4 is dialed there" },
       { addresses: [ "2001:db8::1", "192.0.2.10" ], expected: "2001:db8::1", why: "a dual-stack device is dialed over IPv6" },
       { addresses: [ "192.0.2.10", "2001:db8::1" ], expected: "2001:db8::1", why: "the same dual-stack set listed the other way answers the same address" },
-      { addresses: [ "192.0.2.10", "fd00::1", "2001:db8::1" ], expected: "fd00::1", why: "a unique-local address outranks a global one, which an ISP prefix can rotate" },
-      { addresses: [ "2001:db8::1", "fd00::1" ], expected: "fd00::1", why: "the unique-local preference holds with the global address listed first" },
-      { addresses: [ "fd00::2", "fd00::1" ], expected: "fd00::1", why: "within the unique-local class the lowest address wins, not the first listed" },
-      { addresses: [ "fd00::1", "fd00::2" ], expected: "fd00::1", why: "the same unique-local pair listed the other way answers the same address" },
-      { addresses: [ "2001:db8::2", "2001:db8::1" ], expected: "2001:db8::1", why: "within the global class the lowest address wins, not the first listed" },
-      { addresses: [ "2001:db8::1", "2001:db8::2" ], expected: "2001:db8::1", why: "the same global pair listed the other way answers the same address" },
-      { addresses: [ "fe80::1%en0", "2001:db8::1" ], expected: "2001:db8::1", why: "a zoned address is never dialed, so the routable one is taken" },
-      { addresses: [ "fe80::1", "192.0.2.10" ], expected: "192.0.2.10", why: "an unzoned link-local address yields to IPv4" },
-      { addresses: [ "fe80::1", "2001:db8::1" ], expected: "2001:db8::1", why: "an unzoned link-local address yields to a routable IPv6 address" },
-      { addresses: [ "febf::1", "192.0.2.10" ], expected: "192.0.2.10", why: "the link-local range runs to febf, matching the library's own fe80::/10 test" },
-      { addresses: [ "fe80::2", "fe80::1" ], expected: "fe80::1", why: "among link-local addresses of last resort the lowest wins, not the first listed" },
-      { addresses: [ "fe80::1%en0", "192.0.2.10" ], expected: "192.0.2.10", why: "a zoned address is skipped in favor of IPv4" },
-      { addresses: ["fe80::1%en0"], expected: null, why: "a device advertising nothing but a zoned address cannot be reached and is not classified" },
-      { addresses: [], expected: null, why: "a service advertising no address at all cannot be connected to" }
+      { addresses: ["fe80::1%en0"], expected: null, why: "a device advertising nothing but a zoned address cannot be reached and is not classified" }
     ];
 
     for(const { addresses, expected, why } of rows) {
@@ -140,38 +125,6 @@ describe("parseRatgdoService", () => {
         // The address list is composed onto the resolved service directly rather than through the fixture builder's parameter, because that builder encodes real
         // AAAA records and refuses a zone - and the classify reads nothing but service.addresses.
         assert.equal(parseRatgdoService({ ...makeRatgdoService(ratgdoTxt), addresses })?.address ?? null, expected, why);
-      });
-    }
-  });
-
-  describe("isAdvertisedAt - the membership test both connection owners ask", () => {
-
-    /* The predicate's contract as a table, one row per behavior the platform and the status feed share. Each row is the address a live connection was opened at, the
-     * list the device advertises now, and whether that connection is still a connection to this device. The rows where an advertised held address is not the address
-     * the pick would choose are the ones that earn the predicate: those are exactly the healthy connections a comparison against the pick tears down.
-     */
-    const rows: { addresses: string[]; advertised: boolean; held: string; why: string }[] = [
-
-      { addresses: ["192.0.2.10"], advertised: true, held: "192.0.2.10", why: "a device advertising the one address its connection uses has not moved" },
-      { addresses: ["192.0.2.11"], advertised: false, held: "192.0.2.10", why: "a device advertising a different address and nothing else has moved" },
-      { addresses: [ "192.0.2.10", "2001:db8::1" ], advertised: false, held: "fd00::1",
-        why: "a held address gone from the list reads as moved, which is also how a lapse of its own record reads - the advertisement cannot tell the two apart" },
-      { addresses: [ "192.0.2.10", "2001:db8::1", "fd00::1" ], advertised: true, held: "2001:db8::1",
-        why: "a preferred record returning moves the pick to fd00::1, but the connection's own address is still advertised, so the device has not moved" },
-      { addresses: [ "fd00::1", "2001:db8::1" ], advertised: true, held: "fd00::1", why: "a set carrying the held address is membership, whatever its order" },
-      { addresses: [ "2001:db8::1", "fd00::1" ], advertised: true, held: "fd00::1", why: "and the same set listed the other way answers the same" },
-      { addresses: [ "2001:db8::1", "192.0.2.10" ], advertised: true, held: "192.0.2.10",
-        why: "a device that gained a higher-ranked IPv6 address still advertises the IPv4 address its connection is on" }
-    ];
-
-    for(const { addresses, advertised, held, why } of rows) {
-
-      test("a connection at " + held + " against [ " + addresses.join(", ") + " ] is " + (advertised ? "still this device" : "stale"), () => {
-
-        const discovered = parseRatgdoService({ ...makeRatgdoService(ratgdoTxt), addresses });
-
-        assert.ok(discovered, "the advertisement classifies, so there is an identity to ask");
-        assert.equal(isAdvertisedAt(discovered, held), advertised, why);
       });
     }
   });

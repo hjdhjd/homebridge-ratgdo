@@ -8,6 +8,7 @@ import { TestClock, capturingLog, expectAt, loggedAt, settle } from "homebridge-
 import { canonicalManualAddress, governingAddress, isRetryableFailure, isZonedAddress, manualAddressList, runManualAddress } from "./manual.ts";
 import { describe, test } from "node:test";
 import type { CapturingLog } from "homebridge-plugin-utils/testing";
+import type { HomebridgePluginLogging } from "homebridge-plugin-utils";
 import type { ManualConnectionFailureReason } from "./connection.ts";
 import type { ManualDialOutcome } from "./manual.ts";
 import { WakeableWait } from "homebridge-plugin-utils";
@@ -183,8 +184,8 @@ describe("governingAddress", () => {
 describe("runManualAddress", () => {
 
   /* Build a loop and everything it runs on: a virtual clock, a wakeable pause bound to a lifetime this test controls, a capturing log, and a dial that answers from
-   * a script of outcomes. The dial records the log it was handed on each attempt, which is how the demotion is observed - the loop hands a different log to an
-   * attempt whose failure it expects to be a repeat.
+   * a script of outcomes. Every attempt writes the same error line through the log it was handed, and the level each attempt's line reaches the capturing log at is
+   * how the demotion is observed.
    */
   const harness = (script: ManualDialOutcome[], options: { served?: () => boolean } = {}) => {
 
@@ -301,6 +302,29 @@ describe("runManualAddress", () => {
 
     assert.equal(diagnostics(rig.log, "error"), 2, "a changed reason ends the quieting, so a new fault following a quieted run is reported in full");
     assert.equal(rig.dialed.length, 3, "and the loop ended on that final reason rather than pausing again");
+  });
+
+  test("a line the kept connection writes after its attempt has ended reaches the log at its own level", async () => {
+
+    // A dial that connects hands its client the log it was given, and the client keeps writing through it for the connection's whole life. Once the attempt has
+    // answered there is no verdict left for a later line to wait on, so it has to reach the log at the level it was written at.
+    const clock = new TestClock();
+    const lifetime = new AbortController();
+    const log = capturingLog();
+    const pause = new WakeableWait({ clock, signal: lifetime.signal });
+    const kept: HomebridgePluginLogging[] = [];
+
+    await runManualAddress({ address: ADDRESS, dial: async (attemptLog): Promise<ManualDialOutcome> => {
+
+      kept.push(attemptLog);
+
+      return { ok: true };
+    }, isServed: (): boolean => false, log, pause, retrySeconds: RETRY_SECONDS });
+
+    expectAt(kept, 0, "the log the one attempt was handed").warn("The connection reported a fault after its attempt ended.");
+
+    assert.ok(loggedAt(log.entries, "warn", "The connection reported a fault after its attempt ended."),
+      "a line written after the attempt answered is recorded at warn rather than held back with nothing left to release it");
   });
 
   test("a wake ends the pause at once and the loop re-reads whether the address is served", async () => {

@@ -5,13 +5,12 @@
 import type { API, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
 import type { Clock, HomebridgePluginLogging, MdnsDiscovery, MdnsDiscoveryEvent, MqttClient, Nullable } from "homebridge-plugin-utils";
 import { CoalescingTask, FeatureOptions, HbpuAbortError, MQTT_AVAILABILITY_OFFLINE, WakeableWait, createMqttClient, debugGatedLog, discoverServices,
-  formatErrorMessage, mqttConnectionSettings, mqttTopic, prefixedLog, sanitizeName, superviseLoop, systemClock } from "homebridge-plugin-utils";
+  formatErrorMessage, isAdvertisedAt, mqttConnectionSettings, mqttTopic, prefixedLog, sanitizeName, superviseLoop, systemClock } from "homebridge-plugin-utils";
 import type { EntityId, EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
 import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_MANUAL_RETRY_INTERVAL, RATGDO_MDNS_SERVICE_TYPE } from "./settings.ts";
 import { applyDeviceInfo, isEncryptionError, openConnection, openManualConnection } from "./connection.ts";
-import { consolidatedFlag, featureOptionCategories, featureOptions, manualAddressScope, normalizeConfig } from "./options.ts";
+import { featureOptionCategories, featureOptions, manualAddressScope, normalizeConfig } from "./options.ts";
 import { governingAddress, isZonedAddress, manualAddressList, runManualAddress } from "./manual.ts";
-import { isAdvertisedAt, parseRatgdoService } from "./discovery.ts";
 import type { DiscoveredRatgdo } from "./discovery.ts";
 import { LogLevel } from "esphome-client";
 import type { ManualDialOutcome } from "./manual.ts";
@@ -20,6 +19,7 @@ import type { RatgdoDevice } from "./types.ts";
 import type { RatgdoResolvedConfig } from "./options.ts";
 import { mqttTopics } from "./mqtt.ts";
 import { parseBatteryState } from "./protocol/battery.ts";
+import { parseRatgdoService } from "./discovery.ts";
 import { ratgdoInitialStateEntityIds } from "./entities.ts";
 import { translateTelemetry } from "./protocol/telemetry.ts";
 import util from "node:util";
@@ -101,12 +101,13 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.manualPauses = new Map();
 
     /* Assemble the effective configuration. This is where a raw configuration property and a configured feature option meet for every setting the plugin resolves
-     * for itself, so no reader downstream has to know that a setting has two possible homes. The broker URL and the topic prefix are resolved by the library at the
-     * client's construction below, under the same precedence, so they never take a detour through this shape.
+     * for itself, so no reader downstream has to know that a setting has two possible homes. The configuration property's fallback is transitional and ends at the
+     * plugin's next major version, when the option is the setting's only home. The broker URL and the topic prefix are resolved by the library at the client's
+     * construction below, under the same precedence, so they never take a detour through this shape.
      */
     this.config = {
 
-      debug: consolidatedFlag(this.featureOptions, "Log.Debug", legacy.debug),
+      debug: this.featureOptions.consolidatedFlag({ fallback: legacy.debug, option: "Log.Debug" }),
       options: legacy.options
     };
 
@@ -857,7 +858,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     // A live connection at an address the device still advertises needs nothing, whether or not that address is the one the pick now favors: a re-advertisement
     // carrying only a changed TXT record, a changed port, or a changed address list lands here, and the identity fields it might have moved are refreshed through
     // markOnline on the client's own next connect.
-    if(this.connections.has(ratgdo.device.mac) && isAdvertisedAt(discovered, ratgdo.device.address)) {
+    if(this.connections.has(ratgdo.device.mac) && isAdvertisedAt(discovered.addresses, ratgdo.device.address)) {
 
       return;
     }

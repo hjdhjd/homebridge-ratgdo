@@ -13,6 +13,7 @@
  */
 import type { HomebridgePluginLogging, WakeableWait } from "homebridge-plugin-utils";
 import type { ManualConnectionFailureReason } from "./connection.ts";
+import { repeatDemotedLog } from "homebridge-plugin-utils";
 
 /* What a dial attempt answers the loop. Deliberately not the connection outcome: by the time the loop sees an attempt, the platform's closure has already admitted
  * or refused the device and disposed whatever it is not keeping, so there is no client here and nothing for the loop to clean up. Every admitted outcome - configured,
@@ -23,8 +24,8 @@ export type ManualDialOutcome = { ok: true } | { ok: false; reason: ManualConnec
 /* The ports `runManualAddress` runs on.
  *
  * @property address      - The listed address, already in its canonical form (see manualAddressList).
- * @property dial         - Open a connection to this address and hand what answers to the platform, resolving what became of it. It is given the log this attempt
- *                          should speak through, which is not always the loop's own (see below).
+ * @property dial         - Open a connection to this address and hand what answers to the platform, resolving what became of it. The log it is given is the one
+ *                          the loop's repeat-demoting adapter hands each attempt.
  * @property isServed     - Whether some configured device already holds this address, which is the one condition under which the loop has nothing left to do.
  * @property log          - This address's log.
  * @property pause        - The wait between attempts, which the platform wakes when something configures this address.
@@ -38,53 +39,6 @@ export interface RunManualAddressOptions {
   log: HomebridgePluginLogging;
   pause: WakeableWait;
   retrySeconds: number;
-}
-
-/* A log for one dial attempt that holds back whatever the attempt reports at error or warn until the attempt's verdict is known, and then emits it at its own level
- * or demoted to debug.
- *
- * A listed address that is simply not there fails the same way every retry interval for the life of the plugin, and the connect layer reports each failure at error
- * because from where it sits every failure is news. Repeating one line every five minutes forever is not news, it is noise. So the first report of a reason reaches
- * the user at the level the connect layer chose, and an unchanged reason after it goes to debug, where a support request can still find it.
- *
- * Holding the line is what makes that decision correct rather than approximate. Whether a report is a repeat is knowable only once the attempt has classified itself,
- * which is strictly after the line was written - so routing live from the previous attempt's reason would demote exactly the line that matters most, the first report
- * of a new fault arriving after a run of an old one. Everything at info and debug passes straight through, because neither is the noise this exists to suppress.
- *
- * @param log - The address's own log, which every held line eventually reaches.
- *
- * @returns The log to hand the attempt, and the flush that decides how what it said is reported.
- */
-function heldLog(log: HomebridgePluginLogging): { flush: (demote: boolean) => void; log: HomebridgePluginLogging } {
-
-  const held: { level: "error" | "warn"; message: string; parameters: unknown[] }[] = [];
-
-  return {
-
-    flush: (demote: boolean): void => {
-
-      for(const entry of held) {
-
-        if(demote) {
-
-          log.debug(entry.message, ...entry.parameters);
-
-          continue;
-        }
-
-        log[entry.level](entry.message, ...entry.parameters);
-      }
-
-      held.length = 0;
-    },
-    log: {
-
-      debug: log.debug,
-      error: (message: string, ...parameters: unknown[]): void => void held.push({ level: "error", message, parameters }),
-      info: log.info,
-      warn: (message: string, ...parameters: unknown[]): void => void held.push({ level: "warn", message, parameters })
-    }
-  };
 }
 
 /* Reduce one address a user typed to the canonical form everything downstream uses: trimmed, lower-cased, and with one enclosing pair of square brackets removed.
@@ -233,8 +187,12 @@ export function governingAddress(current: string | undefined, candidate: string,
  */
 export async function runManualAddress({ address, dial, isServed, log, pause, retrySeconds }: RunManualAddressOptions): Promise<void> {
 
-  // The reason the previous attempt failed with, which is what makes a repeat tellable from a new fault.
-  let lastReason: ManualConnectionFailureReason | undefined;
+  /* A listed address that is simply not there fails the same way every retry interval for the life of the plugin, and the connect layer reports each failure at error
+   * because from where it sits every failure is news. Repeating one line at every interval forever is not news, it is noise. So the first report of a reason reaches
+   * the user at the level the connect layer chose, and an unchanged reason after it goes to debug, where a support request can still find it. The adapter is built
+   * once, ahead of the loop, because what it remembers from one attempt to the next is what makes a repeat recognizable as one.
+   */
+  const failures = repeatDemotedLog<ManualConnectionFailureReason>(log);
 
   for(;;) {
 
@@ -246,21 +204,14 @@ export async function runManualAddress({ address, dial, isServed, log, pause, re
       return;
     }
 
-    const attempt = heldLog(log);
-
     // Sequential by definition: one attempt at a time against one device, and the next attempt's decisions are made from this one's verdict.
     // eslint-disable-next-line no-await-in-loop
-    const outcome = await dial(attempt.log);
+    const outcome = await failures.attempt(dial, (result) => result.ok ? undefined : result.reason);
 
     if(outcome.ok) {
 
-      attempt.flush(false);
-
       return;
     }
-
-    attempt.flush(outcome.reason === lastReason);
-    lastReason = outcome.reason;
 
     if(!isRetryableFailure(outcome.reason)) {
 
