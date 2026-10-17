@@ -1,21 +1,22 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
  * webui.test.ts: The settings page's trigger paths, exercised against the REAL homebridge-ui/public/ui.mjs running under a boundary double for the webUI framework.
- * Covers the boot warm, the trailing debounce, the send-suppression diff, the epoch refusal, every forced-resend belt, the address-refresh latch and the identity
- * strip it feeds, the feature-options parameters the page declares, the legacy-settings migration's write path, and the shared route constants both halves address.
+ * Covers the boot warm, the trailing debounce, the send-suppression diff, every forced-resend belt, the address-refresh latch and the identity strip it feeds, the
+ * feature-options parameters the page declares, the legacy-settings migration's write path, and the shared route constants both halves address.
  *
  * The page is the real module, not a re-implementation: the harness routes its framework specifiers to the shipped browser files and its webUI shell to the double,
  * so the feature-option engine that resolves each device's key and the configuration session that stages the migration are the library's own. What the fakes observe
- * is therefore the page's behavior rather than a restatement of it - the host's request log, the double's handler store and counters, and the fake document's state.
+ * is therefore the page's behavior rather than a restatement of it - the host's request log, the listener records each fake keeps for what the page registered on
+ * it, the double's counters, and the fake document's state.
  */
-import type { FakeCatalog, FakeConfigEntry, FakeDevice, FakeElement } from "./webui-double.helpers.ts";
-import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE, STATUS_WARM_ROUTE, defaultConfig, defaultDevices, realCatalog } from "./webui-double.helpers.ts";
+import type { FakeCatalog, FakeConfigEntry, FakeDevice, FakeElement, RecordedLog } from "./webui-double.helpers.ts";
+import { LIBRARY_UI_DIR, loadUi } from "./webui.helpers.ts";
+import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE, STATUS_WARM_ROUTE, defaultConfig, defaultDevices, fire, realCatalog, webUi } from "./webui-double.helpers.ts";
 import { describe, test } from "node:test";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import type { LoadedUi } from "./webui.helpers.ts";
 import { RATGDO_VARIANT_LABELS } from "./types.ts";
 import assert from "node:assert/strict";
-import { loadUi } from "./webui.helpers.ts";
 import { settle } from "homebridge-plugin-utils/testing";
 
 // The two fixture devices' macs, and the key configured against the first of them.
@@ -330,27 +331,6 @@ describe("the ratgdo settings page", () => {
     });
   });
 
-  describe("the epoch check", () => {
-
-    test("refuses a send from a page copy the window has retired", async (t) => {
-
-      t.mock.timers.enable({ apis: ["setTimeout"] });
-
-      using page = await loadUi();
-
-      const before = warmSends(page).length;
-
-      // The visibility belt is a forced path, so the remembered set is cleared and the recompute runs all the way to its last condition before the send.
-      page.document.visibilityState = "visible";
-      page.double.fire("visibilitychange");
-      page.double.epoch.abort();
-
-      await releaseDebounce(t.mock.timers);
-
-      assert.equal(warmSends(page).length, before, "a retired page copy sends nothing, even on a forced path with the remembered set cleared");
-    });
-  });
-
   describe("the forced-resend belts", () => {
 
     test("the visibility belt re-sends an unchanged set on a return to the foreground", async (t) => {
@@ -362,7 +342,7 @@ describe("the ratgdo settings page", () => {
       const before = warmSends(page).length;
 
       page.document.visibilityState = "visible";
-      page.double.fire("visibilitychange");
+      fire(page.document, "visibilitychange");
 
       await releaseDebounce(t.mock.timers);
 
@@ -378,7 +358,7 @@ describe("the ratgdo settings page", () => {
       const before = warmSends(page).length;
 
       page.document.visibilityState = "hidden";
-      page.double.fire("visibilitychange");
+      fire(page.document, "visibilitychange");
 
       await releaseDebounce(t.mock.timers);
 
@@ -424,14 +404,14 @@ describe("the ratgdo settings page", () => {
       const before = warmSends(page).length;
 
       // configChanged feeds the plain debounced recompute rather than the forced chokepoint, so the diff still governs whether it sends.
-      page.double.fire("configChanged");
+      fire(page.host, "configChanged");
 
       await releaseDebounce(t.mock.timers);
 
       assert.equal(warmSends(page).length, before, "a config change over unchanged keys sends nothing");
 
       setOptions(page, keyEntry(MAC, KEY));
-      page.double.fire("configChanged");
+      fire(page.host, "configChanged");
 
       await releaseDebounce(t.mock.timers);
 
@@ -449,7 +429,7 @@ describe("the ratgdo settings page", () => {
 
       for(let push = 0; push < 3; push++) {
 
-        page.double.fire("status", { data: { kind: "connecting" } });
+        fire(page.host, "status", { data: { kind: "connecting" } });
       }
 
       await settle();
@@ -661,7 +641,7 @@ describe("the ratgdo settings page", () => {
 
       using page = await loadUi({ addresses: { [MAC]: "192.0.2.10" } });
 
-      page.double.fire("status", { data: { kind: "connecting" } });
+      fire(page.host, "status", { data: { kind: "connecting" } });
 
       await settle();
 
@@ -696,34 +676,51 @@ describe("the ratgdo settings page's Add Device card", () => {
     return found;
   };
 
-  // Open the card and hand back the fields and buttons a row drives, so each row says what it is doing rather than re-finding elements.
-  const openCard = (page: LoadedUi): { address: FakeElement; key: FakeElement; region: FakeElement; save: FakeElement; test: FakeElement } => {
+  /* Open the card and hand back what a row drives and reads, so each row says what it is doing rather than re-finding elements. The verdict line is captured here, by
+   * its role, while the card is held, and every verdict a row reads is read through this element. A released card has left the page, so a walk of the page's
+   * tree would read an empty string whether or not a retired action had painted into the card - and a row asserting that nothing was painted would pass against a
+   * card that was painted.
+   */
+  const openCard = (page: LoadedUi): { address: FakeElement; key: FakeElement; region: FakeElement; save: FakeElement; test: FakeElement; verdict: FakeElement } => {
 
-    page.double.fireOn(byText(page, "Add Device"), "click");
+    fire(byText(page, "Add Device"), "click");
 
     const address = page.document.getElementById("ratgdoAddressField");
     const key = page.document.getElementById("ratgdoKeyField");
-    const region = page.findElement((element) => Object.hasOwn(element.attributes, "data-fo-region") &&
-      element.children.some((child) => (child.textContent === "Add a device by address")));
+    const verdict = page.findElement((element) => (element.attributes["role"] === "status"));
+    const region = address?.parentElement;
 
-    assert.ok(address && key && region, "the card carries its two fields inside its own region");
+    assert.ok(address && key && verdict && region, "the open card stands in the page with its address and key fields and its verdict line");
 
-    return { address, key, region, save: byText(page, "Save"), test: byText(page, "Test Connection") };
+    return { address, key, region, save: byText(page, "Save"), test: byText(page, "Test Connection"), verdict };
   };
 
-  // Whatever the card's verdict line currently says. It is found by its role rather than by position, which is also how a screen reader finds it.
-  const verdict = (page: LoadedUi): string => page.findElement((element) => (element.attributes["role"] === "status"))?.textContent ?? "";
+  // Whether the card is held: standing in the page inside the framework's takeover element, which the page's tree carries only for as long as the takeover lasts.
+  const isHeld = (page: LoadedUi, region: FakeElement): boolean => {
+
+    const container = region.parentElement;
+
+    return (container !== null) && Object.hasOwn(container.attributes, "data-fo-takeover") && (page.findElement((element) => (element === container)) !== null);
+  };
+
+  // Every takeover element standing in the main content, where the framework inserts one. The count is what tells a takeover that replaced the standing one from one
+  // stacked beside it.
+  const takeovers = (page: LoadedUi): FakeElement[] => page.document.getElementById("deviceStatsContainer")?.parentElement?.children
+    .filter((child) => Object.hasOwn(child.attributes, "data-fo-takeover")) ?? [];
+
+  // The diagnostics a failed connection test writes to the console. A retired test has no failure to report, so a row about one reads this as empty.
+  const probeDiagnostics = (page: LoadedUi): RecordedLog[] => page.console.errors.filter((entry) => (entry.message === "The device connection test failed."));
 
   describe("mounting", () => {
 
-    test("inserts its button into the sidebar and its card region above the settings content, without touching either", async () => {
+    test("inserts its button at the top of the sidebar, and stands the card ahead of the settings content only once it is opened", async () => {
 
       using page = await loadUi();
 
       const sidebar = page.document.getElementById("sidebar");
       const stats = page.document.getElementById("deviceStatsContainer");
 
-      assert.ok(sidebar && stats, "the page markup carries the two mount points");
+      assert.ok(sidebar && stats, "the page markup carries the sidebar and the device-stats region");
 
       const launcher = sidebar.children[0];
 
@@ -732,27 +729,34 @@ describe("the ratgdo settings page's Add Device card", () => {
         "the button sits in a plugin-owned region, so the framework hides and reveals it with the page and never clears it");
       assert.equal(launcher.children[0]?.textContent, "Add Device", "and that region holds the Add Device button");
       assert.equal(sidebar.children[1]?.className, "sidebar-content", "the framework's own sidebar content is still there, after the inserted region");
+      assert.equal(page.findElement((element) => (element.textContent === "Add a device by address")), null,
+        "the card is not in the page until it is opened - mounting it is not opening it");
 
+      const card = openCard(page);
       const main = stats.parentElement;
-      const region = main?.children.find((child) => Object.hasOwn(child.attributes, "data-fo-region"));
+      const container = card.region.parentElement;
 
-      assert.ok(region, "the card's own region was inserted into the main content");
-      assert.ok(main && (main.children.indexOf(region) < main.children.indexOf(stats)), "and it sits ahead of the framework's device-stats region");
-      assert.equal(region.hidden, true, "the card starts closed - mounting it is not opening it");
+      assert.ok(main && container, "the opened card stands inside an element in the main content");
+      assert.ok(Object.hasOwn(container.attributes, "data-fo-takeover"), "opening hands the card to the framework's takeover, which holds it in an element of its own");
+      assert.equal(container.parentElement, main, "that element sits in the main content");
+      assert.equal(main.children.indexOf(container) + 1, main.children.indexOf(stats), "immediately ahead of the framework's device-stats region");
     });
 
     test("builds the card's copy, its labelled fields, and its three actions", async () => {
 
       using page = await loadUi();
 
-      page.double.fireOn(byText(page, "Add Device"), "click");
+      fire(byText(page, "Add Device"), "click");
 
       const address = page.document.getElementById("ratgdoAddressField");
       const key = page.document.getElementById("ratgdoKeyField");
 
       assert.ok(address && key, "both fields exist and carry ids, which is what a label's for attribute resolves against");
       assert.equal(address.attributes["placeholder"], "garage.local or 10.0.0.20", "the address field shows both address shapes a user might type");
-      assert.ok(address.className.includes("font-monospace") && key.className.includes("font-monospace"), "both fields are monospace, since both carry exact text");
+      assert.ok(address.className.split(" ").includes("fo-monospace") && key.className.split(" ").includes("fo-monospace"),
+        "both fields wear the page kit's monospace, since both carry exact text");
+      assert.ok(address.parentElement?.className.split(" ").includes("fo-page"),
+        "the card region carries the page-kit marker, so the framework's dark-mode form-control corrections reach its fields");
       assert.equal(byText(page, "Address").attributes["for"], "ratgdoAddressField", "the address label is associated with its field");
       assert.equal(byText(page, "Encryption key (optional)").attributes["for"], "ratgdoKeyField", "and the key label with its own, naming the key as optional");
 
@@ -764,59 +768,151 @@ describe("the ratgdo settings page's Add Device card", () => {
       assert.ok(page.findElement((element) => (element.attributes["role"] === "status")), "the verdict line is a status region, so each verdict is announced");
     });
 
-    test("mounts once for the page's life, and a later show cycle closes the card rather than rebuilding it", async () => {
+    test("mounts once for the page's life, and a later show cycle ends the takeover rather than rebuilding the card", async () => {
 
       using page = await loadUi();
 
       const sidebar = page.document.getElementById("sidebar");
       const card = openCard(page);
 
-      assert.equal(card.region.hidden, false, "the card is open");
+      assert.ok(isHeld(page, card.region), "the card is open");
 
       await page.double.show();
       await settle();
 
       assert.equal(sidebar?.children.filter((child) => Object.hasOwn(child.attributes, "data-fo-region")).length, 1,
         "a second cycle builds no second button - the framework promises never to clear a plugin region, so rebuilding would only duplicate it");
-      assert.equal(card.region.hidden, true, "and the framework rebuilding the page closes the card");
+      assert.equal(isHeld(page, card.region), false, "and the new cycle ends the takeover, so the card leaves the page");
     });
 
-    test("closes on Cancel and on a sidebar navigation click, but not on a click of its own button", async () => {
+    test("gives the content area back on Cancel, and the launcher reopens the card with its fields and verdict cleared", async () => {
+
+      using page = await loadUi({ probe: async () => ANSWERED });
+
+      const card = openCard(page);
+
+      card.address.value = "10.0.0.20";
+      card.key.value = KEY;
+      fire(card.test, "click");
+
+      await settle();
+
+      assert.equal(card.verdict.textContent, "This device answered.", "the card has a verdict standing before it closes");
+
+      fire(byText(page, "Cancel"), "click");
+
+      assert.equal(isHeld(page, card.region), false, "Cancel releases the takeover, so the card leaves the page");
+
+      const reopened = openCard(page);
+
+      assert.equal(reopened.region, card.region, "the launcher reopens the same card rather than building another");
+      assert.ok(isHeld(page, reopened.region), "the card is held again");
+      assert.equal(reopened.address.value, "", "the address field opens empty");
+      assert.equal(reopened.key.value, "", "and so does the key field");
+      assert.equal(reopened.verdict.textContent, "", "and the verdict from the last visit is gone");
+    });
+
+    test("leaves the page when a re-show fails, and the launcher opens it again once a cycle establishes", async () => {
 
       using page = await loadUi();
 
       const card = openCard(page);
 
-      page.double.fireOn(byText(page, "Cancel"), "click");
+      page.double.failNextShow = true;
 
-      assert.equal(card.region.hidden, true, "Cancel closes the card");
+      await page.double.show();
+      await settle();
 
+      assert.equal(isHeld(page, card.region), false, "a re-show tears the standing cycle down before it fails, so the card leaves the page");
+
+      await page.double.show();
+      await settle();
+
+      const reopened = openCard(page);
+
+      assert.ok(isHeld(page, reopened.region), "the next cycle that establishes gives the area again, and the launcher opens the card into it");
+    });
+
+    test("a second open while the card is held ends the first takeover, clears the card, and retires the test in flight", async () => {
+
+      const answer = Promise.withResolvers<unknown>();
+
+      using page = await loadUi({ probe: () => answer.promise });
+
+      const card = openCard(page);
+
+      card.address.value = "10.0.0.20";
+      card.key.value = KEY;
+      fire(card.test, "click");
+
+      await settle();
+
+      assert.equal(card.verdict.textContent, "Connecting to the device...", "a test is in flight when the card is opened again");
+
+      const second = openCard(page);
+      const standing = takeovers(page);
+
+      assert.equal(standing.length, 1, "the page carries exactly one takeover element - the second open ended the first rather than stacking beside it");
+      assert.ok(standing[0]?.children.includes(second.region), "and that element holds the card");
+      assert.equal(second.address.value, "", "the second open clears the address");
+      assert.equal(second.key.value, "", "and the key");
+      assert.equal(second.verdict.textContent, "", "and the verdict");
+
+      answer.resolve(ANSWERED);
+
+      await settle();
+
+      assert.equal(card.verdict.textContent, "", "the test retired with the takeover it started under, so its late answer paints nothing into the card");
+    });
+
+    test("stays held through a click that does not navigate, since the page listens on none of the sidebar's own surfaces", async () => {
+
+      using page = await loadUi();
+
+      const card = openCard(page);
       const sidebar = page.document.getElementById("sidebar");
+      const content = page.document.querySelector("sidebar-content");
 
-      assert.ok(sidebar, "the sidebar is the element the device rows are inside");
+      assert.ok(sidebar && content, "the page markup carries the sidebar and its content wrapper");
 
-      page.double.fireOn(byText(page, "Add Device"), "click");
+      /* Only a navigation ends the takeover, and that rule is the framework's. `fire` does not model bubbling, so the harness observes this as the absence of a click
+       * listener on every surface a stray click could reach - the sidebar, its content wrapper, and the document - which leaves nothing a non-navigating click could
+       * reach that would release the card.
+       */
+      assert.throws(() => fire(sidebar, "click"), /registered no click listener/, "the page listens for no click on the sidebar");
+      assert.throws(() => fire(content, "click"), /registered no click listener/, "nor on the sidebar's content wrapper");
+      assert.throws(() => fire(page.document, "click"), /registered no click listener/, "nor on the document");
+      assert.ok(isHeld(page, card.region), "and the card is still held");
+    });
 
-      assert.equal(card.region.hidden, false, "the card reopens");
+    test("leaves the page on a navigation, and a test in flight renders nothing and reports nothing when it answers", async () => {
 
-      // A click on the plugin's own launcher travels through the sidebar too, and must not close the card it just opened.
-      page.double.fireOn(sidebar, "click", { target: byText(page, "Add Device") });
+      const answer = Promise.withResolvers<unknown>();
 
-      assert.equal(card.region.hidden, false, "a click on the card's own button is what opened it, so it is excluded from the close");
+      using page = await loadUi({ probe: () => answer.promise });
 
-      page.double.fireOn(sidebar, "click", { target: page.document.querySelector("sidebar-content") });
+      const card = openCard(page);
 
-      assert.equal(card.region.hidden, true, "selecting a device is the user moving on, so the card closes");
+      card.address.value = "10.0.0.20";
+      fire(card.test, "click");
 
-      page.double.fireOn(byText(page, "Add Device"), "click");
+      await settle();
 
-      assert.equal(card.region.hidden, false, "the card reopens once more");
+      page.double.navigate();
 
-      // A click landing on the sidebar's own padding, where the target IS the sidebar rather than anything inside the launcher. contains() answers false for it, so
-      // it closes - which is the right answer, since the user clicked away from the card.
-      page.double.fireOn(sidebar, "click", { target: sidebar });
+      assert.equal(isHeld(page, card.region), false, "the user moving the selection gives the content area back, so the card leaves the page");
 
-      assert.equal(card.region.hidden, true, "a click on the sidebar itself is still a click away from the card, so it closes");
+      // The retirement settles the test's bounded await before the answer lands, as it does in a browser where the network answers long after the abort, so the
+      // test ends through its failure path - the one path that could write a console diagnostic.
+      await settle();
+
+      answer.resolve(ANSWERED);
+
+      await settle();
+
+      assert.equal(card.verdict.textContent, "Connecting to the device...",
+        "the late answer renders nothing into the card - its verdict is what it last said while held");
+      assert.deepEqual(probeDiagnostics(page), [], "and a retired test has no failure to report, so nothing reaches the console");
     });
   });
 
@@ -829,11 +925,11 @@ describe("the ratgdo settings page's Add Device card", () => {
       const card = openCard(page);
       const before = page.host.requests.filter((entry) => (entry.route === STATUS_PROBE_ROUTE)).length;
 
-      page.double.fireOn(card.test, "click");
+      fire(card.test, "click");
 
       await settle();
 
-      assert.equal(verdict(page), "Please enter the device's address.", "the card says what is missing");
+      assert.equal(card.verdict.textContent, "Please enter the device's address.", "the card says what is missing");
       assert.equal(page.host.requests.filter((entry) => (entry.route === STATUS_PROBE_ROUTE)).length, before, "and nothing was asked of the server");
     });
 
@@ -845,7 +941,7 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       card.address.value = "  10.0.0.20  ";
       card.key.value = " secret ";
-      page.double.fireOn(card.test, "click");
+      fire(card.test, "click");
 
       await settle();
 
@@ -853,7 +949,7 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       assert.equal(probes.length, 1, "one test is one request");
       assert.deepEqual(probes[0]?.body, { address: "10.0.0.20", psk: "secret" }, "the typed address and key are sent trimmed, exactly as typed otherwise");
-      assert.equal(verdict(page), "This device answered.", "the card says so plainly");
+      assert.equal(card.verdict.textContent, "This device answered.", "the card says so plainly");
 
       const readout = page.findElement((element) => (element.textContent === "MAC: "))?.parentElement;
 
@@ -880,14 +976,14 @@ describe("the ratgdo settings page's Add Device card", () => {
       const card = openCard(page);
 
       card.address.value = "10.0.0.20";
-      page.double.fireOn(card.test, "click");
+      fire(card.test, "click");
 
       await settle();
 
       assert.ok(page.findElement((element) => (element.textContent === "North Door")), "the first device's name is shown");
 
       card.address.value = "10.0.0.21";
-      page.double.fireOn(card.test, "click");
+      fire(card.test, "click");
 
       await settle();
 
@@ -922,12 +1018,12 @@ describe("the ratgdo settings page's Add Device card", () => {
         const card = openCard(page);
 
         card.address.value = "10.0.0.20";
-        page.double.fireOn(card.test, "click");
+        fire(card.test, "click");
 
         // eslint-disable-next-line no-await-in-loop
         await settle();
 
-        assert.match(verdict(page), expected, "the card explains " + reason + " in its own sentence");
+        assert.match(card.verdict.textContent, expected, "the card explains " + reason + " in its own sentence");
       }
 
       using plaintext = await loadUi({ probe: async () => ({ ...ANSWERED, encrypted: false }) });
@@ -935,7 +1031,7 @@ describe("the ratgdo settings page's Add Device card", () => {
       const card = openCard(plaintext);
 
       card.address.value = "10.0.0.20";
-      plaintext.double.fireOn(card.test, "click");
+      fire(card.test, "click");
 
       await settle();
 
@@ -954,12 +1050,12 @@ describe("the ratgdo settings page's Add Device card", () => {
       const card = openCard(page);
 
       card.address.value = "10.0.0.20";
-      page.double.fireOn(card.save, "click");
+      fire(card.save, "click");
 
       await settle();
 
       assert.equal(page.double.featureOptions.commits.length, 0, "a device that refused the connection is never written to the configuration");
-      assert.match(verdict(page), /requires its API encryption key/, "and the card says why rather than claiming a save");
+      assert.match(card.verdict.textContent, /requires its API encryption key/, "and the card says why rather than claiming a save");
     });
 
     test("commits exactly once, with one patch carrying both the address and its key", async () => {
@@ -970,7 +1066,7 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       card.address.value = "10.0.0.20";
       card.key.value = KEY;
-      page.double.fireOn(card.save, "click");
+      fire(card.save, "click");
 
       await settle();
 
@@ -980,8 +1076,9 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       assert.ok(options.some((entry) => (entry === "Enable.Device.Address=10.0.0.20")), "the one patch lists the address");
       assert.ok(options.some((entry) => (entry === ("Enable.Device.Encryption.Key.10-0-0-20=" + KEY))), "and carries its key at the address identity");
-      assert.equal(verdict(page), "Saved. Restart Homebridge to add this device.", "a new device is a restart away from HomeKit, and the card says so");
-      assert.equal(card.region.hidden, true, "a saved card closes");
+      assert.deepEqual(page.host.toasts, [{ channel: "success", message: "Saved. Restart Homebridge to add this device." }],
+        "a new device is a restart away from HomeKit, and one success toast says so");
+      assert.equal(isHeld(page, card.region), false, "a saved card gives the content area back");
     });
 
     test("tells a listed address with a new key apart from one with nothing to change", async () => {
@@ -993,63 +1090,68 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       first.address.value = "10.0.0.20";
       first.key.value = KEY;
-      rewritten.double.fireOn(first.save, "click");
+      fire(first.save, "click");
 
       await settle();
 
       assert.equal(rewritten.double.featureOptions.commits.length, 1, "a listed address with a new key is still a write");
-      assert.equal(verdict(rewritten), "Updated the key for this device.", "and its confirmation says what actually changed, not that a device was added");
+      assert.deepEqual(rewritten.host.toasts, [{ channel: "success", message: "Updated the key for this device." }],
+        "and its confirmation says what actually changed, not that a device was added");
 
       using unchanged = await loadUi({ config: configWith("Enable.Device.Address=10.0.0.20"), probe: async () => ANSWERED });
 
       const second = openCard(unchanged);
 
       second.address.value = "10.0.0.20";
-      unchanged.double.fireOn(second.save, "click");
+      fire(second.save, "click");
 
       await settle();
 
       assert.equal(unchanged.double.featureOptions.commits.length, 0, "nothing would change, so no write is opened at all");
-      assert.equal(verdict(unchanged), "This device is already listed.", "and the card says so rather than offering a pointless restart");
+      assert.equal(second.verdict.textContent, "This device is already listed.", "and the card says so rather than offering a pointless restart");
     });
 
-    test("renders the error for a staged or failed write, and nothing at all for a superseded one", async () => {
+    test("renders the host's error for a failed write and keeps the card open", async () => {
 
-      const rows = [
+      using page = await loadUi({ probe: async () => ANSWERED });
 
-        { expected: "the host refused the write", kind: "failed", open: true },
-        { expected: "the write never reached disk", kind: "staged", open: true }
-      ];
+      const card = openCard(page);
 
-      for(const row of rows) {
-
-        // eslint-disable-next-line no-await-in-loop
-        using page = await loadUi({ probe: async () => ANSWERED });
-
-        const card = openCard(page);
-
-        page.double.featureOptions.nextCommit = { error: new Error(row.expected), kind: row.kind as "failed" };
-        card.address.value = "10.0.0.20";
-        page.double.fireOn(card.save, "click");
-
-        // eslint-disable-next-line no-await-in-loop
-        await settle();
-
-        assert.equal(verdict(page), row.expected, "a " + row.kind + " write shows the host's own message rather than a claim of success");
-        assert.equal(card.region.hidden, !row.open, "and the card stays open, since the user may want to try again");
-      }
-
-      using superseded = await loadUi({ probe: async () => ANSWERED });
-
-      const card = openCard(superseded);
-
-      superseded.double.featureOptions.nextCommit = { kind: "superseded" };
+      page.double.featureOptions.nextCommit = { error: new Error("the host refused the write"), kind: "failed" };
       card.address.value = "10.0.0.20";
-      superseded.double.fireOn(card.save, "click");
+      fire(card.save, "click");
 
       await settle();
 
-      assert.equal(verdict(superseded), "This device answered.", "a superseded write belongs to a retired page copy, so the card renders nothing new");
+      assert.equal(card.verdict.textContent, "the host refused the write", "a failed write shows the host's own message rather than a claim of success");
+      assert.ok(isHeld(page, card.region), "and the card stays open, since the user may want to try again");
+      assert.deepEqual(page.host.toasts, [], "a write that changed nothing raises no toast");
+    });
+
+    test("confirms a staged write with a warning toast, gives the content area back, and schedules the warm", async (t) => {
+
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+
+      using page = await loadUi({ probe: async () => ANSWERED });
+
+      const card = openCard(page);
+      const warms = warmSends(page).length;
+
+      page.double.featureOptions.nextCommit = { error: new Error("the write never reached disk"), kind: "staged" };
+      card.address.value = "10.0.0.20";
+      fire(card.save, "click");
+
+      await settle();
+
+      const warning = "This device has been saved, but Homebridge could not write the configuration file. Save the plugin's settings to keep the change.";
+
+      assert.deepEqual(page.host.toasts, [{ channel: "warning", message: warning }],
+        "a staged write reached the host's memory but not the disk, so one warning toast asks for the user's own save");
+      assert.equal(isHeld(page, card.region), false, "the card gives the content area back, since the device was saved");
+
+      await releaseDebounce(t.mock.timers);
+
+      assert.equal(warmSends(page).length, warms + 1, "the page is reconciled on what the host holds, so the warm carrying the new address sends once");
     });
   });
 
@@ -1067,11 +1169,11 @@ describe("the ratgdo settings page's Add Device card", () => {
       const probes = page.host.requests.filter((entry) => (entry.route === STATUS_PROBE_ROUTE)).length;
 
       card.address.value = "fe80::1%en0";
-      page.double.fireOn(card.save, "click");
+      fire(card.save, "click");
 
       await settle();
 
-      assert.equal(verdict(page), "An address with a zone identifier cannot be dialed. List the device's routable address or hostname instead.",
+      assert.equal(card.verdict.textContent, "An address with a zone identifier cannot be dialed. List the device's routable address or hostname instead.",
         "the card explains the refusal and names what to list instead");
       assert.equal(page.host.requests.filter((entry) => (entry.route === STATUS_PROBE_ROUTE)).length, probes, "no probe is sent for an address nothing can dial");
       assert.equal(page.double.featureOptions.commits.length, 0, "and nothing is written");
@@ -1088,7 +1190,7 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       card.address.value = "  [2001:DB8::5]  ";
       card.key.value = KEY;
-      page.double.fireOn(card.save, "click");
+      fire(card.save, "click");
 
       await settle();
 
@@ -1110,11 +1212,11 @@ describe("the ratgdo settings page's Add Device card", () => {
       const card = openCard(page);
 
       card.address.value = "[2001:DB8::5]";
-      page.double.fireOn(card.save, "click");
+      fire(card.save, "click");
 
       await settle();
 
-      assert.equal(verdict(page), "This device is already listed.", "the two spellings are one address, so there is nothing to add");
+      assert.equal(card.verdict.textContent, "This device is already listed.", "the two spellings are one address, so there is nothing to add");
       assert.equal(page.double.featureOptions.commits.length, 0, "and no write is opened for it");
     });
 
@@ -1134,10 +1236,10 @@ describe("the ratgdo settings page's Add Device card", () => {
 
   describe("actions that outlive the card", () => {
 
-    test("shows the newer answer when two tests overlap, whichever resolves last", async () => {
+    test("shows the newer answer when two tests overlap, whichever resolves last, and reports nothing for the retired one", async () => {
 
-      /* Risk 8's ordering row. The first probe answers LAST and describes a different device, so an implementation without a generation check would paint the first
-       * device's verdict over the second's - the reason a per-action counter exists at all.
+      /* Risk 8's ordering row. The first probe answers LAST and describes a different device, so an implementation without a latest-action guard would paint the first
+       * device's verdict over the second's - the reason the card's actions start on one guard at all.
        */
       const answers = [ Promise.withResolvers<unknown>(), Promise.withResolvers<unknown>() ];
       let issued = 0;
@@ -1147,12 +1249,12 @@ describe("the ratgdo settings page's Add Device card", () => {
       const card = openCard(page);
 
       card.address.value = "10.0.0.20";
-      page.double.fireOn(card.test, "click");
+      fire(card.test, "click");
 
       await settle();
 
       card.address.value = "10.0.0.21";
-      page.double.fireOn(card.test, "click");
+      fire(card.test, "click");
 
       await settle();
 
@@ -1165,7 +1267,63 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       await settle();
 
-      assert.match(verdict(page), /did not answer in time/, "the verdict is the newer action's, and the slow answer to the retired one paints nothing");
+      assert.match(card.verdict.textContent, /did not answer in time/, "the verdict is the newer action's, and the slow answer to the retired one paints nothing");
+      assert.deepEqual(probeDiagnostics(page), [], "and the retired test has no failure to report, so nothing reaches the console");
+    });
+
+    test("keeps the refusal of an empty address when an earlier test answers afterward", async () => {
+
+      const answer = Promise.withResolvers<unknown>();
+
+      using page = await loadUi({ probe: () => answer.promise });
+
+      const card = openCard(page);
+
+      card.address.value = "10.0.0.20";
+      fire(card.test, "click");
+
+      await settle();
+
+      // A Test click is a new action from the click itself, so the refusal below retires the test still in flight even though it sends nothing of its own.
+      card.address.value = "";
+      fire(card.test, "click");
+
+      await settle();
+
+      answer.resolve(ANSWERED);
+
+      await settle();
+
+      assert.equal(card.verdict.textContent, "Please enter the device's address.", "the earlier answer paints nothing over the refusal the user is looking at");
+    });
+
+    test("keeps a failed save's message when a test started before the save answers afterward", async () => {
+
+      // The first probe is the test's, held open; every later one is the save's own probe, which answers at once.
+      const tested = Promise.withResolvers<unknown>();
+      let issued = 0;
+
+      using page = await loadUi({ probe: () => ((issued++ === 0) ? tested.promise : Promise.resolve(ANSWERED)) });
+
+      const card = openCard(page);
+
+      page.double.featureOptions.nextCommit = { error: new Error("the host refused the write"), kind: "failed" };
+      card.address.value = "10.0.0.20";
+      fire(card.test, "click");
+
+      await settle();
+
+      fire(card.save, "click");
+
+      await settle();
+
+      assert.equal(card.verdict.textContent, "the host refused the write", "the save ran its own test and renders its failed write");
+
+      tested.resolve(ANSWERED);
+
+      await settle();
+
+      assert.equal(card.verdict.textContent, "the host refused the write", "the save retired the test in flight, so the test's late answer does not overwrite it");
     });
 
     test("renders nothing and schedules no warm when a probe answers after the card closed", async () => {
@@ -1179,30 +1337,34 @@ describe("the ratgdo settings page's Add Device card", () => {
       const warms = warmSends(page).length;
 
       card.address.value = "10.0.0.20";
-      page.double.fireOn(card.test, "click");
+      fire(card.test, "click");
 
       await settle();
 
-      page.double.fireOn(byText(page, "Cancel"), "click");
+      fire(byText(page, "Cancel"), "click");
 
-      assert.equal(card.region.hidden, true, "the card is closed while the test is still running");
+      assert.equal(isHeld(page, card.region), false, "the card is closed while the test is still running");
 
       answer.resolve(ANSWERED);
 
       await settle();
 
-      assert.equal(card.region.hidden, true, "the late answer does not reopen the card");
-      assert.equal(verdict(page), "Connecting to the device...", "and it renders nothing into it - the verdict is still whatever the card last said while open");
+      assert.equal(isHeld(page, card.region), false, "the late answer does not reopen the card");
+      assert.equal(card.verdict.textContent, "Connecting to the device...",
+        "and it renders nothing into it - the verdict is still whatever the card last said while open");
       assert.equal(page.double.featureOptions.commits.length, 0, "a probe that never reached a save writes nothing");
       assert.equal(warmSends(page).length, warms, "and schedules no warm recompute, since nothing was saved");
     });
 
-    test("leaves a commit that lands after the card closed written exactly once, and renders nothing", async () => {
+    test("leaves a commit that lands after the card closed written exactly once, raising no toast and scheduling no warm", async (t) => {
 
       /* The ruling's named row, commit half. A commit already in flight cannot be recalled, so the configuration IS written - what the close suppresses is
-       * everything after the write: the confirmation, the close, and the warm recompute. The distinguishing observation is the commit COUNT, because an
-       * implementation that retried or re-entered on the late result would write twice.
+       * everything after the write: the confirmation, the release, and the warm recompute. The distinguishing observation is the commit COUNT, because an
+       * implementation that retried or re-entered on the late result would write twice. The debounce is released before the warms are counted, because the write
+       * moved the address list, so a warm the page wrongly scheduled would send rather than hide inside the window.
        */
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+
       const held = Promise.withResolvers<boolean>();
 
       using page = await loadUi({ probe: async () => ANSWERED });
@@ -1221,21 +1383,67 @@ describe("the ratgdo settings page's Add Device card", () => {
       const warms = warmSends(page).length;
 
       card.address.value = "10.0.0.20";
-      page.double.fireOn(card.save, "click");
+      fire(card.save, "click");
 
       await settle();
 
-      page.double.fireOn(byText(page, "Cancel"), "click");
+      fire(byText(page, "Cancel"), "click");
 
-      assert.equal(card.region.hidden, true, "the card is closed while the write is still in flight");
+      assert.equal(isHeld(page, card.region), false, "the card is closed while the write is still in flight");
 
       held.resolve(true);
 
       await settle();
 
       assert.equal(page.double.featureOptions.commits.length, 1, "the write that was already in flight still happened, exactly once");
-      assert.notEqual(verdict(page), "Saved. Restart Homebridge to add this device.", "but its confirmation renders into nothing, since the card is closed");
+      assert.deepEqual(page.host.toasts, [], "but no confirmation is raised, since the card is closed");
+
+      await releaseDebounce(t.mock.timers);
+
       assert.equal(warmSends(page).length, warms, "and no warm recompute is scheduled for a card the user dismissed");
     });
+  });
+});
+
+/* The boundary double, held to the library it stands in for.
+ *
+ * The page runs against a hand-kept double, so a member the library has dropped but the double still carries would let every row above pass over a page that throws
+ * in a browser. The library's own classes are the source the double is checked against: every page-facing member the double carries must be one they carry too.
+ */
+describe("the webUI boundary double", () => {
+
+  test("carries only members the library's own webUi and webUiFeatureOptions classes carry", async () => {
+
+    /* The double's own test-facing methods, which have no library counterpart by design and which the page never reaches: `navigate` stands in for the user moving
+     * the sidebar selection, and `resume` for the framework's clock-gap detector waking a page that froze.
+     */
+    const testFacingShell = [ "navigate", "resume" ];
+
+    // The feature-options facade's test-facing members: `commits` records every coordinated write the page made, and `nextCommit` is how a test chooses what the
+    // next write answers.
+    const testFacingFacade = [ "commits", "nextCommit" ];
+
+    // The library's instance fields, which its class declares on each instance rather than on the prototype, so no prototype shows them: `statusPanel` is the
+    // handle each show cycle mints for the status view.
+    const libraryInstanceFields = ["statusPanel"];
+
+    // The library's browser modules, imported by file URL: the harness reroutes only the bare webUi specifier to the double, so these are the real classes.
+    const shell = (await import(LIBRARY_UI_DIR + "webUi.mjs")) as { webUi: { prototype: object } };
+    const page = (await import(LIBRARY_UI_DIR + "webUi-featureOptions.mjs")) as { webUiFeatureOptions: { prototype: object } };
+
+    for(const member of Object.getOwnPropertyNames(webUi.prototype).filter((name) => !testFacingShell.includes(name))) {
+
+      assert.ok(Object.hasOwn(shell.webUi.prototype, member), "the double's webUi carries " + member + ", which the library's webUi does not");
+    }
+
+    using loaded = await loadUi();
+
+    const facade = Object.keys(loaded.double.featureOptions).filter((name) => !testFacingFacade.includes(name) && !libraryInstanceFields.includes(name));
+
+    for(const member of facade) {
+
+      assert.ok(Object.hasOwn(page.webUiFeatureOptions.prototype, member),
+        "the double's featureOptions carries " + member + ", which the library's webUiFeatureOptions does not");
+    }
   });
 });

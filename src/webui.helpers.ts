@@ -24,7 +24,7 @@ import { settle } from "homebridge-plugin-utils/testing";
 const DOUBLE_URL = new URL("./webui-double.helpers.ts", import.meta.url).href;
 
 // The directory holding the framework's shipped browser modules, likewise derived from this module's location.
-const LIBRARY_UI_DIR = new URL("../node_modules/homebridge-plugin-utils/dist/ui/", import.meta.url).href;
+export const LIBRARY_UI_DIR = new URL("../node_modules/homebridge-plugin-utils/dist/ui/", import.meta.url).href;
 
 /* Which bare specifiers name a browser module. The match requires a file extension, which is what tells the framework's browser files apart from the package's real
  * export entries: `homebridge-plugin-utils/testing` resolves through the package's own exports map and must keep doing so, while `.../featureOptions.js` has no export
