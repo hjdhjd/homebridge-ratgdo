@@ -23,6 +23,7 @@ import { RatgdoVariant } from "./types.ts";
 import type { RecordedOpenOptions } from "./testing.helpers.ts";
 import type { TestLogEntry } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
+import { setTimeout as delay } from "node:timers/promises";
 
 // What the connection helpers in the suites below hand back: each call's outcome beside the capturing log's entries, and for a recorded attempt the factory as well.
 interface ConnectionAttempt {
@@ -53,17 +54,17 @@ describe("captureInitialState", () => {
   // The device advertises both cover and light; the test varies which of them the snapshot already holds.
   const bothExposed = [ { objectId: "door", type: "cover" }, { objectId: "light", type: "light" } ];
 
-  // A fresh, never-aborted shutdown signal for the cases that resolve normally.
+  // A fresh, never-aborted signal for the rows that resolve.
   const liveSignal = (): AbortSignal => new AbortController().signal;
 
   // A client that advertises cover + light but whose snapshot holds only the cover. The cover + light wait-list therefore reaches the slow path: the light must arrive
-  // by telemetry, or the wait must time out / abort.
+  // by telemetry, or the signal the row passes must end the wait.
   const coverPresentLightPending = (): TestEspHomeClient => new TestEspHomeClient({ entities: bothExposed, snapshot: new Map([[ coverId, makeCoverEvent("door", 0) ]]) });
 
   test("returns the snapshot immediately when the caller declares no required entities", async () => {
 
     const client = new TestEspHomeClient({ snapshot: new Map([[ coverId, makeCoverEvent("door", 0) ]]) });
-    const cache = await captureInitialState({ client: asEspHomeClient(client), expected: [], shutdownSignal: liveSignal() });
+    const cache = await captureInitialState({ client: asEspHomeClient(client), expected: [], signal: liveSignal() });
 
     assert.equal(cache, client.snapshot(), "an empty wait-list resolves with the current cache without subscribing to telemetry");
   });
@@ -72,7 +73,7 @@ describe("captureInitialState", () => {
 
     // The caller wants cover + light, but the device advertises neither (entities is empty), so the intersection is empty and there is nothing to wait for.
     const client = new TestEspHomeClient({ entities: [], snapshot: new Map() });
-    const cache = await captureInitialState({ client: asEspHomeClient(client), expected: [ coverId, lightId ], shutdownSignal: liveSignal() });
+    const cache = await captureInitialState({ client: asEspHomeClient(client), expected: [ coverId, lightId ], signal: liveSignal() });
 
     assert.equal(cache, client.snapshot(), "requiring only entities the firmware does not advertise collapses the wait-list to empty");
   });
@@ -81,7 +82,7 @@ describe("captureInitialState", () => {
 
     const snapshot = new Map([ [ coverId, makeCoverEvent("door", 0) ], [ lightId, makeLightEvent("light", false) ] ]);
     const client = new TestEspHomeClient({ entities: bothExposed, snapshot });
-    const cache = await captureInitialState({ client: asEspHomeClient(client), expected: [ coverId, lightId ], shutdownSignal: liveSignal() });
+    const cache = await captureInitialState({ client: asEspHomeClient(client), expected: [ coverId, lightId ], signal: liveSignal() });
 
     assert.equal(cache, client.snapshot(), "the fast path returns the live cache reference when a complete snapshot satisfies the wait with no telemetry delivery");
   });
@@ -90,7 +91,7 @@ describe("captureInitialState", () => {
 
     // captureInitialState subscribes synchronously before its first await, so delivering the missing light after the call resolves the pending wait.
     const client = coverPresentLightPending();
-    const pending = captureInitialState({ client: asEspHomeClient(client), expected: [ coverId, lightId ], shutdownSignal: liveSignal(), timeoutSeconds: 1 });
+    const pending = captureInitialState({ client: asEspHomeClient(client), expected: [ coverId, lightId ], signal: AbortSignal.timeout(1000) });
 
     client.deliverState(makeLightEvent("light", false));
 
@@ -102,10 +103,12 @@ describe("captureInitialState", () => {
   test("timeout: rejects with a TimeoutError when the required set never completes", async () => {
 
     const client = coverPresentLightPending();
+    const deadline = AbortSignal.timeout(20);
 
     await assert.rejects(
-      captureInitialState({ client: asEspHomeClient(client), expected: [ coverId, lightId ], shutdownSignal: liveSignal(), timeoutSeconds: 0.02 }),
-      { constructor: DOMException, name: "TimeoutError" });
+      captureInitialState({ client: asEspHomeClient(client), expected: [ coverId, lightId ], signal: deadline }),
+      (error) => error === deadline.reason,
+      "a deadline that fires mid-wait rejects the wait with that deadline's own reason, by identity");
   });
 
   test("shutdown: rejects with the shutdown reason at the synchronous gate when the signal is already aborted", async () => {
@@ -113,20 +116,20 @@ describe("captureInitialState", () => {
     const client = coverPresentLightPending();
 
     await assert.rejects(
-      captureInitialState({ client: asEspHomeClient(client), expected: [ coverId, lightId ], shutdownSignal: AbortSignal.abort("shutdown"), timeoutSeconds: 1 }),
+      captureInitialState({ client: asEspHomeClient(client), expected: [ coverId, lightId ], signal: AbortSignal.abort("shutdown") }),
       (reason) => reason === "shutdown",
-      "a pre-aborted shutdown signal surfaces its reason through the throwIfAborted gate");
+      "a signal already aborted with the shutdown reason surfaces that reason through the throwIfAborted gate");
   });
 
   test("shutdown: rejects with the shutdown reason when the signal aborts mid-wait", async () => {
 
     const controller = new AbortController();
     const client = coverPresentLightPending();
-    const pending = captureInitialState({ client: asEspHomeClient(client), expected: [ coverId, lightId ], shutdownSignal: controller.signal, timeoutSeconds: 1 });
+    const pending = captureInitialState({ client: asEspHomeClient(client), expected: [ coverId, lightId ], signal: controller.signal });
 
     controller.abort("shutdown");
 
-    await assert.rejects(pending, (reason) => reason === "shutdown", "an abort delivered while waiting surfaces the signal's reason");
+    await assert.rejects(pending, (reason) => reason === "shutdown", "an abort the controller delivers while waiting surfaces its signal's reason");
   });
 });
 
@@ -253,6 +256,35 @@ describe("openConnection", () => {
     assert.ok(loggedAt(entries, "error", "Initial-state capture timed out after 0.02 seconds"),
       "the user sees the timeout diagnostic carrying the budget it exhausted");
     assert.equal(client.disposeCount, 1, "the partially-constructed client is torn down");
+  });
+
+  test("a TimeoutError the factory rejects with is the library's failure, not a capture timeout", async () => {
+
+    // The capture timeout is recognized by the core's own deadline, so a TimeoutError raised before any capture began - the library's connect timeout - reads as
+    // the library's failure, never as a device that opened the connection and then failed to push its state.
+    const { entries, result } = await run(makeFakeOpenClient(new DOMException("timed out", "TimeoutError")));
+
+    assert.ok(!result.ok, "a factory rejection skips the discovery attempt");
+    assert.equal(result.reason, "unknown", "a TimeoutError the factory rejects with carries the unknown reason token");
+    assert.ok(loggedAt(entries, "error", "Failed to establish connection: DOMException [TimeoutError]: timed out"),
+      "the user sees the catch-all connection diagnostic carrying the inspected error");
+    assert.equal(logCount(entries, "error", "Initial-state capture timed out"), 0, "no capture-timeout diagnostic is logged for a timeout the library raised");
+  });
+
+  test("a handshake slower than the capture budget is not charged against it", async () => {
+
+    // The budget starts when the client is open, so a handshake twice the budget still admits a device whose state arrives at once.
+    const client = pendingClient();
+    const openClient = makeFakeOpenClient(async () => {
+
+      await delay(40);
+      setTimeout(() => client.deliverState(makeCoverEvent("door", 0)), 0);
+
+      return client;
+    });
+    const { result } = await run(openClient, { timeoutSeconds: 0.02 });
+
+    assert.ok(result.ok, "a device whose state arrives as soon as its slow handshake completes is admitted");
   });
 
   test("shutdown: returns null silently and disposes the client", async () => {

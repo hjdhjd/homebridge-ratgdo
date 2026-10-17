@@ -49,10 +49,12 @@ import { translateTelemetry } from "./protocol/telemetry.ts";
 type StatusRowId = "door" | "light" | "lock" | "motion" | "obstruction";
 
 /* Construction options for StatusFeed. `browserFactory`, `clock`, and `openClient` default to the real implementations (the default-arg port pattern connection.ts
- * establishes), and `discoveryTimeoutSeconds` defaults to RATGDO_WEBUI_DISCOVERY_TIMEOUT; a unit test overrides all four. `push` is the raw bridge sink - StatusFeed
- * guards every push on session identity internally, so `push` itself is unconditional.
+ * establishes), `discoveryTimeoutSeconds` defaults to RATGDO_WEBUI_DISCOVERY_TIMEOUT, and `captureTimeoutSeconds` is left undefined so openConnection's own
+ * default applies; a unit test overrides each of them. `push` is the raw bridge sink - StatusFeed guards every push on session identity internally, so `push`
+ * itself is unconditional.
  *
  * @property browserFactory          - The library's browser boundary. A test injects TestMdnsBrowserFactory; absent, the library builds its own browser.
+ * @property captureTimeoutSeconds   - Seconds any capture the feed opens waits for the device's initial state. Left undefined, openConnection's own default applies.
  * @property clock                   - The time source the not-found timers and the browser arm on. Defaults to systemClock; a test injects TestClock.
  * @property discoveryTimeoutSeconds - Seconds a warmed mac waits for mDNS discovery before it is classified not-found. Defaults to RATGDO_WEBUI_DISCOVERY_TIMEOUT.
  * @property log                     - The logging adapter client-internal and feed-internal messages route through.
@@ -62,6 +64,7 @@ type StatusRowId = "door" | "light" | "lock" | "motion" | "obstruction";
 export interface StatusFeedOptions {
 
   browserFactory?: MdnsBrowserFactory;
+  captureTimeoutSeconds?: number;
   clock?: Clock;
   discoveryTimeoutSeconds?: number;
   log: HomebridgePluginLogging;
@@ -445,6 +448,7 @@ export class StatusFeed implements Disposable {
   // What became of each warmed manual address, keyed by the canonical lower-cased address. See AddressRecord for why the states are a union.
   readonly #addresses = new Map<string, AddressRecord>();
   readonly #browserFactory: MdnsBrowserFactory | undefined;
+  readonly #captureTimeoutSeconds: number | undefined;
   readonly #clock: Clock;
   readonly #devices = new Map<string, KnownDevice>();
   // The live discovery while one runs, and null between them: a null field is what makes the next warm's startDiscovery open a new one.
@@ -481,9 +485,11 @@ export class StatusFeed implements Disposable {
   // Every probe still in flight, held only so disposal can cancel them. A probe removes its own entry as it settles, so this set is empty whenever none is running.
   readonly #probes = new Set<AbortController>();
 
-  public constructor({ browserFactory, clock = systemClock, discoveryTimeoutSeconds = RATGDO_WEBUI_DISCOVERY_TIMEOUT, log, openClient, push }: StatusFeedOptions) {
+  public constructor({ browserFactory, captureTimeoutSeconds, clock = systemClock, discoveryTimeoutSeconds = RATGDO_WEBUI_DISCOVERY_TIMEOUT, log, openClient,
+    push }: StatusFeedOptions) {
 
     this.#browserFactory = browserFactory;
+    this.#captureTimeoutSeconds = captureTimeoutSeconds;
     this.#clock = clock;
     this.#discoveryTimeoutSeconds = discoveryTimeoutSeconds;
     this.#log = log;
@@ -726,7 +732,8 @@ export class StatusFeed implements Disposable {
 
     try {
 
-      const outcome = await openManualConnection({ host: address, keyFor, log, openClient: this.#openClient, shutdownSignal: signal });
+      const outcome = await openManualConnection({ host: address, keyFor, log, openClient: this.#openClient, shutdownSignal: signal,
+        timeoutSeconds: this.#captureTimeoutSeconds });
 
       if(outcome.ok) {
 
@@ -899,7 +906,7 @@ export class StatusFeed implements Disposable {
       this.#pushForSession(session, { kind: "connecting", serialNumber: mac, session: session.token });
 
       const outcome = await openConnection({ expected: ratgdoInitialStateEntityIds(device.variant), host: device.address, keyFor: this.#keyFor, log, mac,
-        openClient: this.#openClient, shutdownSignal: session.controller.signal });
+        openClient: this.#openClient, shutdownSignal: session.controller.signal, timeoutSeconds: this.#captureTimeoutSeconds });
 
       if(!outcome.ok) {
 
@@ -1295,7 +1302,7 @@ export class StatusFeed implements Disposable {
        * without touching any other dial, while disposal still ends every one of them.
        */
       const outcome = await openManualConnection({ host: address, keyFor, log, openClient: this.#openClient,
-        shutdownSignal: composeSignals(controller.signal, this.#lifetime.signal) });
+        shutdownSignal: composeSignals(controller.signal, this.#lifetime.signal), timeoutSeconds: this.#captureTimeoutSeconds });
 
       /* Is this dial still the one that owns the address? A departure aborts an in-flight dial and DELETES its record, so a dial whose record has gone - or has been
        * replaced by someone else's - must write nothing at all and dispose whatever it opened.

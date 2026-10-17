@@ -100,25 +100,22 @@ export interface ManualConnectionResult extends ConnectionResult {
 export type ManualConnectionOutcome = ({ ok: true } & ManualConnectionResult) | { ok: false; reason: ManualConnectionFailureReason };
 
 /* Options for `captureInitialState`. The caller supplies the connected client, the wait-list of entities that must appear in the cache before construction proceeds,
- * the platform-wide shutdown signal (independent cancellation), and an optional per-call state-capture budget. `timeoutSeconds` is injectable so the timeout branch is
- * testable in milliseconds without a Clock port or fake timers; it defaults to the production `RATGDO_INITIAL_STATE_TIMEOUT`.
+ * and the one signal the wait honors. The function owns no budget, so a caller that wants the wait bounded composes its deadline into that signal, and a test bounds
+ * it in milliseconds with any signal it likes rather than with a Clock port or fake timers.
  *
- * @property client         - The connected ESPHome client whose LatestStateCache we observe.
- * @property expected       - The caller's declaration of which entities matter for initial state; intersected with the device's advertised entity list.
- * @property shutdownSignal - The platform-wide shutdown signal; an abort surfaces its reason (the "shutdown" string) to the caller.
- * @property timeoutSeconds - Per-call state-capture budget, in seconds. Defaults to `RATGDO_INITIAL_STATE_TIMEOUT`.
+ * @property client   - The connected ESPHome client whose LatestStateCache we observe.
+ * @property expected - The caller's declaration of which entities matter for initial state; intersected with the device's advertised entity list.
+ * @property signal   - The one cancellation source the wait honors, whatever the caller composed it from. An abort rejects the wait with this signal's reason.
  */
 export interface CaptureInitialStateOptions {
 
   client: EspHomeClient;
   expected: readonly EntityId[];
-  shutdownSignal: AbortSignal;
-  timeoutSeconds?: number;
+  signal: AbortSignal;
 }
 
 /* Options for `openConnection`. The factory port (`openClient`) defaults to the real `openEspHomeClient`; the caller passes a lookup over wherever it stores keys, so
- * this module never touches the feature-option engine and the caller never decides which MAC a key is chosen for. `timeoutSeconds` threads straight through to
- * `captureInitialState`.
+ * this module never touches the feature-option engine and the caller never decides which MAC a key is chosen for.
  *
  * @property expected       - The initial-state wait-list, forwarded to `captureInitialState`.
  * @property host           - The device's hostname or IP address.
@@ -126,8 +123,8 @@ export interface CaptureInitialStateOptions {
  * @property log            - The static-prefix logging adapter the client uses for connect-internal messages.
  * @property mac            - The MAC discovery named, in the plugin's identity form: the device this connection is for.
  * @property openClient     - The injectable client-factory port. Defaults to the real `openEspHomeClient`.
- * @property shutdownSignal - The platform-wide shutdown signal. Cancels the client-factory call and is forwarded to `captureInitialState`.
- * @property timeoutSeconds - Per-call state-capture budget, in seconds. Defaults to `RATGDO_INITIAL_STATE_TIMEOUT`.
+ * @property shutdownSignal - The platform-wide shutdown signal. Cancels the client-factory call and is composed with the capture deadline.
+ * @property timeoutSeconds - The budget, in seconds, of the capture deadline the core builds once the client is open. Defaults to `RATGDO_INITIAL_STATE_TIMEOUT`.
  */
 export interface OpenConnectionOptions {
 
@@ -233,11 +230,11 @@ export async function openManualConnection(options: OpenManualConnectionOptions)
 /* The shared connect core: open the client, let the caller's step answer what to wait for, capture initial state, and classify anything that goes wrong. Both entry
  * points run through this body, so the failure taxonomy, every user-facing diagnostic, and the teardown of a client no caller will receive each exist exactly once.
  *
- * The catch's error-narrowing strategy mirrors the abort-source taxonomy that captureInitialState produces. Shutdown is checked first because it is not a failure -
- * the platform is going away and any in-flight connect should tear down silently. TimeoutError DOMException is the dedicated state-capture-budget-exhausted case
- * (AbortSignal.timeout always uses that name; AbortError would be the wrong token to test). The identity refusal, encryption, and PermanentError each get a dedicated
- * branch so the user sees a focused diagnostic instead of a wrapped stack trace. Everything else falls through to the generic else with the unfiltered util.inspect
- * output.
+ * The catch reads the signals this core itself holds, the shutdown signal first and then its own capture deadline. Shutdown is checked first because it is not a
+ * failure - the platform is going away and any in-flight connect should tear down silently. A capture timeout is recognized by identity, the deadline having fired
+ * and the caught value being that deadline's own reason, so a TimeoutError from any other source - the library's connect timeout among them - falls to the generic
+ * branch as the library's failure. The identity refusal, encryption, and PermanentError each get a dedicated branch so the user sees a focused diagnostic instead of a
+ * wrapped stack trace. Everything else falls through to the generic else with the unfiltered util.inspect output.
  *
  * Every failure - a thrown one and a refused one alike - leaves through the single tail below rather than returning from where it was decided, which is what makes
  * the dispose one statement instead of one per branch.
@@ -273,6 +270,10 @@ resolveWaitList: (client: EspHomeClient) => WaitListOutcome<TIdentity, TRefusal>
    */
   let client: EspHomeClient | undefined;
   let reason: ConnectionFailureReason | TRefusal;
+
+  // The capture deadline, built only once the client is open so the budget covers state capture and never the handshake, and held here so the catch can recognize
+  // its reason.
+  let deadline: AbortSignal | undefined;
 
   // The MAC this connection is for, which only the refusals read.
   let belongsTo = mac;
@@ -329,7 +330,9 @@ resolveWaitList: (client: EspHomeClient) => WaitListOutcome<TIdentity, TRefusal>
 
     if(waitList.ok) {
 
-      const initialState = await captureInitialState({ client, expected: waitList.expected, shutdownSignal, timeoutSeconds });
+      deadline = AbortSignal.timeout(timeoutSeconds * 1000);
+
+      const initialState = await captureInitialState({ client, expected: waitList.expected, signal: AbortSignal.any([ shutdownSignal, deadline ]) });
 
       return { client, identity: waitList.identity, initialState, ok: true };
     }
@@ -375,8 +378,10 @@ resolveWaitList: (client: EspHomeClient) => WaitListOutcome<TIdentity, TRefusal>
 
       log.error("Permanent connection error: %s", util.inspect(error, { depth: null }));
       reason = "permanent";
-    } else if((error instanceof DOMException) && (error.name === "TimeoutError")) {
+    } else if(deadline?.aborted && (error === deadline.reason)) {
 
+      // The timeout verdict is this core's own deadline, its reason compared by identity, so a TimeoutError of any other source - the library's connect timeout
+      // among them - falls to the generic branch below as the library's failure.
       log.error("Initial-state capture timed out after %s seconds. The device opened the connection but failed to push entity state.", timeoutSeconds);
       reason = "timeout";
     } else {
@@ -429,15 +434,12 @@ export function applyDeviceInfo(device: RatgdoDevice, client: EspHomeClient): vo
  * `required.every((id) => cache.has(id))` completeness check the correct primitive for this wait.
  *
  * The fast path covers devices that finished pushing before the caller invoked us (common on a healthy LAN). The slow path subscribes via `using` for automatic
- * teardown when the helper returns, composes the caller's shutdown signal with this call's own state-capture timeout, and resolves the moment the last required
- * entity lands - no polling.
+ * teardown when the helper returns, and resolves the moment the last required entity lands - no polling.
  *
- * Signal ownership is intentionally split: the caller supplies the platform-wide shutdown signal (independent cancellation - the plugin is going away), and this
- * function composes its own per-call state-capture timeout. Owning the timeout here matches the function's name and contract - the budget covers state capture,
- * not the preceding `openEspHomeClient()` handshake - and a future caller does not need to know what the budget is.
+ * The caller supplies the one signal the wait honors, and the wait rejects with that signal's own reason, so the caller that composed it can tell its sources apart
+ * by identity. This function owns no budget: a caller that wants the wait bounded passes a signal that carries its deadline.
  */
-export async function captureInitialState({ client, expected, shutdownSignal, timeoutSeconds = RATGDO_INITIAL_STATE_TIMEOUT }: CaptureInitialStateOptions):
-Promise<ReadonlyMap<EntityId, TelemetryEvent>> {
+export async function captureInitialState({ client, expected, signal }: CaptureInitialStateOptions): Promise<ReadonlyMap<EntityId, TelemetryEvent>> {
 
   const cache = client.snapshot();
 
@@ -461,19 +463,12 @@ Promise<ReadonlyMap<EntityId, TelemetryEvent>> {
 
   /* Slow path: subscribe to telemetry and resolve when the cache completes. The `using` form scopes the bootstrap subscription to this function: at scope exit
    * the implicit `Symbol.dispose()` call removes the handler from the EventBus, so the bootstrap listener never leaks into the runtime telemetry path the platform
-   * wires up after construction. The wait below is the library's, and it owns the abort side of the race: it rejects with `signal.reason`, so a timeout or shutdown
-   * abort surfaces the appropriate reason to the caller's catch handler - shutdown surfaces the platform's "shutdown" string, timeout surfaces a TimeoutError
-   * DOMException.
+   * wires up after construction. The wait below is the library's, and it owns the abort side of the race: it rejects with the reason of the signal the caller
+   * passed, unchanged, so the caller's catch handler can recognize which of its own sources aborted.
    */
 
-  // Compose shutdown and state-capture timeout into one cancellation source. AbortSignal.any propagates whichever source aborts first as the composed signal's
-  // reason, which is what lets openConnection's catch distinguish which source aborted and emit the right user-facing message for each. The composed signal is
-  // local to this call - it does not leak past return because we hold the only reference.
-  const signal = AbortSignal.any([ shutdownSignal, AbortSignal.timeout(timeoutSeconds * 1000) ]);
-
-  // Synchronous gate against an already-aborted shutdown signal (the timeout we just created cannot have fired in the same tick). A shutdown that landed while we
-  // were awaiting `openEspHomeClient()` leaves nothing worth waiting for, and checking here means we give up before subscribing to telemetry at all rather than
-  // subscribing and tearing the subscription straight back down.
+  // Synchronous gate against an already-aborted signal. An abort that landed before this call leaves nothing worth waiting for, and checking here means we give up
+  // before subscribing to telemetry at all rather than subscribing and tearing the subscription straight back down.
   signal.throwIfAborted();
 
   const { promise, resolve } = Promise.withResolvers<undefined>();

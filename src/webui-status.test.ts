@@ -3,8 +3,9 @@
  * webui-status.test.ts: Unit tests for the webUI status connection pool - the persistent per-device session lifecycle, the warm-set key diff and reconnect, the
  * address re-dial, the view switch, the per-mac not-found sweep, outcome memory, the domain-to-row translation, the classified error surface, the teardown ordering,
  * and the request-boundary narrowing. The ESPHome client, the client factory, the mDNS browser, and the clock are all injected as doubles, so every branch of the pool
- * runs deterministically without a live device, a real connection, or real time; the discovery budget is injected in fractional seconds and the injected clock is what
- * drives it. The doubles follow the testing.helpers conventions - counters, not booleans, wherever a no-op-versus-double-call distinction matters.
+ * runs deterministically without a live device or a real connection. The discovery budget is injected in fractional seconds and the injected clock drives it; the
+ * capture budget is injected the same way, but its deadline is the connection core's own timer, so a row that lets it fire waits it out in real milliseconds. The
+ * doubles follow the testing.helpers conventions - counters, not booleans, wherever a no-op-versus-double-call distinction matters.
  */
 import { AuthenticationError, CoverOperation, LockState, entityId } from "esphome-client";
 import type { DeviceInfo, EntityId, TelemetryEvent } from "esphome-client";
@@ -13,7 +14,7 @@ import type { MdnsBrowserLike, MdnsBrowserOptions, MdnsService, Nullable, Status
 import type { OpenClientHandler, RecordedOpenOptions, TestEspHomeClientOptions } from "./testing.helpers.ts";
 import { RATGDO_MOTION_DURATION, RATGDO_WEBUI_PROBE_TIMEOUT } from "./settings.ts";
 import { StatusFeed, narrowStatusProbeRequest, narrowStatusWarmRequest } from "./webui-status.ts";
-import { TestClock, TestMdnsBrowserFactory, capturingLog, expectAt, formatLogEntry, settle } from "homebridge-plugin-utils/testing";
+import { TestClock, TestMdnsBrowserFactory, capturingLog, expectAt, formatLogEntry, settle, waitUntil } from "homebridge-plugin-utils/testing";
 import { TestEspHomeClient, makeBinarySensorEvent, makeCoverEvent, makeFakeOpenClient, makeLightEvent, makeLockEvent, makeRatgdoService, makeSwitchEvent,
   makeTelemetry, openThroughHello, resolverOf } from "./testing.helpers.ts";
 import type { TestLogEntry, TestMdnsBrowser } from "homebridge-plugin-utils/testing";
@@ -194,7 +195,7 @@ const makeAnsweringClient = (options: { deviceInfo?: Partial<DeviceInfo> | null;
  *
  * `browser()` answers the most recently created browser rather than the first, so a test that lets one fail and be replaced reads the live one.
  */
-const makeFeed = (options: { browserFactory?: TestMdnsBrowserFactory; discoveryTimeoutSeconds?: number; openClient?: OpenEspHomeClient;
+const makeFeed = (options: { browserFactory?: TestMdnsBrowserFactory; captureTimeoutSeconds?: number; discoveryTimeoutSeconds?: number; openClient?: OpenEspHomeClient;
   push?: (event: StatusEvent) => void; } = {}): { browser: () => TestMdnsBrowser; clock: TestClock; entries: readonly TestLogEntry[]; factory: TestMdnsBrowserFactory;
   feed: StatusFeed; pushes: StatusEvent[]; } => {
 
@@ -205,6 +206,7 @@ const makeFeed = (options: { browserFactory?: TestMdnsBrowserFactory; discoveryT
   const feed = new StatusFeed({
 
     browserFactory: factory,
+    captureTimeoutSeconds: options.captureTimeoutSeconds,
     clock,
     discoveryTimeoutSeconds: options.discoveryTimeoutSeconds ?? 0.02,
     log,
@@ -1221,13 +1223,35 @@ describe("StatusFeed connection failures", () => {
     }), "auth-invalid", "a configured key that does not match the device surfaces as auth-invalid");
   });
 
-  test("maps a state-capture timeout to the timeout error", async () => {
+  test("maps a TimeoutError the factory rejects with to the unreachable error", async () => {
 
-    // openConnection classifies a TimeoutError DOMException as a state-capture timeout, so a factory raising one drives the timeout branch without a real wait.
+    // The connection core recognizes its own capture deadline by identity, so a timeout the library rejects with is the library's failure and reads as unreachable.
     assert.equal(await failureReasonFor(async () => {
 
       throw new DOMException("timed out", "TimeoutError");
-    }), "timeout", "a state-capture timeout surfaces as the timeout reason");
+    }), "unreachable", "a TimeoutError the factory rejects with surfaces as unreachable");
+  });
+
+  test("maps a state-capture timeout to the timeout error", async () => {
+
+    /* The pool session's capture runs out its real deadline: the client opens with an empty snapshot, so the capture reaches its slow path, and the feed's capture
+     * budget fires during the wait below. That deadline is the connection core's own timer rather than the injected clock, so the row waits it out in real time
+     * instead of yielding a single turn.
+     */
+    const { browser, feed, pushes } = makeFeed({ captureTimeoutSeconds: 0.02, openClient: makeFakeOpenClient(async () => makeClient({ snapshot: new Map() })) });
+
+    feed.startDiscovery();
+    browser().found(makeService());
+
+    await settle();
+
+    feed.warm(warmOf([MAC]));
+
+    await waitUntil(() => pushes.some((event) => event.kind === "error"), { description: "the pool session's capture timeout to reach the panel" });
+
+    const error = pushes.find((event) => event.kind === "error");
+
+    assert.equal((error?.kind === "error") ? error.reason : undefined, "timeout", "a capture that exhausts its budget surfaces as the timeout reason");
   });
 
   test("maps an unsupported API version to the unsupported error", async () => {

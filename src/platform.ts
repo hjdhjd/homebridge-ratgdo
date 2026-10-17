@@ -515,9 +515,9 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
       /* Connect to the device AND wait for the initial-state burst before we construct the accessory. The connect path lives in openConnection() so the dual await
        * (openEspHomeClient + captureInitialState) shares a single try/catch with consistent error logging and cleanup. We pass only the platform-wide shutdown signal -
-       * captureInitialState composes its own per-call timeout internally, so the state-capture budget covers exactly what its name implies (state capture, not the
+       * openConnection builds the capture deadline once the client is open, so the state-capture budget covers exactly what its name implies (state capture, not the
        * preceding handshake). The `expected` list is built from the same canonical entity registry that buildInitialStatus reads, so the two are hand-kept in sync -
-       * there is currently no type-level check that would catch a future divergence, so any change to what buildInitialStatus reads must be mirrored in
+       * there is no type-level check that would catch a future divergence, so any change to what buildInitialStatus reads must be mirrored in
        * ratgdoInitialStateEntityIds.
        */
       // The client's own log adapter. The plain platform log is the right base: the constructor redirects `this.log.debug` through the plugin's gated debug(), so
