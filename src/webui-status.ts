@@ -944,6 +944,9 @@ export class StatusFeed implements Disposable {
   #adoptConnection({ client, initialState, session, variant }: { client: EspHomeClient; initialState: ReadonlyMap<EntityId, TelemetryEvent>; session: DeviceSession;
     variant: RatgdoVariant; }): void {
 
+    // The client belongs to the session's stack before anything else here can throw, so tearing the session down always releases it, whichever later step comes apart.
+    session.stack.use(client);
+
     // Compute the panel's row model BEFORE registering any listener, so the telemetry filter closure never observes an uninitialized set. The universe is the variant's
     // status entities mapped to row ids; narrowing it to the device's advertised entities yields the present rows in a stable display order. The map is retained on the
     // session so view() can rebuild a snapshot from it long after this connect.
@@ -958,12 +961,11 @@ export class StatusFeed implements Disposable {
       }
     }
 
-    /* Register the session's listeners onto its stack. The client goes on FIRST and each listener after it, so teardown releases the listeners before the client's
-     * disconnect and an intentional reconnect never pushes a spurious "Disconnected" availability event. The telemetry listener translates each event and pushes a
-     * row only for a present panel entity; the lifecycle listener - the canonical typed connect/disconnect channel - drives the availability row. After a reconnect
-     * cycle the device re-bursts full state through the retained telemetry listener, so rows self-heal without a fresh snapshot.
+    /* Register the session's listeners onto its stack. The client is already on it, so each listener goes on after the client and teardown releases the listeners
+     * before the client's disconnect, and an intentional reconnect never pushes a spurious "Disconnected" availability event. The telemetry listener translates each
+     * event and pushes a row only for a present panel entity; the lifecycle listener - the canonical typed connect/disconnect channel - drives the availability row.
+     * After a reconnect cycle the device re-bursts full state through the retained telemetry listener, so rows self-heal without a fresh snapshot.
      */
-    session.stack.use(client);
     session.stack.use(
 
       client.on("telemetry", (data: TelemetryEvent): void => {
@@ -1280,6 +1282,9 @@ export class StatusFeed implements Disposable {
       return offered.key;
     };
 
+    // The session this dial installs, held where the catch can reach it, and null until the dial installs one.
+    let session: Nullable<DeviceSession> = null;
+
     this.#addresses.set(address, { controller, state: "dialing" });
 
     try {
@@ -1356,7 +1361,7 @@ export class StatusFeed implements Disposable {
       }
 
       // A device that answered in plaintext chose no key, so its record is the key at its own MAC, exactly as a discovered session's is.
-      const session: DeviceSession = { address, client: null, controller, encryptedTransport: false, mac, offered: offered ?? { key: this.#keyFor(mac), mac },
+      session = { address, client: null, controller, encryptedTransport: false, mac, offered: offered ?? { key: this.#keyFor(mac), mac },
         online: false, rowMap: new Map(), stack: new DisposableStack(), token: ++this.#tokenCounter };
 
       this.#sessions.set(mac, session);
@@ -1364,6 +1369,16 @@ export class StatusFeed implements Disposable {
     } catch(error) {
 
       log.error("The live-status connection failed unexpectedly.", error);
+
+      /* A session whose installation threw still holds the device's slot, and left there it makes the next warm's redial read the device as already connected at
+       * this address, which closes the fresh connection and serves nothing. So the session this dial installed is torn down, releasing the client its stack holds,
+       * before the failure is recorded, and only while it is still the one installed, because a session that has taken its place is not this failure's to remove.
+       */
+      if((session !== null) && (this.#sessions.get(session.mac) === session)) {
+
+        this.#teardownSession(session.mac);
+      }
+
       this.#addresses.set(address, { offered, reason: "unknown", state: "failed" });
       this.#reportAddressFailure(address, "unknown", onBehalfOf, offered);
     } finally {
@@ -1620,8 +1635,12 @@ export class StatusFeed implements Disposable {
   /* Record a terminal connection failure for the current session's device and surface it. Only the session still installed for the mac owns the mac's outcome memory and
    * session slot, so a session the map no longer holds writes nothing: either a successor owns the device now, or the pool was disposed out from under this connect and
    * there is nothing left to write to. On the current session: write the classified reason AND what the connection was offered - so a later warm can tell a doomed
-   * resend of that same key from a genuine retry with a changed one - to outcome memory, push the error, and remove the session so the device reads as
+   * resend of that same key from a genuine retry with a changed one - to outcome memory, push the error, and tear the session down so the device reads as
    * failed-with-no-session until a re-warm or a view retries it.
+   *
+   * A failed session releases everything it holds. It leaves the pool through `#teardownSession` rather than a bare delete, so its controller is aborted and its stack
+   * disposed - every listener that registered, then the client - and a session that came apart part way through its installation never leaves the map with its
+   * connection still open.
    */
   #recordFailure(session: DeviceSession, reason: StatusErrorReason): void {
 
@@ -1632,7 +1651,7 @@ export class StatusFeed implements Disposable {
 
     this.#outcomes.set(session.mac, { offered: session.offered, reason });
     this.#emit({ kind: "error", reason, serialNumber: session.mac, session: session.token });
-    this.#sessions.delete(session.mac);
+    this.#teardownSession(session.mac);
   }
 
   /* Build the snapshot rows from a state cache through a session's row map and push them. Shared by the connect path (reading the captured initial-state cache) and by

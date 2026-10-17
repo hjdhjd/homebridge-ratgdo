@@ -1315,6 +1315,39 @@ describe("StatusFeed connection failures", () => {
     assert.ok(pushes.some((event) => (event.kind === "error") && (event.reason === "unreachable")), "an unexpected throw in the connect body surfaces as unreachable");
   });
 
+  test("releases a discovered device's connection when its session comes apart as it is installed, and reconnects it at the next warm", async () => {
+
+    /* The failure recorder tears the failed session down rather than only forgetting it, so the client the session's stack already took is disposed rather than left
+     * connected with nothing holding it. The first client refuses its listeners, which faults the session's installation after the client is on the stack; the
+     * disposal count is what tells a teardown from a bare removal, because both leave the device free to reconnect at the next warm.
+     */
+    const first = makeClient({ snapshot: restingCache(), throwOnListen: true });
+    const openClient = makeFakeOpenClient(async (_options, index) => (index === 0) ? first : makeClient({ snapshot: restingCache() }));
+    const { browser, feed, pushes } = makeFeed({ openClient });
+
+    feed.startDiscovery();
+    browser().found(makeService());
+
+    await settle();
+
+    feed.warm(warmOf([MAC]));
+
+    await settle();
+
+    assert.ok(pushes.some((event) => (event.kind === "error") && (event.reason === "unreachable") && (event.serialNumber === MAC)),
+      "the failed installation is recorded against the device as unreachable");
+    assert.equal(first.disposeCount, 1, "the client the failed session held is disposed exactly once");
+
+    const after = pushes.length;
+
+    feed.warm(warmOf([MAC]));
+
+    await settle();
+
+    assert.equal(callsForHost(openClient, ADDR).length, 2, "the next warm reconnects the device");
+    assert.ok(pushes.slice(after).some((event) => (event.kind === "snapshot") && (event.serialNumber === MAC)), "and the reconnect serves the device");
+  });
+
   test("contains a push sink that always throws across a full warm-connect-fail cycle", async () => {
 
     // The push sink itself throws on every delivery - the bridge's pushEvent after the modal has closed the channel. The connecting push, then the terminal error push in
@@ -2674,10 +2707,10 @@ describe("StatusFeed address dial", () => {
     assert.equal(feed.addresses()[MAC], ADDR, "and the device is served at it");
   });
 
-  test("leaves an address dialable again when its own open step throws rather than failing", async () => {
+  test("leaves an address dialable again when its own open step throws", async () => {
 
-    // A throw out of the factory is not an outcome openManualConnection classifies - it is the dial itself coming apart. The finally is what has to release the
-    // in-flight guard, and the observation that proves it is the NEXT warm dialing at all.
+    // The connection core classifies a throw out of the factory as `unknown`, so the dial writes a failed record over its in-flight one, which releases the guard, and
+    // the next warm dials the address again because `unknown` is a reason the retry gate retries. The observation that proves it is the NEXT warm dialing.
     const openClient = makeFakeOpenClient(async (_options, index) => {
 
       if(index === 0) {
@@ -2703,15 +2736,17 @@ describe("StatusFeed address dial", () => {
     assert.ok(pushes.some((event) => (event.kind === "snapshot") && (event.serialNumber === MAC)), "and the retry serves the device");
   });
 
-  test("records an address whose session comes apart as it is installed as failed, and dials it again at the next warm", async () => {
+  test("releases an address's connection when its session comes apart as it is installed, and serves the device at the next warm", async () => {
 
     /* The dial's own body is total: a connection that opened and identified its device, but whose session then fails to take it - here, a client that refuses its
-     * listeners - is caught, logged under the address, and recorded as an unclassified failure, which the retry gate treats as worth another try.
+     * listeners - is caught, logged under the address, and recorded as an unclassified failure, which the retry gate treats as worth another try. The session the
+     * dial installed is torn down in that same catch, and this row observes what that teardown does: the failed client is disposed rather than left open, and the
+     * redial finds the device's slot empty and serves it, where a session left behind would read the device as already connected at this address.
      */
-    const openClient = makeFakeOpenClient(async (_options, index) => (index === 0) ?
-      makeClient({ deviceInfo: { esphomeVersion: "2.0.0", macAddress: colonMac(MAC), projectName: "ratgdo.esp32" }, snapshot: restingCache(), throwOnListen: true }) :
-      makeAnsweringClient());
-    const { entries, feed } = makeFeed({ openClient });
+    const first = makeClient({ deviceInfo: { esphomeVersion: "2.0.0", macAddress: colonMac(MAC), projectName: "ratgdo.esp32" }, snapshot: restingCache(),
+      throwOnListen: true });
+    const openClient = makeFakeOpenClient(async (_options, index) => (index === 0) ? first : makeAnsweringClient());
+    const { entries, feed, pushes } = makeFeed({ openClient });
 
     feed.warm(warmOf([MAC], { addresses: [ADDR] }));
 
@@ -2719,12 +2754,47 @@ describe("StatusFeed address dial", () => {
 
     assert.ok(entries.some((entry) => (entry.level === "error") && formatLogEntry(entry).startsWith(ADDR + ": The live-status connection failed unexpectedly.")),
       "the fault is reported under the address the dial was for");
+    assert.equal(first.disposeCount, 1, "the client the failed session held is disposed exactly once");
+
+    const after = pushes.length;
 
     feed.warm(warmOf([MAC], { addresses: [ADDR] }));
 
     await settle();
 
     assert.equal(callsForHost(openClient, ADDR).length, 2, "the failed address is dialed again at the next warm");
+    assert.ok(pushes.slice(after).some((event) => (event.kind === "snapshot") && (event.serialNumber === MAC)), "the redial serves the device");
+    assert.deepEqual(feed.addresses(), { [MAC]: ADDR }, "at the listed address");
+  });
+
+  test("releases an address's connection when its row model comes apart as the session is installed", async () => {
+
+    /* A connect reads the device's entity list twice: once to capture initial state, and once inside the adopt to build the row model. This client throws on the
+     * second read, so the fault lands inside the adopt before any listener registers. The client is on the session's stack by then, so the dial's teardown of the
+     * session it installed disposes it; a client that joined the stack only after the row model would be held by nothing when the row model threw.
+     */
+    const first = makeAnsweringClient();
+    let reads = 0;
+
+    Object.defineProperty(first, "entitiesByDevice", { value: () => {
+
+      if(++reads === 2) {
+
+        throw new Error("the entity list could not be read");
+      }
+
+      return ADVERTISED;
+    } });
+
+    const openClient = makeFakeOpenClient(async (_options, index) => (index === 0) ? first : makeAnsweringClient());
+    const { feed } = makeFeed({ openClient });
+
+    feed.warm(warmOf([MAC], { addresses: [ADDR] }));
+
+    await settle();
+
+    assert.equal(reads, 2, "the connect captured its initial state, and the adopt's row model read is the one that threw");
+    assert.equal(first.disposeCount, 1, "the client the failed session held is disposed exactly once");
   });
 });
 
@@ -3266,9 +3336,10 @@ describe("StatusFeed address governance", () => {
      * which one connect reads TWICE: once inside the connect itself, to capture initial state, and once inside the adopt that follows that check, to build the
      * row model.
      *
-     * So this client disposes the feed on that second read. The adopt's very next act is to put the client onto the session's disposable stack, which disposal has
-     * just closed, so it faults there and the failure recorder is reached with the session slot emptied by disposal rather than superseded by a successor. A
-     * recorder that read "no session" as "this failure still applies" would write a verdict into the cleared memory and push an error at a panel that is gone.
+     * So this client disposes the feed on that second read. The adopt has already put the client onto the session's stack, so the disposal's teardown releases it,
+     * and the adopt's next registration meets the closed stack and faults, so the failure recorder is reached with the session slot emptied by disposal rather than
+     * superseded by a successor. A recorder that read "no session" as "this failure still applies" would write a verdict into the cleared memory and push an error
+     * at a panel that is gone.
      */
     const { browser, feed, pushes } = makeFeed({ openClient: makeFakeOpenClient(async () => client) });
     const client = makeClient({ snapshot: restingCache() });
@@ -3296,6 +3367,7 @@ describe("StatusFeed address governance", () => {
     await settle();
 
     assert.equal(reads, 2, "the connect got past its ownership check and into the adopt, which is the window this row is about");
+    assert.equal(client.disposeCount, 1, "the disposal's teardown releases the client the adopt had already put on the session's stack, exactly once");
     assert.ok(!pushes.slice(after).some((event) => (event.kind === "error")),
       "a connect that comes apart after disposal pushes nothing, because the panel it would push to is gone with the pool");
 
