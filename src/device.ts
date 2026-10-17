@@ -109,6 +109,12 @@ const RATGDO_OCCUPANCY = {
 
 type OccupancyKind = keyof typeof RATGDO_OCCUPANCY;
 
+/* The resolved cover-operation domain the door-state resolution switch operates over. The cover handler derives one of these from the wire event's current_operation and
+ * state, having already validated both, so everything downstream of that validation works with a closed set rather than an open string. This is deliberately distinct
+ * from esphome-client's own CoverOperation, which names the wire vocabulary rather than this resolved one.
+ */
+type DoorOperation = "closed" | "closing" | "open" | "opening" | "stopped";
+
 /* The per-accessory HomeKit projection for a single garage door opener. Owns HomeKit service configuration, the RatgdoStatus single-source-of-truth, updateState()
  * telemetry-event routing, command dispatch to the ESPHome client, and MQTT publishing.
  */
@@ -1253,7 +1259,7 @@ export class RatgdoAccessory implements Disposable {
 
         // Local working buffer for the operation. We route the resolved operation through a local rather than mutating the inbound event, so the wire-faithful payload
         // stays immutable for any future cross-case consumer.
-        let operation: string;
+        let operation: DoorOperation;
 
         // Determine what action the opener is currently executing.
         switch(event.current_operation) {
@@ -1261,15 +1267,26 @@ export class RatgdoAccessory implements Disposable {
           case "CLOSING":
           case "OPENING":
 
-            operation = event.current_operation.toLowerCase();
+            operation = (event.current_operation === "CLOSING") ? "closing" : "opening";
 
             break;
 
           case "IDLE":
 
+            /* An idle cover reports its position through state, so this is the one point in the handler that reads the wire value's content rather than a name we have
+             * already classified. We validate it here and stand down on anything outside the two states the opener can report, leaving the last known door state and the
+             * last known dimmer reading in place...a firmware anomaly deserves a line an installer can see, not a door state that quietly goes stale.
+             */
+            if((event.state !== "OPEN") && (event.state !== "CLOSED")) {
+
+              this.log.error("Unknown door state detected: %s.", event.state);
+
+              return;
+            }
+
             // We treat an IDLE cover reported OPEN at a position strictly between 0 and 1 as stopped-at-partial rather than fully open; 0 collapses to closed, 1 to open.
             operation = ((event.state === "OPEN") && (event.position !== undefined) && (event.position > 0) && (event.position < 1)) ? "stopped" :
-              event.state.toLowerCase();
+              (event.state === "OPEN") ? "open" : "closed";
 
             break;
 
@@ -1296,56 +1313,19 @@ export class RatgdoAccessory implements Disposable {
           break;
         }
 
-        switch(operation) {
+        this.status.door = this.resolveDoorState(operation);
 
-          case "closed":
+        // Trigger our occupancy timer, if configured to do so and we don't have one yet, once the door has resolved to OPEN. The timer is what flips
+        // status.doorOpenOccupancy true after the configured duration, so a transient open does not raise occupancy - only a continuously-open door for the full
+        // duration does. The has() guard is defensive: the state short-circuit above already swallows a repeated open before it reaches here, so the guard matters only
+        // if a future event path resolves to open again with the window already running - the dwell window must never restart partway.
+        if((operation === "open") && this.hints.doorOpenOccupancySensor && !this.timers.has("doorOccupancy")) {
 
-            this.status.door = this.hap.Characteristic.CurrentDoorState.CLOSED;
+          this.timers.setTimeout("doorOccupancy", () => {
 
-            break;
-
-          case "closing":
-
-            this.status.door = this.hap.Characteristic.CurrentDoorState.CLOSING;
-
-            break;
-
-          case "open":
-
-            this.status.door = this.hap.Characteristic.CurrentDoorState.OPEN;
-
-            // Trigger our occupancy timer, if configured to do so and we don't have one yet. The timer is what flips status.doorOpenOccupancy true after the configured
-            // duration, so a transient open does not raise occupancy - only a continuously-open door for the full duration does. The has() guard is defensive: the state
-            // short-circuit above already swallows a repeated open before it reaches this case, so the guard matters only if a future event path re-enters the open case
-            // with the window already running - the dwell window must never restart partway.
-            if(this.hints.doorOpenOccupancySensor && !this.timers.has("doorOccupancy")) {
-
-              this.timers.setTimeout("doorOccupancy", () => {
-
-                // The timer firing raises occupancy; setOccupancy owns the status + characteristic + log + MQTT write.
-                this.setOccupancy("doorOpen", true);
-              }, this.hints.doorOpenOccupancyDuration * 1000);
-            }
-
-            break;
-
-          case "opening":
-
-            this.status.door = this.hap.Characteristic.CurrentDoorState.OPENING;
-
-            break;
-
-          case "stopped":
-
-            this.status.door = this.hap.Characteristic.CurrentDoorState.STOPPED;
-
-            break;
-
-          default:
-
-            this.status.door = this.hap.Characteristic.CurrentDoorState.CLOSED;
-
-            break;
+            // The timer firing raises occupancy; setOccupancy owns the status + characteristic + log + MQTT write.
+            this.setOccupancy("doorOpen", true);
+          }, this.hints.doorOpenOccupancyDuration * 1000);
         }
 
         // We only update the target state if our current state is NOT stopped. If we are stopped, we are at the target state by definition. When the user resumes the
@@ -1606,8 +1586,38 @@ export class RatgdoAccessory implements Disposable {
     }
   }
 
+  /* Resolve a cover operation to its CurrentDoorState value. The switch is exhaustive over DoorOperation: adding a sixth operation fails compilation here until
+   * handled, which is the architectural guarantee this resolution cannot fall out of sync with the type. The method stays a pure value computation, so the caller
+   * owns every side effect the resolved state triggers.
+   */
+  private resolveDoorState(operation: DoorOperation): CharacteristicValue {
+
+    switch(operation) {
+
+      case "closed":
+
+        return this.hap.Characteristic.CurrentDoorState.CLOSED;
+
+      case "closing":
+
+        return this.hap.Characteristic.CurrentDoorState.CLOSING;
+
+      case "open":
+
+        return this.hap.Characteristic.CurrentDoorState.OPEN;
+
+      case "opening":
+
+        return this.hap.Characteristic.CurrentDoorState.OPENING;
+
+      case "stopped":
+
+        return this.hap.Characteristic.CurrentDoorState.STOPPED;
+    }
+  }
+
   // Utility function to translate HomeKit's current door state values into human-readable form.
-  private translateCurrentDoorState(value: CharacteristicValue): string {
+  private translateCurrentDoorState(value: CharacteristicValue): DoorOperation | "unknown" {
 
     switch(value) {
 

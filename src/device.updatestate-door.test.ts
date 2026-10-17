@@ -289,6 +289,22 @@ describe("RatgdoAccessory.updateState() cover events", () => {
       assert.equal(mqtt?.published.some((entry) => entry.topic.endsWith("garagedoor")), false,
         "the unrecognized operation returns before the garagedoor publish, so no MQTT traffic is produced");
     });
+
+    test("logs an error and ignores an unknown state on an IDLE cover event", () => {
+
+      // Born OPEN rather than the suite's usual CLOSED default: OPEN is the only reading that tells the guard's early return apart from a resolution that happened to
+      // land on the state the accessory already held.
+      const { accessory, entries, mqtt, ratgdo } = buildRatgdoAccessory({ initialState: makeRatgdoInitialState([makeCoverEvent("door", 1)]), mqtt: true });
+
+      ratgdo.updateState(coverEvent("cover-door", "IDLE", "UNKNOWN", 0));
+
+      assert.ok(loggedAt(entries, "error", "Unknown door state detected"),
+        "an IDLE cover reporting a state outside OPEN and CLOSED is reported through an error log");
+      assert.equal(accessory.getService(Service.GarageDoorOpener)?.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPEN,
+        "the unrecognized state returns early, leaving CurrentDoorState at the last known OPEN rather than resolving it to CLOSED");
+      assert.equal(mqtt?.published.some((entry) => entry.topic.endsWith("garagedoor")), false,
+        "the unrecognized state returns before the garagedoor publish, so no MQTT traffic is produced");
+    });
   });
 
   describe("the Konnected variant", () => {
