@@ -263,7 +263,7 @@ describe("TestMqttClient", () => {
     assert.equal(mqtt.invokeGet("missing"), undefined, "invokeGet returns undefined for an unregistered suffix");
   });
 
-  test("invokeSet drives the recorded setter and publish records the payload", async () => {
+  test("invokeSet drives the recorded setter and publishGuarded records the payload", async () => {
 
     const mqtt = new TestMqttClient();
     let received;
@@ -274,10 +274,10 @@ describe("TestMqttClient", () => {
     });
 
     await mqtt.invokeSet("garagedoor", "open 50");
-    await mqtt.publish("AABB/motion", "true");
+    mqtt.publishGuarded("AABB/motion", "true");
 
     assert.equal(received, "open 50", "invokeSet drives the recorded setter with the supplied value");
-    assert.deepEqual(mqtt.publishes, [{ payload: "true", topic: "AABB/motion" }], "publish records the topic and payload");
+    assert.deepEqual(mqtt.publishes, [{ payload: "true", topic: "AABB/motion" }], "publishGuarded records the topic and payload");
   });
 
   test("invokeSet for an unregistered suffix is a no-op rather than a throw", async () => {
@@ -588,7 +588,7 @@ describe("buildRatgdoAccessory", () => {
    */
   test("routes an accessory debug line into the buffer at warn under the debug opt-in, and drops it without one", () => {
 
-    const debugOn = buildRatgdoAccessory({ config: { debug: true, mqttTopic: undefined, mqttUrl: undefined, options: undefined } });
+    const debugOn = buildRatgdoAccessory({ config: { debug: true, options: undefined } });
     const before = debugOn.entries.length;
 
     debugOn.ratgdo.log.debug("a gated line");

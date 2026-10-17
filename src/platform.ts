@@ -3,13 +3,13 @@
  * platform.ts: homebridge-ratgdo platform class.
  */
 import type { API, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
-import { CoalescingTask, FeatureOptions, HbpuAbortError, createMqttClient, debugGatedLog, discoverServices, formatErrorMessage, prefixedLog, sanitizeName,
-  superviseLoop } from "homebridge-plugin-utils";
+import { CoalescingTask, FeatureOptions, HbpuAbortError, createMqttClient, debugGatedLog, discoverServices, formatErrorMessage, mqttConnectionSettings,
+  prefixedLog, sanitizeName, superviseLoop } from "homebridge-plugin-utils";
 import type { EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
 import type { HomebridgePluginLogging, MdnsDiscovery, MdnsDiscoveryEvent, MqttClient, Nullable } from "homebridge-plugin-utils";
 import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_MDNS_SERVICE_TYPE } from "./settings.ts";
 import { applyDeviceInfo, isEncryptionError, openConnection } from "./connection.ts";
-import { consolidatedFlag, consolidatedValue, featureOptionCategories, featureOptions, normalizeConfig } from "./options.ts";
+import { consolidatedFlag, featureOptionCategories, featureOptions, normalizeConfig } from "./options.ts";
 import { isAdvertisedAt, parseRatgdoService } from "./discovery.ts";
 import type { DiscoveredRatgdo } from "./discovery.ts";
 import { LogLevel } from "esphome-client";
@@ -66,14 +66,13 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.discoveredDevices = new Set();
     this.featureOptions = new FeatureOptions(featureOptionCategories, featureOptions, legacy.options);
 
-    /* Assemble the effective configuration. This is the one place a raw configuration property and a configured feature option meet: every consolidated setting
-     * resolves through the same precedence here, so no reader downstream has to know that a setting has two possible homes.
+    /* Assemble the effective configuration. This is where a raw configuration property and a configured feature option meet for every setting the plugin resolves
+     * for itself, so no reader downstream has to know that a setting has two possible homes. The broker URL and the topic prefix are resolved by the library at the
+     * client's construction below, under the same precedence, so they never take a detour through this shape.
      */
     this.config = {
 
       debug: consolidatedFlag(this.featureOptions, "Log.Debug", legacy.debug),
-      mqttTopic: consolidatedValue(this.featureOptions, "Mqtt.Topic", legacy.mqttTopic),
-      mqttUrl: consolidatedValue(this.featureOptions, "Mqtt.Url", legacy.mqttUrl),
       options: legacy.options
     };
 
@@ -92,12 +91,14 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       return;
     }
 
-    /* Initialize MQTT, if needed. The guarded factory answers null for both of the ways MQTT can fail to start - a broker URL or topic prefix that resolves to
-     * nothing, and a URL the client cannot parse - so a mistyped MQTT setting degrades to MQTT being off rather than keeping the rest of the plugin from loading.
-     * An unusable URL is reported once at error level, with the URL itself redacted so a broker password embedded in it never reaches the log. The platform's
-     * shutdown signal ties the client's lifetime to ours, so we never have to imperatively disconnect it.
+    /* Initialize MQTT, if needed. The resolver and the guarded factory each answer for a way MQTT can fail to start, and both land on the same degradation - MQTT
+     * stays off and the rest of the plugin loads. The resolver answers null when no broker is configured anywhere or the user turned the option off; the factory
+     * answers null for a URL the client cannot parse, reporting that one once at error level with the URL redacted so a broker password embedded in it never reaches
+     * the log. The platform's shutdown signal ties the client's lifetime to ours, so we never have to imperatively disconnect it.
      */
-    this.mqtt = createMqttClient({ brokerUrl: this.config.mqttUrl, log: this.log, topicPrefix: this.config.mqttTopic }, { signal: this.shutdownController.signal });
+    const settings = mqttConnectionSettings({ config: legacy, featureOptions: this.featureOptions });
+
+    this.mqtt = settings && createMqttClient({ ...settings, log: this.log }, { signal: this.shutdownController.signal });
 
     this.log.debug("Debug logging on. Expect a lot of data.");
 

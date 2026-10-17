@@ -545,17 +545,17 @@ interface RecordedMqttPublish {
   topic: string;
 }
 
-/* A recording double of the homebridge-plugin-utils MqttClient surface the device consumes: subscribeGet, subscribeSet, publish. It records every subscription and
- * publish so tests can invoke a registered get / set handler and assert on the published topics and payloads, all without a live broker. The per-subscription abort
+/* A recording double of the homebridge-plugin-utils MqttClient surface the device consumes: subscribeGet, subscribeSet, publishGuarded. It records every subscription
+ * and publish so tests can invoke a registered get / set handler and assert on the published topics and payloads, all without a live broker. The per-subscription abort
  * signal the device passes in the options object is not modeled here - subscribeGet / subscribeSet ignore it, since these tests assert on recorded traffic, not teardown.
+ *
+ * The guarded publish returns void and swallows its own failures, which is the whole of the contract the device depends on, so the double has no failure lever: what
+ * an unreachable broker does to a publish is the library's behavior and the library's suite asserts it.
  */
 export class TestMqttClient {
 
   public readonly gets: RecordedMqttGet[] = [];
   public readonly publishes: RecordedMqttPublish[] = [];
-  // When set, publish() rejects with this error instead of recording, so a test can drive the guarded-publish failure path. Persistent for the double's per-test
-  // lifetime; every test builds a fresh client, so there is no reset machinery.
-  public publishRejection: Nullable<Error> = null;
   public readonly sets: RecordedMqttSet[] = [];
 
   public subscribeGet(topic: string, type: string, getValue: () => string): void {
@@ -568,12 +568,7 @@ export class TestMqttClient {
     this.sets.push({ handler: setValue, topic, type });
   }
 
-  public async publish(topic: string, payload: string): Promise<void> {
-
-    if(this.publishRejection) {
-
-      throw this.publishRejection;
-    }
+  public publishGuarded(topic: string, payload: string): void {
 
     this.publishes.push({ payload, topic });
   }
@@ -969,7 +964,7 @@ export function makeTestPlatform(options: MakeTestPlatformOptions = {}): MakeTes
   const platform: TestPlatform = {
 
     api: { hap },
-    config: options.config ?? { debug: false, mqttTopic: undefined, mqttUrl: undefined, options: undefined },
+    config: options.config ?? { debug: false, options: undefined },
     featureOptions: fo,
     getEspHomeClient: (): TestEspHomeClient | undefined => (options.clientUnavailable ? undefined : client),
     hap,

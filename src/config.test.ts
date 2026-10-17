@@ -2,15 +2,17 @@
  *
  * config.test.ts: The webUI's pure platform-configuration migration, exercised against the REAL feature-option engine and the REAL option catalog so the pins bind to
  * the same grammar the plugin's runtime resolves against. Covers every arm of the legacy-settings migration - what migrates, what deletes without migrating, and what
- * declines entirely - plus a round trip proving a migrated configuration runs the platform on the same effective values the legacy one did.
+ * declines entirely - plus a round trip proving a migrated configuration runs the platform on the same effective values the legacy one did, and the precedence rows
+ * for the broker and prefix the library resolves ratgdo's client from.
  *
  * One discipline binds every claim about a deleted property: a patch carries a deletion as a PRESENT key whose value is undefined, and carries a non-deletion by
  * omitting the key. An equality read cannot tell those apart, and the session's shallow-merge commit treats them oppositely, so presence is asserted with
  * Object.hasOwn and absence with its negation - never with a comparison against undefined.
  */
-import { consolidatedFlag, consolidatedValue, featureOptionCategories, featureOptions } from "./options.ts";
+import { FeatureOptions, mqttConnectionSettings } from "homebridge-plugin-utils";
+import { consolidatedFlag, featureOptionCategories, featureOptions } from "./options.ts";
 import { describe, test } from "node:test";
-import { FeatureOptions } from "homebridge-plugin-utils";
+import { RATGDO_MQTT_TOPIC } from "./settings.ts";
 import assert from "node:assert/strict";
 import { makeRatgdoConfig } from "../homebridge-ui/public/ratgdo-config.mjs";
 
@@ -216,16 +218,64 @@ describe("the ratgdo webUI configuration migration", () => {
     const migrated = { ...legacy, ...patch };
     const before = new FeatureOptions(featureOptionCategories, featureOptions, []);
     const after = new FeatureOptions(featureOptionCategories, featureOptions, migrated.options);
+    const beforeSettings = mqttConnectionSettings({ config: legacy, featureOptions: before });
 
-    assert.equal(consolidatedValue(before, "Mqtt.Url", legacy.mqttUrl), OPTION_URL, "the legacy shape resolves the broker URL through its property");
-    assert.equal(consolidatedValue(before, "Mqtt.Topic", legacy.mqttTopic), "garage", "the legacy shape resolves the custom topic through its property");
+    assert.deepEqual(beforeSettings, { brokerUrl: OPTION_URL, topicPrefix: "garage" },
+      "the legacy shape resolves its broker and its custom prefix through its own properties, away from every default");
     assert.equal(consolidatedFlag(before, "Log.Debug", legacy.debug), true, "the legacy shape resolves debug on, so the comparisons below are not two defaults agreeing");
 
-    assert.equal(consolidatedValue(after, "Mqtt.Url", migrated.mqttUrl), consolidatedValue(before, "Mqtt.Url", legacy.mqttUrl),
-      "the migrated config resolves the same effective broker URL");
-    assert.equal(consolidatedValue(after, "Mqtt.Topic", migrated.mqttTopic), consolidatedValue(before, "Mqtt.Topic", legacy.mqttTopic),
-      "the migrated config resolves the same effective topic prefix");
+    assert.deepEqual(mqttConnectionSettings({ config: migrated, featureOptions: after }), beforeSettings,
+      "the migrated config resolves the same effective broker URL and topic prefix");
     assert.equal(consolidatedFlag(after, "Log.Debug", migrated.debug), consolidatedFlag(before, "Log.Debug", legacy.debug),
       "the migrated config resolves the same effective debug flag");
+  });
+});
+
+/* The broker URL and topic prefix the platform constructs its MQTT client from, resolved by the library over ratgdo's own catalog. These rows are the precedence
+ * contract the constructor depends on, driven against a REAL engine over the REAL catalog so they bind to the same grammar it resolves against. Each row carries
+ * distinct values on its option side and its property side, so a resolution that transposed its arms - or that reached for the property first - fails rather than
+ * agreeing with itself.
+ */
+describe("the MQTT connection settings ratgdo resolves", () => {
+
+  // A real engine over the real catalog and the supplied entries, built exactly as the platform constructor builds its own.
+  const engineFor = (entries: string[]): FeatureOptions => new FeatureOptions(featureOptionCategories, featureOptions, entries);
+
+  test("the raw configuration properties alone resolve to themselves", () => {
+
+    assert.deepEqual(mqttConnectionSettings({ config: { mqttTopic: "garage", mqttUrl: LEGACY_URL }, featureOptions: engineFor([]) }),
+      { brokerUrl: LEGACY_URL, topicPrefix: "garage" }, "a configuration nobody has opened the webUI on keeps running on its own properties");
+  });
+
+  test("a configured option rules over a differing raw property, on the broker and the prefix alike", () => {
+
+    const engine = engineFor([ "Enable.Mqtt.Topic=garage", "Enable.Mqtt.Url=" + OPTION_URL ]);
+
+    assert.deepEqual(mqttConnectionSettings({ config: { mqttTopic: "attic", mqttUrl: LEGACY_URL }, featureOptions: engine }),
+      { brokerUrl: OPTION_URL, topicPrefix: "garage" }, "configuring an option is the user saying what they want, so it outranks the property beside it");
+  });
+
+  test("a broker with no topic configured anywhere takes the prefix the catalog registers", () => {
+
+    assert.deepEqual(mqttConnectionSettings({ config: { mqttUrl: LEGACY_URL }, featureOptions: engineFor([]) }),
+      { brokerUrl: LEGACY_URL, topicPrefix: RATGDO_MQTT_TOPIC }, "the prefix a user never sets is the one the catalog answers with");
+  });
+
+  test("a broker whose raw topic property is blank takes the prefix the catalog registers", () => {
+
+    assert.deepEqual(mqttConnectionSettings({ config: { mqttTopic: "", mqttUrl: LEGACY_URL }, featureOptions: engineFor([]) }),
+      { brokerUrl: LEGACY_URL, topicPrefix: RATGDO_MQTT_TOPIC },
+      "a blank field is the absence of a topic rather than a topic of nothing, so the catalog default answers and MQTT runs for a user who configured a broker");
+  });
+
+  test("no broker configured anywhere resolves to no client at all", () => {
+
+    assert.equal(mqttConnectionSettings({ config: {}, featureOptions: engineFor([]) }), null, "MQTT is off until a broker is configured");
+  });
+
+  test("a blank raw broker URL resolves to no client at all", () => {
+
+    assert.equal(mqttConnectionSettings({ config: { mqttUrl: "" }, featureOptions: engineFor([]) }), null,
+      "a blank broker field leaves nothing to connect to, so MQTT stays off");
   });
 });

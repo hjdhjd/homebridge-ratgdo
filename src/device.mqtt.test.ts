@@ -261,6 +261,29 @@ describe("RatgdoAccessory MQTT configuration", () => {
     });
   });
 
+  describe("the registered subscription table", () => {
+
+    test("registers each topic beside the label the client logs that topic under", () => {
+
+      const { mqtt } = buildRatgdoAccessory({ mqtt: true, userOptions: [ "Enable.Motion.OccupancySensor", "Enable.Opener.OccupancySensor" ] });
+
+      assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
+
+      /* Reduce every recorded registration to the pair that reaches a user: the tail the accessory subscribed on, and the label the client names it by in the
+       * sentence it logs when a get or a set arrives. Both sides are sorted by tail, because the order configureMqtt registers in is not part of the contract while
+       * the pairing is - a site reading the right topic beside another entry's label satisfies every other assertion in this file and fails only here.
+       */
+      const tailOf = (topic: string): string => topic.slice((DEVICE_MAC + "/").length);
+      const byTail = (registrations: { topic: string; type: string }[]): string[][] => registrations.map((entry) => [ tailOf(entry.topic), entry.type ]).sort();
+
+      assert.deepEqual(byTail(mqtt.gets), [ [ "dooropenoccupancy", "Door Open Indicator Occupancy" ], [ "garagedoor", "Garage Door" ], [ "light", "Light" ],
+        [ "lock", "Lock" ], [ "motion", "Motion" ], [ "obstruction", "Obstruction" ], [ "occupancy", "Occupancy" ] ],
+      "with every gated feature enabled, each get subscription carries its own tail and its own label");
+
+      assert.deepEqual(byTail(mqtt.sets), [[ "garagedoor", "Garage Door" ]], "the garage door is the one topic the accessory accepts a command on");
+    });
+  });
+
   describe("the per-device topic prefix", () => {
 
     test("prefixes every registered get and set topic with the device MAC", () => {

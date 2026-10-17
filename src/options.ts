@@ -2,7 +2,7 @@
  *
  * options.ts: Feature option and type definitions for Ratgdo.
  */
-import type { FeatureOptionEntry, FeatureOptionScope, FeatureOptions, Nullable } from "homebridge-plugin-utils";
+import type { FeatureOptionEntry, FeatureOptionScope, FeatureOptions } from "homebridge-plugin-utils";
 import { RATGDO_MQTT_TOPIC, RATGDO_OCCUPANCY_DURATION } from "./settings.ts";
 import { buildFixedScopeDescribers, mqttFeatureOptions } from "homebridge-plugin-utils";
 import type { PlatformConfig } from "homebridge";
@@ -21,14 +21,13 @@ export type RatgdoOptions = Partial<{
 
 /* The platform's effective configuration, assembled once by the constructor from each setting's configured feature option and its configuration property. This
  * describes what the plugin actually runs on rather than mirroring the shape of config.json, which is why it is a separate type from the property shape above rather
- * than a widening of it: the two have different value ranges. A narrowed property is a string or nothing, while a resolved option routinely answers null - the
- * feature-option engine's word for "explicitly off" - and the MQTT client factory reads both absences as MQTT being off.
+ * than a widening of it: the two have different value ranges. The debug flag is a plain boolean here because its resolution always reaches an answer - a configured
+ * option, a configuration property, or the catalog's own declared default - where the narrowed property it starts from may be absent. The options array is the raw
+ * entry list the feature-option engine was built from, carried alongside so a reader of this shape can see what every resolution ran against.
  */
 export interface RatgdoResolvedConfig {
 
   debug: boolean;
-  mqttTopic: Nullable<string> | undefined;
-  mqttUrl: Nullable<string> | undefined;
   options: string[] | undefined;
 }
 
@@ -50,14 +49,8 @@ export interface RatgdoFeatureOption extends Omit<FeatureOptionEntry, "scopes"> 
   readonly scopes: readonly [ RatgdoFeatureOptionScope, ...RatgdoFeatureOptionScope[] ];
 }
 
-/* The globally-scoped value-centric option names the platform resolves once at startup. The value resolver narrows against this union, so asking it for an option that
- * carries no global value is a type error rather than a lookup that quietly answers nothing. Both members name entries the library's MQTT factory publishes, and they
- * are bound to those entries by convention exactly as the flag union below is bound to this catalog's own Log.Debug entry.
- */
-export type RatgdoGlobalValueOption = "Mqtt.Topic" | "Mqtt.Url";
-
-/* The globally-scoped boolean option names, the flag counterpart of the union above and bound to the catalog the same way. The flag resolver narrows against it, so
- * asking it for a value-bearing option, or for one no global lookup admits, is a type error.
+/* The globally-scoped boolean option names, bound by convention to this catalog's own Log.Debug entry. The flag resolver narrows against this union, so asking it for
+ * a value-bearing option, or for one no global lookup admits, is a type error rather than a lookup that quietly answers nothing.
  */
 export type RatgdoGlobalFlagOption = "Log.Debug";
 
@@ -91,22 +84,15 @@ export function normalizeConfig(config: PlatformConfig | undefined): RatgdoOptio
   };
 }
 
-/* Resolve one consolidated setting to its effective value. An explicitly configured feature option always rules - its enabled, disabled, and valueless states alike -
- * because configuring an option is the user saying what they want. A configuration property, where one is present, otherwise outranks the catalog default, so a
- * configuration nobody has opened the webUI on keeps running correctly. That fallback arm is transitional and sunsets at the plugin's next major version, at which
- * point the option is the only home a setting has.
+/* Resolve one consolidated boolean setting to its effective state. An explicitly configured feature option rules, enabled or disabled alike, because configuring an
+ * option is the user saying what they want. A configuration property, where one carries an actual boolean, otherwise outranks the catalog default, so a configuration
+ * nobody has opened the webUI on keeps running correctly; that fallback arm is transitional and sunsets at the plugin's next major version, at which point the option
+ * is the only home a setting has. The catalog's own declared default closes the chain, which is what lets a flag whose default is on resolve honestly without a line
+ * changing here.
  *
  * The engine arrives as a parameter rather than being reached for, which keeps this a pure function of its inputs and lets it be driven against a real engine built
- * over any catalog.
- */
-export const consolidatedValue = (featureOptions: FeatureOptions, option: RatgdoGlobalValueOption, legacy: string | undefined): Nullable<string | undefined> => {
-
-  return featureOptions.exists(option) ? featureOptions.value(option) : legacy ?? featureOptions.value(option);
-};
-
-/* Resolve one consolidated boolean setting to its effective state, the flag twin of the resolver above and the same rule in boolean terms. An explicitly configured
- * feature option rules, enabled or disabled alike. A configuration property, where one carries an actual boolean, otherwise decides. The catalog's own declared
- * default closes the chain, which is what lets a flag whose default is on resolve honestly without a line changing here.
+ * over any catalog. Debug is the one setting the plugin resolves for itself: the broker URL and the topic prefix are the library's to resolve, through
+ * mqttConnectionSettings over this same catalog.
  */
 export const consolidatedFlag = (featureOptions: FeatureOptions, option: RatgdoGlobalFlagOption, legacy: boolean | undefined): boolean => {
 

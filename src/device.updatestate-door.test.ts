@@ -234,6 +234,17 @@ describe("RatgdoAccessory.updateState() cover events", () => {
         "the subsequent open transition publishes its own door state to the garagedoor topic");
     });
 
+    test("publishes the stopped state to MQTT for a door parked at a partial position", () => {
+
+      const { mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true });
+
+      // An IDLE cover reported OPEN strictly between 0 and 1 resolves to stopped-at-partial, which is a door state of its own on the wire and in the document.
+      ratgdo.updateState(coverEvent("cover-door", "IDLE", "OPEN", 0.5));
+
+      assert.ok(mqtt?.publishes.some((entry) => entry.topic.endsWith("garagedoor") && (entry.payload === "stopped")),
+        "a door parked at a partial position publishes the stopped state to the garagedoor topic");
+    });
+
     test("logs the capitalized door state at info level when Log.Opener is enabled", () => {
 
       const { entries, ratgdo } = buildRatgdoAccessory();

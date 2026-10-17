@@ -5,8 +5,7 @@
  * feature-option consumer (the FeatureOptions engine, the WebUI, the docs renderer) depends on.
  */
 import type { FeatureCategoryEntry, FeatureOptionEntry } from "homebridge-plugin-utils";
-import { consolidatedFlag, consolidatedValue, describeCategoryScope, describeOptionScope, featureOptionCategories, featureOptions,
-  normalizeConfig } from "./options.ts";
+import { consolidatedFlag, describeCategoryScope, describeOptionScope, featureOptionCategories, featureOptions, normalizeConfig } from "./options.ts";
 import { describe, test } from "node:test";
 import { FeatureOptions } from "homebridge-plugin-utils";
 import type { PlatformConfig } from "homebridge";
@@ -133,6 +132,13 @@ describe("normalizeConfig", () => {
       const result = normalizeConfig(asConfig({ mqttUrl: "mqtt://broker.local" }));
 
       assert.equal(result.mqttUrl, "mqtt://broker.local", "a string mqttUrl passes the typeof guard and is carried through verbatim");
+    });
+
+    test("is kept as the empty string, since the empty string is still typeof string", () => {
+
+      const result = normalizeConfig(asConfig({ mqttUrl: "" }));
+
+      assert.equal(result.mqttUrl, "", "the empty string is a valid string and the guard is typeof-based, not truthiness-based, so it is retained");
     });
 
     test("is undefined when it is a non-string value", () => {
@@ -310,15 +316,11 @@ describe("the feature-option catalog", () => {
   });
 });
 
-/* The consolidated-setting resolvers, driven through every arm against a REAL engine over the REAL catalog, so the pins bind to the same grammar the platform
+/* The consolidated-setting resolver, driven through every arm against a REAL engine over the REAL catalog, so the assertions bind to the same grammar the platform
  * constructor resolves against. Each row carries distinct values on its option side and its property side, so an implementation that transposed the two arms - or
  * that reached for the property first - fails rather than agreeing with itself.
  */
 describe("the consolidated setting resolvers", () => {
-
-  // The two broker URLs the precedence rows tell apart: one carried by a configured option, one by the configuration property.
-  const LEGACY_URL = "mqtt://legacy.example:1883";
-  const OPTION_URL = "mqtt://option.example:1883";
 
   // A real engine over the real catalog and the supplied entries, built exactly as the platform constructor builds its own.
   const engineFor = (entries: string[]): FeatureOptions => new FeatureOptions(featureOptionCategories, featureOptions, entries);
@@ -329,46 +331,6 @@ describe("the consolidated setting resolvers", () => {
    */
   const defaultOnEngine = (entries: string[]): FeatureOptions => new FeatureOptions([{ description: "Logging", name: "Log" }],
     { "Log": [{ default: true, description: "Enable debug logging.", name: "Debug", scopes: ["global"] }] }, entries);
-
-  describe("consolidatedValue", () => {
-
-    test("an option enabled with a value rules over a differing configuration property", () => {
-
-      assert.equal(consolidatedValue(engineFor(["Enable.Mqtt.Url=" + OPTION_URL]), "Mqtt.Url", LEGACY_URL), OPTION_URL,
-        "configuring the option is the user saying what they want, so it outranks the property");
-    });
-
-    test("an explicitly disabled option answers null beside a lingering configuration property", () => {
-
-      assert.equal(consolidatedValue(engineFor(["Disable.Mqtt.Url"]), "Mqtt.Url", LEGACY_URL), null,
-        "an explicit disable is a configured state, so the property does not resurrect the setting");
-    });
-
-    test("an enabled option carrying no value answers undefined beside a differing configuration property", () => {
-
-      assert.equal(consolidatedValue(engineFor(["Enable.Mqtt.Url"]), "Mqtt.Url", LEGACY_URL), undefined,
-        "a valueless entry is still a configured entry, so undefined wins rather than falling through to the property");
-    });
-
-    test("a configuration property answers when no entry exists", () => {
-
-      assert.equal(consolidatedValue(engineFor([]), "Mqtt.Url", LEGACY_URL), LEGACY_URL,
-        "a configuration nobody has opened the webUI on keeps running on its own properties");
-      assert.equal(consolidatedValue(engineFor([]), "Mqtt.Topic", "garage"), "garage", "the topic property answers the same way the broker URL does");
-    });
-
-    test("an empty-string configuration property is a value, not an absence", () => {
-
-      assert.equal(consolidatedValue(engineFor([]), "Mqtt.Url", ""), "",
-        "the fallback is nullish, not truthy, so an empty string the user actually wrote survives to the consumer");
-    });
-
-    test("the catalog default answers when neither an entry nor a property exists", () => {
-
-      assert.equal(consolidatedValue(engineFor([]), "Mqtt.Topic", undefined), "ratgdo", "the topic falls back to the default the catalog registers");
-      assert.equal(consolidatedValue(engineFor([]), "Mqtt.Url", undefined), null, "the broker URL defaults to off, which the engine answers as null");
-    });
-  });
 
   describe("consolidatedFlag", () => {
 
