@@ -802,6 +802,7 @@ const featureOptionsParams = {
 
       "auth-invalid": { label: "Key mismatch", message: "The configured encryption key does not match the key in this device's YAML configuration." },
       "auth-missing": { label: "Key required", message: "This device requires its API encryption key. Set it with the Device Encryption Key feature option." },
+      "misconfigured": { label: "Not an opener", message: "Something answered at this address, but it is not a Ratgdo or Konnected opener this plugin supports." },
       "not-found": { message: "This device was not discovered via mDNS." },
       "unsupported": { message: "This device's ESPHome API version is not one this plugin can talk to. Update the device's firmware or this plugin so the two match." }
     },

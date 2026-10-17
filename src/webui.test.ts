@@ -432,7 +432,7 @@ describe("the ratgdo settings page", () => {
 
       const panel = page.double.params.statusPanel;
 
-      assert.deepEqual(Object.keys(panel?.errorMessages ?? {}).sort(), [ "auth-invalid", "auth-missing", "not-found", "unsupported" ],
+      assert.deepEqual(Object.keys(panel?.errorMessages ?? {}).sort(), [ "auth-invalid", "auth-missing", "misconfigured", "not-found", "unsupported" ],
         "the page overrides exactly the reasons whose ratgdo wording differs from the framework's defaults");
       assert.match(panel?.errorMessages?.["unsupported"]?.message ?? "", /firmware/,
         "the unsupported copy tells an opener's user which side to update rather than naming the protocol");
