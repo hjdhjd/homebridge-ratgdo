@@ -99,7 +99,7 @@ describe("captureInitialState", () => {
 
     controller.abort("shutdown");
 
-    await assert.rejects(pending, (reason) => reason === "shutdown", "an abort delivered while waiting surfaces the reason through the abort listener");
+    await assert.rejects(pending, (reason) => reason === "shutdown", "an abort delivered while waiting surfaces the signal's reason");
   });
 });
 
@@ -139,7 +139,7 @@ describe("openConnection", () => {
     assert.ok(result.ok, "a connected client with a complete snapshot yields a success outcome");
     assert.equal(result.client, client, "the resolved client is returned");
     assert.equal(result.initialState, client.snapshot(), "the captured initial state is the client's populated cache");
-    assert.equal(client.disposed, false, "a successful open does not dispose the client");
+    assert.equal(client.disposeCount, 0, "a successful open does not dispose the client");
     assert.equal(entries.filter((entry) => entry.level === "error").length, 0, "the success path logs nothing at error level");
 
     // The headline of the client-factory port: the platform resolves the encryption key and threads a concrete psk through openConnection into the factory. Pin that the
@@ -224,7 +224,7 @@ describe("openConnection", () => {
     assert.equal(result.reason, "timeout", "the failure outcome carries the timeout reason token");
     assert.ok(loggedAt(entries, "error", "Initial-state capture timed out after 0.02 seconds"),
       "the user sees the timeout diagnostic carrying the budget it exhausted");
-    assert.equal(client.disposed, true, "the partially-constructed client is torn down");
+    assert.equal(client.disposeCount, 1, "the partially-constructed client is torn down");
   });
 
   test("shutdown: returns null silently and disposes the client", async () => {
@@ -235,7 +235,7 @@ describe("openConnection", () => {
     assert.ok(!result.ok, "an in-flight discovery interrupted by shutdown is abandoned");
     assert.equal(result.reason, "shutdown", "the failure outcome carries the shutdown reason token");
     assert.equal(entries.filter((entry) => entry.level === "error").length, 0, "shutdown is not a failure, so nothing is logged at error level");
-    assert.equal(client.disposed, true, "the client opened before the shutdown abort is torn down");
+    assert.equal(client.disposeCount, 1, "the client opened before the shutdown abort is torn down");
   });
 
   test("shutdown mid-connect: a factory call cancelled by the shutdown signal stands down silently", async () => {

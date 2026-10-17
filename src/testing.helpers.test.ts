@@ -8,12 +8,13 @@
  * getCharacteristic returns a stable instance; triggerSet runs the handler then caches; on/emit/dispose drive and detach; the telemetry factories key the snapshot the
  * way the device reads it; makeTestPlatform wires a REAL FeatureOptions engine). It exercises the harness directly rather than through a production accessory.
  */
-import { Characteristic, Service, TestEspHomeClient, TestMqttClient, TestService, asEspHomeClient, buildRatgdoAccessory, makeBinarySensorEvent,
+import { Characteristic, Service, TestEspHomeClient, TestService, asEspHomeClient, buildRatgdoAccessory, makeBinarySensorEvent,
   makeCoverEvent, makeFakeOpenClient, makeKonnectedInitialState, makeLightEvent, makeLockEvent, makeRatgdoInitialState, makeRatgdoService, makeSwitchEvent,
   makeTelemetry, makeTestAccessory, makeTestDevice, makeTestPlatform } from "./testing.helpers.ts";
 import { CoverOperation, LockState, entityId } from "esphome-client";
+import { TestMqttClient, logCount, loggedAt } from "homebridge-plugin-utils/testing";
 import { describe, test } from "node:test";
-import { logCount, loggedAt } from "homebridge-plugin-utils/testing";
+import type { LifecycleEvent } from "esphome-client";
 import { RatgdoVariant } from "./types.ts";
 import assert from "node:assert/strict";
 import { txtEntries } from "homebridge-plugin-utils";
@@ -251,43 +252,6 @@ describe("HAP marker namespaces", () => {
   });
 });
 
-describe("TestMqttClient", () => {
-
-  test("subscribeGet records a getter that invokeGet resolves by topic suffix", () => {
-
-    const mqtt = new TestMqttClient();
-
-    mqtt.subscribeGet("AABB/garagedoor", "Garage Door", () => "open");
-
-    assert.equal(mqtt.invokeGet("garagedoor"), "open", "invokeGet matches the recorded getter by topic suffix and returns its value");
-    assert.equal(mqtt.invokeGet("missing"), undefined, "invokeGet returns undefined for an unregistered suffix");
-  });
-
-  test("invokeSet drives the recorded setter and publishGuarded records the payload", async () => {
-
-    const mqtt = new TestMqttClient();
-    let received;
-
-    mqtt.subscribeSet("AABB/garagedoor", "Garage Door", (value) => {
-
-      received = value;
-    });
-
-    await mqtt.invokeSet("garagedoor", "open 50");
-    mqtt.publishGuarded("AABB/motion", "true");
-
-    assert.equal(received, "open 50", "invokeSet drives the recorded setter with the supplied value");
-    assert.deepEqual(mqtt.publishes, [{ payload: "true", topic: "AABB/motion" }], "publishGuarded records the topic and payload");
-  });
-
-  test("invokeSet for an unregistered suffix is a no-op rather than a throw", async () => {
-
-    const mqtt = new TestMqttClient();
-
-    await assert.doesNotReject(() => mqtt.invokeSet("absent", "x"), "invoking an unregistered set topic must not throw");
-  });
-});
-
 describe("TestEspHomeClient", () => {
 
   test("command records the resolved id and payload", () => {
@@ -387,13 +351,80 @@ describe("TestEspHomeClient", () => {
     assert.equal(client.snapshot().size, 1, "the client's own cache reflects the delivered state");
   });
 
-  test("[Symbol.dispose] records the disposal openConnection performs on a failed open", () => {
+  test("[Symbol.dispose] counts the disposal openConnection performs on a failed open", () => {
 
     const client = new TestEspHomeClient();
 
-    assert.equal(client.disposed, false, "a fresh client is not disposed");
+    assert.equal(client.disposeCount, 0, "a fresh client is not disposed");
     client[Symbol.dispose]();
-    assert.equal(client.disposed, true, "[Symbol.dispose] records the teardown openConnection's catch performs via client?.[Symbol.dispose]()");
+    assert.equal(client.disposeCount, 1, "[Symbol.dispose] counts the teardown openConnection's catch performs via client?.[Symbol.dispose]()");
+    client[Symbol.dispose]();
+    assert.equal(client.disposeCount, 2, "a counter tells a second disposal apart from the first, where a boolean would read the same either way");
+  });
+
+  test("[Symbol.dispose] emits a disconnect synchronously to a listener still registered", () => {
+
+    const client = new TestEspHomeClient();
+    const seen: LifecycleEvent[] = [];
+    const subscription = client.on("lifecycle", (event: LifecycleEvent) => {
+
+      seen.push(event);
+    });
+
+    client[Symbol.dispose]();
+
+    assert.deepEqual(seen, [{ cause: undefined, kind: "disconnect" }],
+      "disposal emits the disconnect member through the handler map, so a teardown-ordering test observes it without awaiting a turn");
+
+    // A listener released before the client goes down hears nothing, which is the other half of the ordering guarantee the feed's teardown test rests on.
+    subscription[Symbol.dispose]();
+    client[Symbol.dispose]();
+
+    assert.equal(seen.length, 1, "a listener released before the disposal hears no disconnect");
+  });
+
+  test("isEncrypted reads false by default and reflects the seeded value", () => {
+
+    assert.equal(new TestEspHomeClient().isEncrypted, false, "an unseeded client mirrors a plaintext session");
+    assert.equal(new TestEspHomeClient({ isEncrypted: true }).isEncrypted, true, "the seeded encryption state is what the getter reports");
+  });
+
+  test("onListen fires synchronously inside on(), receiving the event name and the client", () => {
+
+    const calls: [ string, boolean ][] = [];
+    const client: TestEspHomeClient = new TestEspHomeClient({ onListen: (event, listened) => calls.push([ event, listened === client ]) });
+
+    client.on("telemetry", () => { /* The handler is beside the point here...the hook's timing is the subject. */ });
+
+    assert.equal(calls.length, 1, "the hook runs inside on() rather than on a later turn, which is the window a real client can emit into");
+    assert.deepEqual(calls, [[ "telemetry", true ]], "the hook receives the event name it was registered for and the client that registered it");
+  });
+
+  test("throwOnListen makes on() throw and registers nothing", () => {
+
+    const client = new TestEspHomeClient({ throwOnListen: true });
+
+    assert.throws(() => client.on("lifecycle", () => { /* Never registered: the throw precedes registration. */ }), /listener registration failed/u,
+      "a client whose listener registration fails throws out of on()");
+
+    // Nothing was recorded, so a later emit reaches no handler - the state a consumer's totality catch has to cope with.
+    client.emit("lifecycle", { encrypted: false, kind: "connect" });
+
+    assert.deepEqual(client.listenerDisposals, [], "a registration that threw leaves no listener to release");
+  });
+
+  test("listenerDisposals records each listener's event name when its Disposable runs", () => {
+
+    const client = new TestEspHomeClient();
+    const lifecycle = client.on("lifecycle", () => { /* Registered only so its Disposable can be run below. */ });
+    const telemetry = client.on("telemetry", () => { /* Likewise. */ });
+
+    assert.deepEqual(client.listenerDisposals, [], "registration alone records no disposal");
+
+    telemetry[Symbol.dispose]();
+    lifecycle[Symbol.dispose]();
+
+    assert.deepEqual(client.listenerDisposals, [ "telemetry", "lifecycle" ], "each Disposable records its own event name, in the order the releases ran");
   });
 });
 
@@ -431,6 +462,25 @@ describe("asEspHomeClient and makeFakeOpenClient", () => {
     assert.equal(open.calls.length, 1, "every invocation is recorded");
     assert.equal(open.calls[0]?.host, "192.0.2.10", "the recorded options carry the host openConnection forwards");
     assert.equal(open.calls[0]?.psk, "k", "the recorded options carry the psk, so a test can assert the resolved key threads through the seam unchanged");
+  });
+
+  test("makeFakeOpenClient answers each call through a handler, passing that call's options and its zero-based index", async () => {
+
+    const first = new TestEspHomeClient();
+    const second = new TestEspHomeClient();
+    const seen: [ string, number ][] = [];
+    const open = makeFakeOpenClient(async (options, index) => {
+
+      seen.push([ options.host, index ]);
+
+      return (index === 0) ? first : second;
+    });
+
+    assert.equal(await open({ host: "192.0.2.10" }), first, "the handler's answer for the first call is what the factory resolves");
+    assert.equal(await open({ host: "192.0.2.11" }), second, "a handler answers a later call differently, which is the whole of what the fixed forms cannot do");
+    assert.deepEqual(seen, [ [ "192.0.2.10", 0 ], [ "192.0.2.11", 1 ] ], "the handler receives each call's own options and its zero-based index");
+    assert.deepEqual(open.calls.map((call) => call.host), [ "192.0.2.10", "192.0.2.11" ],
+      "every call is recorded once, on the single recording path the fixed and handler forms share");
   });
 });
 

@@ -128,8 +128,9 @@ export class RatgdoAccessory implements Disposable {
   private readonly status: RatgdoStatus;
   // The timer registry for this accessory: every deferred callback (the motion and occupancy resets, the Konnected pulse, the UI revert) arms through it, keyed for the
   // timers whose newest intent should replace the prior one and anonymous for the fire-and-forget ones. Its dispose drains every pending timer in lockstep with the
-  // accessory's teardown. No lifetime signal is passed - the accessory's own [Symbol.dispose] is the only lifetime bound.
-  private readonly timers = new TimerRegistry();
+  // accessory's teardown. No lifetime signal is passed - the accessory's own [Symbol.dispose] is the only lifetime bound. Every deadline this accessory arms reads the
+  // platform's clock, so a device timer and a platform timer share one timeline rather than each finding their own.
+  private readonly timers: TimerRegistry;
 
   constructor(platform: RatgdoPlatform, accessory: PlatformAccessory, device: RatgdoDevice, initialState: ReadonlyMap<EntityId, TelemetryEvent>) {
 
@@ -139,6 +140,7 @@ export class RatgdoAccessory implements Disposable {
     this.device = device;
     this.platform = platform;
     this.services = {};
+    this.timers = new TimerRegistry({ clock: platform.clock });
 
     /* Compose this accessory's logger from the library's two wrappers over the platform's own logger. The prefix is a supplier rather than a captured string, so a
      * device the user renames carries the new name on the very next line. The debug gate sits outermost, which is what keeps a suppressed debug line to a single

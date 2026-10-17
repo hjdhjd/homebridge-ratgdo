@@ -20,10 +20,10 @@
 // The explicit-resource-management bridge, first here as it is first in the plugin's entry point: this file is the suite's composition root, so every test that
 // constructs a feed or an accessory reads against globals that are guaranteed to exist.
 import "homebridge-plugin-utils/polyfills";
+import type { Clock, HomebridgePluginLogging, MdnsService, Nullable } from "homebridge-plugin-utils";
 import { CoverOperation, LockState, entityId } from "esphome-client";
 import type { EntityId, EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
-import type { HomebridgePluginLogging, MdnsService, Nullable } from "homebridge-plugin-utils";
-import { capturingLog, makeService } from "homebridge-plugin-utils/testing";
+import { TestClock, TestMqttClient, capturingLog, makeService } from "homebridge-plugin-utils/testing";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import { FeatureOptions } from "homebridge-plugin-utils";
 import type { OpenEspHomeClient } from "./connection.ts";
@@ -524,70 +524,6 @@ export function makeTestAccessory(displayName = "Test Ratgdo", uuid = "00000000-
   return new TestAccessory(displayName, uuid);
 }
 
-// A recorded MQTT subscription. We retain the get / set handlers by topic so a test can invoke them and assert the returned / published values.
-interface RecordedMqttGet {
-
-  handler: () => string;
-  topic: string;
-  type: string;
-}
-
-interface RecordedMqttSet {
-
-  handler: (value: string, rawValue: string, signal: AbortSignal) => Promise<void> | void;
-  topic: string;
-  type: string;
-}
-
-interface RecordedMqttPublish {
-
-  payload: string;
-  topic: string;
-}
-
-/* A recording double of the homebridge-plugin-utils MqttClient surface the device consumes: subscribeGet, subscribeSet, publishGuarded. It records every subscription
- * and publish so tests can invoke a registered get / set handler and assert on the published topics and payloads, all without a live broker. The per-subscription abort
- * signal the device passes in the options object is not modeled here - subscribeGet / subscribeSet ignore it, since these tests assert on recorded traffic, not teardown.
- *
- * The guarded publish returns void and swallows its own failures, which is the whole of the contract the device depends on, so the double has no failure lever: what
- * an unreachable broker does to a publish is the library's behavior and the library's suite asserts it.
- */
-export class TestMqttClient {
-
-  public readonly gets: RecordedMqttGet[] = [];
-  public readonly publishes: RecordedMqttPublish[] = [];
-  public readonly sets: RecordedMqttSet[] = [];
-
-  public subscribeGet(topic: string, type: string, getValue: () => string): void {
-
-    this.gets.push({ handler: getValue, topic, type });
-  }
-
-  public subscribeSet(topic: string, type: string, setValue: (value: string, rawValue: string, signal: AbortSignal) => Promise<void> | void): void {
-
-    this.sets.push({ handler: setValue, topic, type });
-  }
-
-  public publishGuarded(topic: string, payload: string): void {
-
-    this.publishes.push({ payload, topic });
-  }
-
-  // Invoke the recorded get handler for a topic suffix (matched by suffix so callers need not reproduce the full per-device prefix). Returns the handler's value.
-  public invokeGet(topicSuffix: string): string | undefined {
-
-    return this.gets.find((entry) => entry.topic.endsWith(topicSuffix))?.handler();
-  }
-
-  // Invoke the recorded set handler for a topic suffix. The device's set handlers read only the first (normalized) argument, so rawValue mirrors value by default.
-  public async invokeSet(topicSuffix: string, value: string): Promise<void> {
-
-    const entry = this.sets.find((record) => record.topic.endsWith(topicSuffix));
-
-    await entry?.handler(value, value, new AbortController().signal);
-  }
-}
-
 // A recorded esphome-client command dispatch. id is the branded entity id the device resolved through its registry; payload is the command options object.
 export interface RecordedCommand {
 
@@ -595,40 +531,61 @@ export interface RecordedCommand {
   payload: unknown;
 }
 
-// Construction options for TestEspHomeClient. Each field seeds one of the configurable reads so a test tailors the device's view of the wire without a live connection.
+/* Construction options for TestEspHomeClient. Each field seeds one of the configurable reads so a test tailors the device's view of the wire without a live connection.
+ * `onListen` and `throwOnListen` seed the two registration behaviors a consumer's connect body has to survive: a client that emits the instant a listener attaches, and
+ * one whose registration fails outright.
+ */
 export interface TestEspHomeClientOptions {
 
   capabilities?: { encryption: { active: boolean } };
   deviceInfo?: { esphomeVersion?: string; projectVersion?: string };
   entities?: { objectId: string; type: string }[];
+  isEncrypted?: boolean;
+  onListen?: (event: string, client: TestEspHomeClient) => void;
   snapshot?: ReadonlyMap<EntityId, TelemetryEvent>;
+  throwOnListen?: boolean;
 }
 
-/* A fake esphome-client covering the surface the plugin calls: command (recorded), deviceInfo / snapshot / entitiesByDevice / capabilities (configurable),
- * disconnect / subscribeToLogs (recorded), and on (registers a handler and returns a Disposable). emit lets a test drive a lifecycle / telemetry / log event through
- * the registered handlers. Construction options seed the configurable reads so a test tailors the device's view of the wire without a live connection.
+/* A fake esphome-client covering the surface the plugin calls: command (recorded), deviceInfo / snapshot / entitiesByDevice / capabilities / isEncrypted
+ * (configurable), disconnect / subscribeToLogs (recorded), and on (registers a handler and returns a Disposable that records its own disposal). emit lets a test drive
+ * a lifecycle / telemetry / log event through the registered handlers. Construction options seed the configurable reads so a test tailors the device's view of the wire
+ * without a live connection.
+ *
+ * Disposal emits a disconnect through the handler map on every call, which is a deliberate modeling choice: a TestEspHomeClient stands for a client the open factory
+ * already returned, and such a client always has a transport for its teardown to tear down. The real client emits only where a transport or a receiver existed, so a
+ * never-connected client disposed straight away would emit nothing...the double does not model that arm, because no consumer disposes a client it never opened.
  */
 export class TestEspHomeClient implements Disposable {
 
   public readonly commands: RecordedCommand[] = [];
+  // Each listener Disposable pushes its own event name here when it runs, so a test can prove every listener a connect registered was released, and released once.
+  public readonly listenerDisposals: string[] = [];
   public readonly logSubscriptions: number[] = [];
   public disconnected = false;
-  public disposed = false;
+  // A counter rather than a boolean, because one counter answers both "was it disposed" and "how many times", where a boolean beside a counter would be two statements
+  // of one fact and a double-dispose would read the same as a single one.
+  public disposeCount = 0;
   private readonly capabilitiesValue: { encryption: { active: boolean } };
   private readonly deviceInfoValue: { esphomeVersion?: string; projectVersion?: string } | undefined;
   private readonly entities: { objectId: string; type: string }[];
   private readonly handlers = new Map<string, ((event: unknown) => void)[]>();
+  private readonly isEncryptedValue: boolean;
+  private readonly onListen: ((event: string, client: TestEspHomeClient) => void) | undefined;
   // The latest-state cache is a MUTABLE Map copied from the seed snapshot, because captureInitialState reads snapshot() ONCE and its telemetry handler re-checks
   // completeness against THAT Map reference: deliverState must add the entity to this map before notifying, mirroring the ESPHome client's mutate-then-notify ordering.
   // Copying (rather than aliasing options.snapshot) keeps a caller's passed-in map immune to our mutations.
   private readonly stateCache: Map<EntityId, TelemetryEvent>;
+  private readonly throwOnListen: boolean;
 
   public constructor(options: TestEspHomeClientOptions = {}) {
 
     this.capabilitiesValue = options.capabilities ?? { encryption: { active: false } };
     this.deviceInfoValue = options.deviceInfo;
     this.entities = options.entities ?? [];
+    this.isEncryptedValue = options.isEncrypted ?? false;
+    this.onListen = options.onListen;
     this.stateCache = new Map(options.snapshot ?? []);
+    this.throwOnListen = options.throwOnListen ?? false;
   }
 
   // Record a command dispatch. The device resolves the branded id through its entity registry before calling, so the recorded id is the resolved wire id.
@@ -671,17 +628,27 @@ export class TestEspHomeClient implements Disposable {
     return this.capabilitiesValue;
   }
 
+  // Mirror the real client's isEncrypted getter, so a snapshot's encryption state can be driven from a fixture.
+  public get isEncrypted(): boolean {
+
+    return this.isEncryptedValue;
+  }
+
   // Record a manual disconnect.
   public disconnect(): void {
 
     this.disconnected = true;
   }
 
-  // Record disposal, mirroring the ESPHome client's `[Symbol.dispose]`. openConnection's catch calls `client?.[Symbol.dispose]()` on every failure branch, so a
-  // connection test asserts `disposed` to confirm the partially-constructed client was torn down.
+  /* Count the disposal and emit a disconnect, mirroring the ESPHome client's `[Symbol.dispose]`. openConnection's catch calls `client?.[Symbol.dispose]()` on every
+   * failure branch, so a connection test reads `disposeCount` to confirm the partially-constructed client was torn down. The emit is synchronous and runs through the
+   * handler map, so a teardown-ordering test can prove a consumer detached its listeners before the client went down: a listener still registered here hears the
+   * disconnect, and one already released does not.
+   */
   public [Symbol.dispose](): void {
 
-    this.disposed = true;
+    this.disposeCount++;
+    this.emit("lifecycle", { cause: undefined, kind: "disconnect" });
   }
 
   // Record a per-connection log subscription request.
@@ -690,16 +657,27 @@ export class TestEspHomeClient implements Disposable {
     this.logSubscriptions.push(level);
   }
 
-  // Register an event handler and return a Disposable that detaches it, mirroring the EventBus on() contract the platform composes onto the connection record.
+  /* Register an event handler and return a Disposable that detaches it, mirroring the EventBus on() contract the platform composes onto the connection record. A
+   * `throwOnListen` client refuses before anything is recorded, so a consumer's totality catch runs against a client that registered nothing; an `onListen` client
+   * fires the hook synchronously once the handler is in the map, which is the window where a real client can deliver an event to a listener that has only just
+   * attached. The returned Disposable records its own event name before detaching, so `listenerDisposals` reads as the release log.
+   */
   public on(event: string, handler: (event: never) => void): Disposable {
+
+    if(this.throwOnListen) {
+
+      throw new Error("listener registration failed");
+    }
 
     const list = this.handlers.get(event) ?? [];
 
     list.push(handler as (event: unknown) => void);
     this.handlers.set(event, list);
+    this.onListen?.(event, this);
 
     return { [Symbol.dispose]: (): void => {
 
+      this.listenerDisposals.push(event);
       this.handlers.set(event, (this.handlers.get(event) ?? []).filter((entry) => entry !== handler));
     } };
   }
@@ -739,17 +717,26 @@ export interface RecordedOpenOptions {
   signal: AbortSignal;
 }
 
-/* Build a fake `openEspHomeClient` factory for openConnection tests. Pass a TestEspHomeClient to model a successful open (the factory resolves it), or an Error to
- * model a failed open (the factory rejects with it - an EncryptionKeyInvalidError, a PermanentError subclass, etc.). The returned function matches openEspHomeClient's
- * port type through the one construction-seam cast a connection test needs, so the test body itself stays cast-free, and it carries a `calls` array recording the
- * options each invocation received so a test can assert what openConnection forwarded across the seam (every recorded field, the logger adapter included).
+/* A per-call open handler: it answers each invocation on its own terms, receiving the options that invocation carried and its zero-based call index. This is what a
+ * caller reaches for when the outcome has to differ between calls - a first connect that defers while a second resolves, a per-host answer, a failure only the retry
+ * recovers from.
  */
-export function makeFakeOpenClient(result: Error | TestEspHomeClient): OpenEspHomeClient & { calls: RecordedOpenOptions[] } {
+export type OpenClientHandler = (options: RecordedOpenOptions, index: number) => Promise<TestEspHomeClient>;
+
+/* Build a fake `openEspHomeClient` factory for openConnection and status-feed tests. Pass a TestEspHomeClient to model a successful open (the factory resolves it), an
+ * Error to model a failed open (the factory rejects with it - an EncryptionKeyInvalidError, a PermanentError subclass, etc.), or a handler to answer each call on its
+ * own terms. The fixed forms are wrapped into a handler at construction, so there is exactly one recording path and one `calls` array however the factory was built.
+ * The returned function matches openEspHomeClient's port type through the one construction-seam cast a test needs, so the test body itself stays cast-free, and the
+ * `calls` array records the options each invocation received so a test can assert what openConnection forwarded across the seam (every recorded field, the logger
+ * adapter included).
+ */
+export function makeFakeOpenClient(result: Error | OpenClientHandler | TestEspHomeClient): OpenEspHomeClient & { calls: RecordedOpenOptions[] } {
 
   const calls: RecordedOpenOptions[] = [];
-  const open = async (options: RecordedOpenOptions): Promise<TestEspHomeClient> => {
 
-    calls.push(options);
+  // Normalize the fixed forms into the handler shape up front, so the recording below has one path to take rather than branching per invocation on what it was built
+  // from. A function result is already a handler; an Error rejects on every call; a client resolves on every call.
+  const handler: OpenClientHandler = (typeof result === "function") ? result : async (): Promise<TestEspHomeClient> => {
 
     if(result instanceof Error) {
 
@@ -757,6 +744,14 @@ export function makeFakeOpenClient(result: Error | TestEspHomeClient): OpenEspHo
     }
 
     return result;
+  };
+  const open = (options: RecordedOpenOptions): Promise<TestEspHomeClient> => {
+
+    const index = calls.length;
+
+    calls.push(options);
+
+    return handler(options, index);
   };
 
   return Object.assign(open, { calls }) as unknown as OpenEspHomeClient & { calls: RecordedOpenOptions[] };
@@ -911,6 +906,9 @@ export function makeRatgdoService(txt: Partial<Record<RatgdoTxtKey, Nullable<str
 export interface TestPlatform {
 
   api: { hap: TestHap };
+  // The time source every timer the accessory arms reads, standing in for the production platform's own clock. Typed as the production Clock because that is the whole
+  // of what the accessory consumes; the handles that drive it are typed TestClock where a test holds them.
+  clock: Clock;
   // The double's config is the platform's RESOLVED shape, not the raw configuration properties, so a test can never seed a legacy property the accessory would never
   // have seen: the platform resolves those into this shape before any accessory is built.
   config: RatgdoResolvedConfig;
@@ -930,11 +928,15 @@ interface TestHap {
   uuid: { generate: (data: string) => string };
 }
 
-// Options for makeTestPlatform: the fake client to back getEspHomeClient, the platform config, whether to attach a recording MQTT double, and the feature-option strings.
+/* Options for makeTestPlatform: the fake client to back getEspHomeClient, the clock the platform double publishes, the platform config, whether to attach a recording
+ * MQTT double, and the feature-option strings. The clock is typed TestClock rather than Clock because the option exists to hand a caller a handle it can advance and
+ * inspect, which a production Clock offers none of; a caller that omits it gets a fresh one it reads back off the result.
+ */
 export interface MakeTestPlatformOptions {
 
   client?: TestEspHomeClient;
   clientUnavailable?: boolean;
+  clock?: TestClock;
   config?: TestPlatform["config"];
   mqtt?: boolean;
   userOptions?: string[];
@@ -944,6 +946,7 @@ export interface MakeTestPlatformOptions {
 export interface MakeTestPlatformResult {
 
   client: TestEspHomeClient;
+  clock: TestClock;
   entries: readonly TestLogEntry[];
   mqtt: Nullable<TestMqttClient>;
   platform: TestPlatform;
@@ -951,19 +954,24 @@ export interface MakeTestPlatformResult {
 
 /* Build a platform double around a REAL FeatureOptions engine seeded with the supplied userOptions, so the production feature-option logic (test / value / getInteger /
  * logFeature) runs unchanged. A capturing log records every line; an optional recording MQTT double captures subscriptions and publishes; a fake esphome-client backs
- * getEspHomeClient. resolveLogName mirrors the production platform method exactly (empty string collapses to undefined). The returned handles let a test assert on the
- * captured logs, the recorded commands, and the MQTT traffic.
+ * getEspHomeClient. resolveLogName mirrors the production platform method exactly (empty string collapses to undefined). A TestClock stands in for the production
+ * platform's time source, so every deadline an accessory built on this double arms is driven by advancing that clock. The returned handles let a test assert on the
+ * captured logs, the recorded commands, and the MQTT traffic, and drive the clock.
  */
 export function makeTestPlatform(options: MakeTestPlatformOptions = {}): MakeTestPlatformResult {
 
   const log = capturingLog();
   const client = options.client ?? new TestEspHomeClient();
-  const mqtt = options.mqtt ? new TestMqttClient() : null;
+  const clock = options.clock ?? new TestClock();
+  // The double reports through the same capturing log the platform double carries, so the guarded publish's failure line lands in `entries` exactly as production
+  // would log it and a test can read it there rather than reaching into the double.
+  const mqtt = options.mqtt ? new TestMqttClient({ log }) : null;
   const fo = new FeatureOptions(featureOptionCategories, featureOptions, options.userOptions);
   const hap: TestHap = { Characteristic, Service, uuid: { generate: (data: string): string => data } };
   const platform: TestPlatform = {
 
     api: { hap },
+    clock,
     config: options.config ?? { debug: false, options: undefined },
     featureOptions: fo,
     getEspHomeClient: (): TestEspHomeClient | undefined => (options.clientUnavailable ? undefined : client),
@@ -978,13 +986,15 @@ export function makeTestPlatform(options: MakeTestPlatformOptions = {}): MakeTes
     }
   };
 
-  return { client, entries: log.entries, mqtt, platform };
+  return { client, clock, entries: log.entries, mqtt, platform };
 }
 
-// Options for buildRatgdoAccessory: device fields to override, initial-state snapshot, platform config, client availability, MQTT double, and feature-option strings.
+// Options for buildRatgdoAccessory: device fields to override, initial-state snapshot, the clock the accessory's timers arm on, platform config, client availability,
+// MQTT double, and feature-option strings. The clock carries makeTestPlatform's typing and its omit-for-a-fresh-one behavior.
 export interface BuildRatgdoAccessoryOptions {
 
   clientUnavailable?: boolean;
+  clock?: TestClock;
   config?: TestPlatform["config"];
   device?: Partial<RatgdoDevice>;
   initialState?: Map<EntityId, TelemetryEvent>;
@@ -997,6 +1007,7 @@ export interface BuildRatgdoAccessoryResult {
 
   accessory: TestAccessory;
   client: TestEspHomeClient;
+  clock: TestClock;
   entries: readonly TestLogEntry[];
   mqtt: Nullable<TestMqttClient>;
   platform: TestPlatform;
@@ -1006,13 +1017,13 @@ export interface BuildRatgdoAccessoryResult {
 /* Construct a REAL RatgdoAccessory against the doubles - the device-test workhorse, analogous to HBPU's per-suite construction helpers. The construction-seam casts
  * (platform, accessory) are the only casts a device test needs; everything the accessory then does runs the real production code against the doubles. Returns the
  * constructed accessory plus every handle a test asserts on: the underlying TestAccessory (to read services / characteristics), the captured log entries, the fake
- * client (to read recorded commands), and the recording MQTT double (when enabled).
+ * client (to read recorded commands), the clock the accessory's timers arm on (to reach a deadline without waiting), and the recording MQTT double (when enabled).
  */
 export function buildRatgdoAccessory(options: BuildRatgdoAccessoryOptions = {}): BuildRatgdoAccessoryResult {
 
   const device = makeTestDevice(options.device);
-  const { client, entries, mqtt, platform } = makeTestPlatform({ clientUnavailable: options.clientUnavailable, config: options.config, mqtt: options.mqtt,
-    userOptions: options.userOptions });
+  const { client, clock, entries, mqtt, platform } = makeTestPlatform({ clientUnavailable: options.clientUnavailable, clock: options.clock, config: options.config,
+    mqtt: options.mqtt, userOptions: options.userOptions });
   const accessory = makeTestAccessory(device.name, platform.hap.uuid.generate(device.mac));
   const initialState = options.initialState ?? ((device.variant === RatgdoVariant.KONNECTED) ? makeKonnectedInitialState() : makeRatgdoInitialState());
 
@@ -1020,5 +1031,5 @@ export function buildRatgdoAccessory(options: BuildRatgdoAccessoryOptions = {}):
   const ratgdo = new RatgdoAccessory(platform as unknown as ConstructorParameters<typeof RatgdoAccessory>[0],
     accessory as unknown as ConstructorParameters<typeof RatgdoAccessory>[1], device, initialState);
 
-  return { accessory, client, entries, mqtt, platform, ratgdo };
+  return { accessory, client, clock, entries, mqtt, platform, ratgdo };
 }

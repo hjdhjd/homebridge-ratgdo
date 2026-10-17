@@ -36,7 +36,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
       assert.equal(service.getCharacteristic(Characteristic.ContactSensorState).value, true, "an ON arriving event writes true to the ContactSensorState characteristic");
       assert.equal(loggedAt(entries, "info", "Vehicle arriving detected."), true,
         "an arriving transition logs at info when Log.VehiclePresence is enabled");
-      assert.equal(mqtt.publishes.find((entry) => entry.topic.endsWith("vehiclearriving"))?.payload, "true",
+      assert.equal(mqtt.published.find((entry) => entry.topic.endsWith("vehiclearriving"))?.payload, "true",
         "an arriving transition publishes true to the vehiclearriving MQTT topic");
     });
 
@@ -55,7 +55,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
         "the following OFF arriving event writes false to the ContactSensorState characteristic");
       assert.equal(loggedAt(entries, "info", "Vehicle arriving no longer detected."), true,
         "the OFF arriving transition logs the no-longer-detected message at info");
-      assert.equal(mqtt.publishes.filter((entry) => entry.topic.endsWith("vehiclearriving")).at(-1)?.payload, "false",
+      assert.equal(mqtt.published.filter((entry) => entry.topic.endsWith("vehiclearriving")).at(-1)?.payload, "false",
         "the OFF arriving transition publishes false to the vehiclearriving MQTT topic");
     });
 
@@ -67,7 +67,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       ratgdo.updateState({ id: "binary_sensor-vehicle_arriving", state: "OFF" });
 
-      assert.equal(mqtt.publishes.some((entry) => entry.topic.endsWith("vehiclearriving")), false, "an unchanged OFF arriving event publishes nothing to MQTT");
+      assert.equal(mqtt.published.some((entry) => entry.topic.endsWith("vehiclearriving")), false, "an unchanged OFF arriving event publishes nothing to MQTT");
       assert.equal(entries.some((entry) => formatLogEntry(entry).includes("Vehicle arriving")), false, "an unchanged OFF arriving event logs nothing");
     });
 
@@ -84,7 +84,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
       assert.equal(entries.some((entry) => formatLogEntry(entry).includes("Vehicle arriving detected.")), false,
         "disabling Log.VehiclePresence suppresses the arriving detection log entirely");
       assert.equal(service?.getCharacteristic(Characteristic.ContactSensorState).value, true, "the characteristic still flips to true with logging disabled");
-      assert.equal(mqtt.publishes.find((entry) => entry.topic.endsWith("vehiclearriving"))?.payload, "true", "MQTT still publishes with logging disabled");
+      assert.equal(mqtt.published.find((entry) => entry.topic.endsWith("vehiclearriving"))?.payload, "true", "MQTT still publishes with logging disabled");
     });
   });
 
@@ -104,7 +104,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
       assert.equal(service.getCharacteristic(Characteristic.ContactSensorState).value, true, "an ON leaving event writes true to the ContactSensorState characteristic");
       assert.equal(loggedAt(entries, "info", "Vehicle leaving detected."), true,
         "a leaving transition logs at info when Log.VehiclePresence is enabled");
-      assert.equal(mqtt.publishes.find((entry) => entry.topic.endsWith("vehicleleaving"))?.payload, "true",
+      assert.equal(mqtt.published.find((entry) => entry.topic.endsWith("vehicleleaving"))?.payload, "true",
         "a leaving transition publishes true to the vehicleleaving MQTT topic");
     });
 
@@ -116,7 +116,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       ratgdo.updateState({ id: "binary_sensor-vehicle_leaving", state: "OFF" });
 
-      assert.equal(mqtt.publishes.some((entry) => entry.topic.endsWith("vehicleleaving")), false, "an unchanged OFF leaving event publishes nothing to MQTT");
+      assert.equal(mqtt.published.some((entry) => entry.topic.endsWith("vehicleleaving")), false, "an unchanged OFF leaving event publishes nothing to MQTT");
       assert.equal(entries.some((entry) => formatLogEntry(entry).includes("Vehicle leaving")), false, "an unchanged OFF leaving event logs nothing");
     });
   });
@@ -138,7 +138,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
         "an ON vehicle-detected event writes true to the OccupancyDetected characteristic");
       assert.equal(loggedAt(entries, "info", "Vehicle detected."), true,
         "a presence transition logs at info when Log.VehiclePresence is enabled");
-      assert.equal(mqtt.publishes.find((entry) => entry.topic.endsWith("vehiclepresence"))?.payload, "true",
+      assert.equal(mqtt.published.find((entry) => entry.topic.endsWith("vehiclepresence"))?.payload, "true",
         "a presence transition publishes true to the vehiclepresence MQTT topic");
     });
 
@@ -157,7 +157,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
         "the following OFF event writes false to the OccupancyDetected characteristic");
       assert.equal(loggedAt(entries, "info", "Vehicle no longer detected."), true,
         "the OFF presence transition logs the no-longer-detected message at info");
-      assert.equal(mqtt.publishes.filter((entry) => entry.topic.endsWith("vehiclepresence")).at(-1)?.payload, "false",
+      assert.equal(mqtt.published.filter((entry) => entry.topic.endsWith("vehiclepresence")).at(-1)?.payload, "false",
         "the OFF presence transition publishes false to the vehiclepresence MQTT topic");
     });
 
@@ -169,7 +169,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       ratgdo.updateState({ id: "binary_sensor-vehicle_detected", state: "OFF" });
 
-      assert.equal(mqtt.publishes.some((entry) => entry.topic.endsWith("vehiclepresence")), false, "an unchanged OFF vehicle-detected event publishes nothing to MQTT");
+      assert.equal(mqtt.published.some((entry) => entry.topic.endsWith("vehiclepresence")), false, "an unchanged OFF vehicle-detected event publishes nothing to MQTT");
       assert.equal(entries.some((entry) => formatLogEntry(entry).includes("Vehicle")), false, "an unchanged OFF vehicle-detected event logs nothing");
     });
   });
@@ -189,7 +189,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
       assert.equal(service?.getCharacteristic(Characteristic.On).value, true, "an ON light event writes true to the On characteristic");
       assert.equal(loggedAt(entries, "info", "Light on."), true,
         "a light transition logs at info when Log.Light is enabled");
-      assert.equal(mqtt.publishes.find((entry) => entry.topic.endsWith("light"))?.payload, "true", "a light ON transition publishes true to the light MQTT topic");
+      assert.equal(mqtt.published.find((entry) => entry.topic.endsWith("light"))?.payload, "true", "a light ON transition publishes true to the light MQTT topic");
     });
 
     test("turns off, logs, and publishes on the following OFF transition", () => {
@@ -206,7 +206,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
       assert.equal(service?.getCharacteristic(Characteristic.On).value, false, "the following OFF light event writes false to the On characteristic");
       assert.equal(loggedAt(entries, "info", "Light off."), true,
         "the OFF light transition logs at info");
-      assert.equal(mqtt.publishes.filter((entry) => entry.topic.endsWith("light")).at(-1)?.payload, "false",
+      assert.equal(mqtt.published.filter((entry) => entry.topic.endsWith("light")).at(-1)?.payload, "false",
         "the OFF light transition publishes false to the light MQTT topic");
     });
 
@@ -218,7 +218,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       ratgdo.updateState({ id: "light-light", state: "OFF" });
 
-      assert.equal(mqtt.publishes.some((entry) => entry.topic.endsWith("light")), false, "an unchanged OFF light event publishes nothing to MQTT");
+      assert.equal(mqtt.published.some((entry) => entry.topic.endsWith("light")), false, "an unchanged OFF light event publishes nothing to MQTT");
       assert.equal(entries.some((entry) => formatLogEntry(entry).includes("Light o")), false, "an unchanged OFF light event logs nothing");
     });
 
@@ -234,7 +234,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       assert.equal(entries.some((entry) => formatLogEntry(entry).includes("Light on.")), false, "disabling Log.Light suppresses the light-on log entirely");
       assert.equal(service?.getCharacteristic(Characteristic.On).value, true, "the characteristic still flips to true with light logging disabled");
-      assert.equal(mqtt.publishes.find((entry) => entry.topic.endsWith("light"))?.payload, "true", "MQTT still publishes with light logging disabled");
+      assert.equal(mqtt.published.find((entry) => entry.topic.endsWith("light"))?.payload, "true", "MQTT still publishes with light logging disabled");
     });
   });
 
@@ -252,7 +252,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       assert.ok(service, "the Disco laser switch service exists when the feature is enabled");
       assert.equal(service.getCharacteristic(Characteristic.On).value, true, "an ON laser event writes true to the On characteristic");
-      assert.equal(mqtt.publishes.find((entry) => entry.topic.endsWith("laser"))?.payload, "true", "a laser ON transition publishes true to the laser MQTT topic");
+      assert.equal(mqtt.published.find((entry) => entry.topic.endsWith("laser"))?.payload, "true", "a laser ON transition publishes true to the laser MQTT topic");
     });
 
     test("turns the LED switch on and publishes on a switch-led ON transition", () => {
@@ -267,7 +267,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       assert.ok(service, "the Disco LED switch service exists when the feature is enabled");
       assert.equal(service.getCharacteristic(Characteristic.On).value, true, "an ON led event writes true to the On characteristic");
-      assert.equal(mqtt.publishes.find((entry) => entry.topic.endsWith("led"))?.payload, "true", "an led ON transition publishes true to the led MQTT topic");
+      assert.equal(mqtt.published.find((entry) => entry.topic.endsWith("led"))?.payload, "true", "an led ON transition publishes true to the led MQTT topic");
     });
 
     test("is a no-op when a laser OFF event repeats the already-off resting state", () => {
@@ -278,7 +278,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       ratgdo.updateState({ id: "switch-laser", state: "OFF" });
 
-      assert.equal(mqtt.publishes.some((entry) => entry.topic.endsWith("laser")), false, "an unchanged OFF laser event publishes nothing to MQTT");
+      assert.equal(mqtt.published.some((entry) => entry.topic.endsWith("laser")), false, "an unchanged OFF laser event publishes nothing to MQTT");
     });
   });
 
@@ -297,7 +297,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       assert.ok(service, "the Konnected strobe switch service exists when the feature is enabled");
       assert.equal(service.getCharacteristic(Characteristic.On).value, true, "an ON str_output event writes true to the On characteristic");
-      assert.equal(mqtt.publishes.find((entry) => entry.topic.endsWith("strobe"))?.payload, "true", "a strobe ON transition publishes true to the strobe MQTT topic");
+      assert.equal(mqtt.published.find((entry) => entry.topic.endsWith("strobe"))?.payload, "true", "a strobe ON transition publishes true to the strobe MQTT topic");
     });
 
     test("is a no-op when a strobe OFF event repeats the already-off resting state", () => {
@@ -309,7 +309,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       ratgdo.updateState({ id: "switch-str_output", state: "OFF" });
 
-      assert.equal(mqtt.publishes.some((entry) => entry.topic.endsWith("strobe")), false, "an unchanged OFF strobe event publishes nothing to MQTT");
+      assert.equal(mqtt.published.some((entry) => entry.topic.endsWith("strobe")), false, "an unchanged OFF strobe event publishes nothing to MQTT");
     });
   });
 

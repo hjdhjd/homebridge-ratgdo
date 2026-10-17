@@ -6,13 +6,14 @@
  * These tests drive RatgdoAccessory.updateState() with EspHomeEvent cover payloads (id, OPEN / CLOSED state, OPENING / CLOSING / IDLE current_operation, and the 0-1
  * float position) and assert the observable contract: CurrentDoorState transitions, the stopped-at-partial semantics for an IDLE cover parked strictly between 0 and 1,
  * the unchanged-state no-op, the door-open occupancy timer (set after the configured duration, plus its clear / cancel paths), the automation dimmer and switch tracking
- * the door, the MQTT garagedoor publish on every real transition, and the capitalized state log gated on Log.Opener. The occupancy duration is exercised through
- * node:test mock.timers so the test never waits in real time.
+ * the door, the MQTT garagedoor publish on every real transition, and the capitalized state log gated on Log.Opener. The occupancy duration is exercised by advancing
+ * the platform double's test clock, so the test never waits in real time.
  */
 import { Characteristic, Service, buildRatgdoAccessory, makeCoverEvent, makeKonnectedInitialState, makeRatgdoInitialState } from "./testing.helpers.ts";
 import { RatgdoService, RatgdoVariant } from "./types.ts";
-import { afterEach, beforeEach, describe, mock, test } from "node:test";
+import { describe, test } from "node:test";
 import type { EspHomeEvent } from "./types.ts";
+import { MQTT_GET_SUFFIX } from "homebridge-plugin-utils";
 import { RATGDO_OCCUPANCY_DURATION } from "./settings.ts";
 import assert from "node:assert/strict";
 import { loggedAt } from "homebridge-plugin-utils/testing";
@@ -27,19 +28,6 @@ const coverEvent = (id: string, currentOperation: string, state: string, positio
   state });
 
 describe("RatgdoAccessory.updateState() cover events", () => {
-
-  beforeEach(() => {
-
-    // The door-open occupancy timer is the only setTimeout this concern exercises, so we drive it deterministically through mock.timers rather than ever waiting in real
-    // time. Enabling only setTimeout keeps the rest of the runtime's timer surface untouched.
-    mock.timers.enable({ apis: ["setTimeout"] });
-  });
-
-  afterEach(() => {
-
-    // Restore real timers so a pending occupancy timer from one test cannot leak into the next.
-    mock.timers.reset();
-  });
 
   describe("current door state transitions", () => {
 
@@ -129,58 +117,60 @@ describe("RatgdoAccessory.updateState() cover events", () => {
 
   describe("the door-open occupancy timer", () => {
 
-    test("raises door-open occupancy after the configured duration once the door is open", () => {
+    test("raises door-open occupancy after the configured duration once the door is open", async () => {
 
-      const { accessory, mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true, userOptions: ["Enable.Opener.OccupancySensor"] });
+      const { accessory, clock, mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true, userOptions: ["Enable.Opener.OccupancySensor"] });
       const occupancy = accessory.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_SENSOR_DOOR_OPEN);
 
       ratgdo.updateState(coverEvent("cover-door", "IDLE", "OPEN", 1));
 
       assert.equal(occupancy?.getCharacteristic(Characteristic.OccupancyDetected).value, false,
         "a freshly-opened door has not yet been open long enough to raise occupancy");
-      assert.equal(mqtt?.invokeGet("dooropenoccupancy"), "false", "the MQTT door-open occupancy getter reports the not-yet-raised state");
+      assert.equal(await mqtt?.invokeGet("dooropenoccupancy" + MQTT_GET_SUFFIX), "false", "the MQTT door-open occupancy getter reports the not-yet-raised state");
 
-      mock.timers.tick(RATGDO_OCCUPANCY_DURATION * 1000);
+      clock.advance(RATGDO_OCCUPANCY_DURATION * 1000);
 
       assert.equal(occupancy?.getCharacteristic(Characteristic.OccupancyDetected).value, true,
         "the OccupancyDetected characteristic is raised once the door has been continuously open for the configured duration");
-      assert.equal(mqtt?.invokeGet("dooropenoccupancy"), "true", "the door-open occupancy status flips true and the MQTT getter reflects it");
-      assert.ok(mqtt?.publishes.some((entry) => entry.topic.endsWith("dooropenoccupancy") && (entry.payload === "true")),
+      assert.equal(await mqtt?.invokeGet("dooropenoccupancy" + MQTT_GET_SUFFIX), "true", "the door-open occupancy status flips true and the MQTT getter reflects it");
+      assert.ok(mqtt?.published.some((entry) => entry.topic.endsWith("dooropenoccupancy") && (entry.payload === "true")),
         "the occupancy timer publishes the raised door-open occupancy state to MQTT");
     });
 
-    test("cancels the pending occupancy timer when the door closes before the duration elapses", () => {
+    test("cancels the pending occupancy timer when the door closes before the duration elapses", async () => {
 
-      const { accessory, mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true, userOptions: ["Enable.Opener.OccupancySensor"] });
+      const { accessory, clock, mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true, userOptions: ["Enable.Opener.OccupancySensor"] });
       const occupancy = accessory.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_SENSOR_DOOR_OPEN);
 
       ratgdo.updateState(coverEvent("cover-door", "IDLE", "OPEN", 1));
       ratgdo.updateState(coverEvent("cover-door", "IDLE", "CLOSED", 0));
 
-      mock.timers.tick(RATGDO_OCCUPANCY_DURATION * 1000);
+      clock.advance(RATGDO_OCCUPANCY_DURATION * 1000);
 
       assert.equal(occupancy?.getCharacteristic(Characteristic.OccupancyDetected).value, false,
         "closing the door before the duration elapses cancels the pending timer, so occupancy is never raised");
-      assert.equal(mqtt?.invokeGet("dooropenoccupancy"), "false", "the MQTT getter still reports the unraised state after the cancelled timer's deadline passes");
-      assert.equal(mqtt?.publishes.some((entry) => entry.topic.endsWith("dooropenoccupancy") && (entry.payload === "true")), false,
+      assert.equal(await mqtt?.invokeGet("dooropenoccupancy" + MQTT_GET_SUFFIX), "false",
+        "the MQTT getter still reports the unraised state after the cancelled timer's deadline passes");
+      assert.equal(mqtt?.published.some((entry) => entry.topic.endsWith("dooropenoccupancy") && (entry.payload === "true")), false,
         "a cancelled occupancy timer never publishes a raised door-open occupancy state to MQTT");
     });
 
     // Clearing a RAISED door-open occupancy is independent of cancelling a pending timer: once the timer fires (raising occupancy) its handle is null, so leaving the
     // open state clears occupancy on its own condition (status.doorOpenOccupancy), not on the timer handle. This nets that the indicator clears rather than sticking
     // on, because the cover case gates the cancel and the clear as separate concerns that both route through setOccupancy().
-    test("clears door-open occupancy when the door leaves the open state after occupancy was raised", () => {
+    test("clears door-open occupancy when the door leaves the open state after occupancy was raised", async () => {
 
-      const { accessory, mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true, userOptions: ["Enable.Opener.OccupancySensor"] });
+      const { accessory, clock, mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true, userOptions: ["Enable.Opener.OccupancySensor"] });
       const occupancy = accessory.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_SENSOR_DOOR_OPEN);
 
       ratgdo.updateState(coverEvent("cover-door", "IDLE", "OPEN", 1));
-      mock.timers.tick(RATGDO_OCCUPANCY_DURATION * 1000);
+      clock.advance(RATGDO_OCCUPANCY_DURATION * 1000);
       ratgdo.updateState(coverEvent("cover-door", "IDLE", "CLOSED", 0));
 
       assert.equal(occupancy?.getCharacteristic(Characteristic.OccupancyDetected).value, false,
         "leaving the open state clears the OccupancyDetected characteristic");
-      assert.equal(mqtt?.invokeGet("dooropenoccupancy"), "false", "the door-open occupancy status flips back to false when the door is no longer open");
+      assert.equal(await mqtt?.invokeGet("dooropenoccupancy" + MQTT_GET_SUFFIX), "false",
+        "the door-open occupancy status flips back to false when the door is no longer open");
     });
   });
 
@@ -225,12 +215,12 @@ describe("RatgdoAccessory.updateState() cover events", () => {
 
       ratgdo.updateState(coverEvent("cover-door", "OPENING", "OPEN", 0.5));
 
-      assert.ok(mqtt?.publishes.some((entry) => entry.topic.endsWith("garagedoor") && (entry.payload === "opening")),
+      assert.ok(mqtt?.published.some((entry) => entry.topic.endsWith("garagedoor") && (entry.payload === "opening")),
         "the opening transition publishes the human-readable door state to the garagedoor topic");
 
       ratgdo.updateState(coverEvent("cover-door", "IDLE", "OPEN", 1));
 
-      assert.ok(mqtt?.publishes.some((entry) => entry.topic.endsWith("garagedoor") && (entry.payload === "open")),
+      assert.ok(mqtt?.published.some((entry) => entry.topic.endsWith("garagedoor") && (entry.payload === "open")),
         "the subsequent open transition publishes its own door state to the garagedoor topic");
     });
 
@@ -241,7 +231,7 @@ describe("RatgdoAccessory.updateState() cover events", () => {
       // An IDLE cover reported OPEN strictly between 0 and 1 resolves to stopped-at-partial, which is a door state of its own on the wire and in the document.
       ratgdo.updateState(coverEvent("cover-door", "IDLE", "OPEN", 0.5));
 
-      assert.ok(mqtt?.publishes.some((entry) => entry.topic.endsWith("garagedoor") && (entry.payload === "stopped")),
+      assert.ok(mqtt?.published.some((entry) => entry.topic.endsWith("garagedoor") && (entry.payload === "stopped")),
         "a door parked at a partial position publishes the stopped state to the garagedoor topic");
     });
 
@@ -272,7 +262,7 @@ describe("RatgdoAccessory.updateState() cover events", () => {
 
       assert.equal(accessory.getService(Service.GarageDoorOpener)?.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED,
         "an event that resolves to the current state leaves CurrentDoorState untouched at CLOSED");
-      assert.equal(mqtt?.publishes.some((entry) => entry.topic.endsWith("garagedoor")), false,
+      assert.equal(mqtt?.published.some((entry) => entry.topic.endsWith("garagedoor")), false,
         "the no-op guard fires before the garagedoor publish, so an unchanged state produces no MQTT traffic");
     });
 
@@ -296,7 +286,7 @@ describe("RatgdoAccessory.updateState() cover events", () => {
         "an unrecognized current_operation is reported through an error log");
       assert.equal(accessory.getService(Service.GarageDoorOpener)?.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED,
         "the unrecognized operation returns early, leaving CurrentDoorState untouched at its born CLOSED state");
-      assert.equal(mqtt?.publishes.some((entry) => entry.topic.endsWith("garagedoor")), false,
+      assert.equal(mqtt?.published.some((entry) => entry.topic.endsWith("garagedoor")), false,
         "the unrecognized operation returns before the garagedoor publish, so no MQTT traffic is produced");
     });
   });

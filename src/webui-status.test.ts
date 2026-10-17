@@ -10,14 +10,15 @@ import { AuthenticationError, CoverOperation, LockState, entityId } from "esphom
 import type { EntityId, TelemetryEvent } from "esphome-client";
 import { HbpuAbortError, dnsNameKey } from "homebridge-plugin-utils";
 import type { MdnsBrowserLike, MdnsBrowserOptions, MdnsService, Nullable, StatusEvent } from "homebridge-plugin-utils";
+import type { OpenClientHandler, RecordedOpenOptions, TestEspHomeClientOptions } from "./testing.helpers.ts";
 import { StatusFeed, narrowStatusWarmRequest } from "./webui-status.ts";
 import { TestClock, TestMdnsBrowserFactory, capturingLog, expectAt, formatLogEntry, settle } from "homebridge-plugin-utils/testing";
+import { TestEspHomeClient, makeBinarySensorEvent, makeCoverEvent, makeFakeOpenClient, makeLightEvent, makeLockEvent, makeRatgdoService, makeSwitchEvent,
+  makeTelemetry } from "./testing.helpers.ts";
 import { describe, test } from "node:test";
-import { makeBinarySensorEvent, makeCoverEvent, makeLightEvent, makeLockEvent, makeRatgdoService, makeSwitchEvent, makeTelemetry } from "./testing.helpers.ts";
 import type { OpenEspHomeClient } from "./connection.ts";
 import { RATGDO_MOTION_DURATION } from "./settings.ts";
 import type { RatgdoTxtKey } from "./discovery.ts";
-import type { RecordedOpenOptions } from "./testing.helpers.ts";
 import type { TestMdnsBrowser } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
 
@@ -107,86 +108,6 @@ const makeKonnectedService = (mac = MAC, address = ADDR): MdnsService => {
 };
 
 
-/* A fake ESPHome client covering the surface the pool and openConnection reach: snapshot / entitiesByDevice (configurable), on (registers a handler and returns a
- * counting Disposable), emit (drives a registered handler), and Symbol.dispose (records the disposal AND emits a disconnect, mirroring the real client so the teardown-
- * ordering test can prove listeners are detached before the client). listenerDisposals records each Disposable disposal by event name, so a test asserts every listener
- * was released exactly once. An optional onListen hook lets a test drive a synchronous emit at the moment a listener registers.
- */
-class FakeClient {
-
-  public disposeCount = 0;
-  public readonly listenerDisposals: string[] = [];
-  readonly #cache: ReadonlyMap<EntityId, TelemetryEvent>;
-  readonly #entities: { objectId: string; type: string }[];
-  readonly #handlers = new Map<string, ((event: unknown) => void)[]>();
-  readonly #isEncrypted: boolean;
-  readonly #onListen: ((event: string, client: FakeClient) => void) | undefined;
-  readonly #throwOnListen: boolean;
-
-  public constructor(options: { cache?: ReadonlyMap<EntityId, TelemetryEvent>; entities?: { objectId: string; type: string }[]; isEncrypted?: boolean;
-    onListen?: (event: string, client: FakeClient) => void; throwOnListen?: boolean; } = {}) {
-
-    this.#cache = options.cache ?? new Map();
-    this.#entities = options.entities ?? ADVERTISED;
-    this.#isEncrypted = options.isEncrypted ?? false;
-    this.#onListen = options.onListen;
-    this.#throwOnListen = options.throwOnListen ?? false;
-  }
-
-  public snapshot(): ReadonlyMap<EntityId, TelemetryEvent> {
-
-    return this.#cache;
-  }
-
-  public entitiesByDevice(): { objectId: string; type: string }[] {
-
-    return this.#entities;
-  }
-
-  // Mirror the real client's isEncrypted getter so the snapshot's encryption state can be driven from a fixture.
-  public get isEncrypted(): boolean {
-
-    return this.#isEncrypted;
-  }
-
-  public on(event: string, handler: (event: never) => void): Disposable {
-
-    // Model a client whose listener registration fails, so the connect body's totality catch can be exercised.
-    if(this.#throwOnListen) {
-
-      throw new Error("listener registration failed");
-    }
-
-    const list = this.#handlers.get(event) ?? [];
-
-    list.push(handler as (event: unknown) => void);
-    this.#handlers.set(event, list);
-    this.#onListen?.(event, this);
-
-    return { [Symbol.dispose]: (): void => {
-
-      this.listenerDisposals.push(event);
-      this.#handlers.set(event, (this.#handlers.get(event) ?? []).filter((entry) => entry !== handler));
-    } };
-  }
-
-  public emit(event: string, data: unknown): void {
-
-    for(const handler of [...(this.#handlers.get(event) ?? [])]) {
-
-      handler(data);
-    }
-  }
-
-  public [Symbol.dispose](): void {
-
-    this.disposeCount++;
-
-    // Mirror the real client: disconnecting synchronously emits a disconnect through the event bus to any lifecycle listener still registered.
-    this.emit("lifecycle", { cause: undefined, kind: "disconnect" });
-  }
-}
-
 /* A browser factory whose first `failNext` builds throw, for the discovery-start failure paths. It extends the library's own double so any build past the failures
  * answers a real browser a test can drive, and `attempts` counts every build asked for - the recorded createCalls hold only the ones that succeeded.
  */
@@ -229,24 +150,14 @@ const announce = (browser: TestMdnsBrowser, service: MdnsService): void => {
   browser.found(service);
 };
 
-// Build a fake client factory driven by a per-call handler, recording the options each invocation received so a test can assert what openConnection forwarded.
-const makeOpenClient = (handler: (options: RecordedOpenOptions, index: number) => Promise<unknown>): OpenEspHomeClient & { calls: RecordedOpenOptions[] } => {
-
-  const calls: RecordedOpenOptions[] = [];
-  const open = (options: RecordedOpenOptions): Promise<unknown> => {
-
-    const index = calls.length;
-
-    calls.push(options);
-
-    return handler(options, index);
-  };
-
-  return Object.assign(open, { calls }) as unknown as OpenEspHomeClient & { calls: RecordedOpenOptions[] };
-};
-
 // Count the factory calls that targeted one device address, so a per-device connect / reconnect assertion is exact.
 const callsForHost = (openClient: { calls: RecordedOpenOptions[] }, host: string): RecordedOpenOptions[] => openClient.calls.filter((call) => call.host === host);
+
+/* This suite's ESPHome client double: the shared harness class seeded with the entity set a healthy Disco-class ratgdo advertises. Which entities a device advertises
+ * is this file's fixture policy rather than part of the double's contract, so the default lives here once and the shared class keeps its empty default for every other
+ * suite that constructs it directly. A case that advertises something else - the Konnected variant, or an extra switch - passes its own `entities` and overrides it.
+ */
+const makeClient = (options: TestEspHomeClientOptions = {}): TestEspHomeClient => new TestEspHomeClient({ entities: ADVERTISED, ...options });
 
 /* Assemble a pool plus its recording boundaries. push captures every bridge event unless a test overrides it (the containment test injects a throwing sink); the
  * browser factory, the clock, and the client factory are the injected doubles; the discovery budget defaults short and the clock drives it. entries captures the
@@ -279,11 +190,11 @@ describe("StatusFeed pool connect", () => {
 
   test("connects every discovered warmed device concurrently, and a view switch between two live devices constructs and disposes nothing", async () => {
 
-    const clientA = new FakeClient({ cache: restingCache() });
-    const clientB = new FakeClient({ cache: restingCache() });
-    const pendingA = Promise.withResolvers<FakeClient>();
-    const pendingB = Promise.withResolvers<FakeClient>();
-    const openClient = makeOpenClient((options) => (options.host === ADDR_TWO) ? pendingB.promise : pendingA.promise);
+    const clientA = makeClient({ snapshot: restingCache() });
+    const clientB = makeClient({ snapshot: restingCache() });
+    const pendingA = Promise.withResolvers<TestEspHomeClient>();
+    const pendingB = Promise.withResolvers<TestEspHomeClient>();
+    const openClient = makeFakeOpenClient((options) => (options.host === ADDR_TWO) ? pendingB.promise : pendingA.promise);
     const { browser, feed, pushes } = makeFeed({ openClient });
 
     feed.startDiscovery();
@@ -319,7 +230,7 @@ describe("StatusFeed pool connect", () => {
 
   test("streams a snapshot with online, the motion row's latch, and rows translated from the cache", async () => {
 
-    const { browser, feed, pushes } = makeFeed({ openClient: makeOpenClient(async () => new FakeClient({ cache: restingCache() })) });
+    const { browser, feed, pushes } = makeFeed({ openClient: makeFakeOpenClient(async () => makeClient({ snapshot: restingCache() })) });
 
     feed.startDiscovery();
     browser().found(makeService());
@@ -354,7 +265,7 @@ describe("StatusFeed pool connect", () => {
 
   test("threads the warmed psk through the client factory verbatim", async () => {
 
-    const openClient = makeOpenClient(async () => new FakeClient({ cache: restingCache() }));
+    const openClient = makeFakeOpenClient(async () => makeClient({ snapshot: restingCache() }));
     const { browser, feed } = makeFeed({ openClient });
 
     feed.startDiscovery();
@@ -372,8 +283,8 @@ describe("StatusFeed pool connect", () => {
 
   test("threads the client's encryption state into the snapshot", async () => {
 
-    const client = new FakeClient({ cache: restingCache(), isEncrypted: true });
-    const { browser, feed, pushes } = makeFeed({ openClient: makeOpenClient(async () => client) });
+    const client = makeClient({ isEncrypted: true, snapshot: restingCache() });
+    const { browser, feed, pushes } = makeFeed({ openClient: makeFakeOpenClient(async () => client) });
 
     feed.startDiscovery();
     browser().found(makeService());
@@ -398,11 +309,11 @@ describe("StatusFeed key diff", () => {
     // Device A inherits the global key; device B carries a device-scoped override. The frontend resolves both keys and warms them; the pool diffs its output per device.
     // Device A is encrypted, so a differing key reconnects it rather than adopting the key in place - the transport this reconnect contract was always about. A
     // global-key change re-warms A with a new key while B's override is unchanged, so A reconnects and B is left untouched - the inheritance contract, both directions.
-    const clientA1 = new FakeClient({ cache: restingCache(), isEncrypted: true });
-    const clientA2 = new FakeClient({ cache: restingCache(), isEncrypted: true });
-    const clientB = new FakeClient({ cache: restingCache() });
+    const clientA1 = makeClient({ isEncrypted: true, snapshot: restingCache() });
+    const clientA2 = makeClient({ isEncrypted: true, snapshot: restingCache() });
+    const clientB = makeClient({ snapshot: restingCache() });
     let aCall = 0;
-    const openClient = makeOpenClient((options) => {
+    const openClient = makeFakeOpenClient((options) => {
 
       if(options.host === ADDR_TWO) {
 
@@ -442,8 +353,8 @@ describe("StatusFeed key diff", () => {
 
   test("leaves a session untouched when a re-warm carries the same key", async () => {
 
-    const client = new FakeClient({ cache: restingCache() });
-    const openClient = makeOpenClient(async () => client);
+    const client = makeClient({ snapshot: restingCache() });
+    const openClient = makeFakeOpenClient(async () => client);
     const { browser, feed } = makeFeed({ openClient });
 
     feed.startDiscovery();
@@ -469,8 +380,8 @@ describe("StatusFeed key diff", () => {
     // what ends the cosmetic Connecting flash an unencrypted device would otherwise show on a global key edit. A follow-up re-warm then proves the adopted key was
     // actually stored: take the session offline and re-warm the SAME adopted key. A build that skipped the psk write would re-diff its stale stored key and reconnect
     // through the offline path, so a flat factory count across both re-warms proves the adoption both happened and persisted.
-    const client = new FakeClient({ cache: restingCache() });
-    const openClient = makeOpenClient(async () => client);
+    const client = makeClient({ snapshot: restingCache() });
+    const openClient = makeFakeOpenClient(async () => client);
     const { browser, feed } = makeFeed({ openClient });
 
     feed.startDiscovery();
@@ -505,10 +416,10 @@ describe("StatusFeed key diff", () => {
     // In-place adoption is for a HEALTHY session only. A plaintext session that has gone offline does not qualify: it reconnects on a changed key exactly as an encrypted
     // or mid-connect session does - the conservative fallback that re-captures the transport truth on arrival, covering a device that later enables encryption. Take the
     // session offline with a disconnect, then re-warm a changed key and assert the reconnect.
-    const client1 = new FakeClient({ cache: restingCache() });
-    const client2 = new FakeClient({ cache: restingCache() });
+    const client1 = makeClient({ snapshot: restingCache() });
+    const client2 = makeClient({ snapshot: restingCache() });
     let call = 0;
-    const openClient = makeOpenClient(async () => {
+    const openClient = makeFakeOpenClient(async () => {
 
       call++;
 
@@ -537,9 +448,9 @@ describe("StatusFeed key diff", () => {
 
   test("converts a key-failed device to a live session on the next warm", async () => {
 
-    const client = new FakeClient({ cache: restingCache() });
+    const client = makeClient({ snapshot: restingCache() });
     let call = 0;
-    const openClient = makeOpenClient(async () => {
+    const openClient = makeFakeOpenClient(async () => {
 
       call++;
 
@@ -577,7 +488,7 @@ describe("StatusFeed key diff", () => {
      * cannot make an out-of-range API version speakable. Both directions on one failed device: re-warm the same key, then re-warm a changed one, and neither starts a
      * second connect.
      */
-    const openClient = makeOpenClient(async () => {
+    const openClient = makeFakeOpenClient(async () => {
 
       throw new (await import("esphome-client")).NegotiationFailedError("api major out of range", "API_MAJOR_OUT_OF_RANGE");
     });
@@ -626,9 +537,9 @@ describe("StatusFeed key diff", () => {
     // Outcome memory records the key an auth failure happened with, so a forced warm resending the very same key does not re-flash the doomed connect, while a genuinely
     // changed key clears the memory and retries. Both directions on one failed device: re-warm the same failed key (no new factory call), then re-warm a changed key (a
     // fresh connect that succeeds). The forced-resend cadence a restart or visibility return produces is exactly the same-key re-warm this gate blocks.
-    const client = new FakeClient({ cache: restingCache() });
+    const client = makeClient({ snapshot: restingCache() });
     let call = 0;
-    const openClient = makeOpenClient(async () => {
+    const openClient = makeFakeOpenClient(async () => {
 
       call++;
 
@@ -672,9 +583,9 @@ describe("StatusFeed key diff", () => {
 
     // Outcome memory is cleared when a connect starts, never lingering behind a live session. A device fails auth-invalid, then a key fix reconnects it; a view of the
     // now-live device must re-surface the live snapshot and never the stale key error - the encoded check for the outcome-drifts-from-session-state pre-mortem risk.
-    const client = new FakeClient({ cache: restingCache() });
+    const client = makeClient({ snapshot: restingCache() });
     let call = 0;
-    const openClient = makeOpenClient(async () => {
+    const openClient = makeFakeOpenClient(async () => {
 
       call++;
 
@@ -713,10 +624,10 @@ describe("StatusFeed key diff", () => {
   test("pushes no availability event during an intentional key-diff reconnect", async () => {
 
     // Encrypted fakes, so the changed key reconnects rather than adopting in place - this test is about the teardown ordering that reconnect performs.
-    const client1 = new FakeClient({ cache: restingCache(), isEncrypted: true });
-    const client2 = new FakeClient({ cache: restingCache(), isEncrypted: true });
+    const client1 = makeClient({ isEncrypted: true, snapshot: restingCache() });
+    const client2 = makeClient({ isEncrypted: true, snapshot: restingCache() });
     let call = 0;
-    const openClient = makeOpenClient(async () => {
+    const openClient = makeFakeOpenClient(async () => {
 
       call++;
 
@@ -750,7 +661,7 @@ describe("StatusFeed view", () => {
 
   test("re-surfaces a stored auth-missing outcome rather than connecting", async () => {
 
-    const openClient = makeOpenClient(async () => {
+    const openClient = makeFakeOpenClient(async () => {
 
       throw new (await import("esphome-client")).EncryptionRequiredError("key required");
     });
@@ -778,9 +689,9 @@ describe("StatusFeed view", () => {
 
   test("retries a stored unreachable outcome with a fresh connect on view", async () => {
 
-    const client = new FakeClient({ cache: restingCache() });
+    const client = makeClient({ snapshot: restingCache() });
     let call = 0;
-    const openClient = makeOpenClient(async () => {
+    const openClient = makeFakeOpenClient(async () => {
 
       call++;
 
@@ -814,8 +725,8 @@ describe("StatusFeed view", () => {
 
   test("pushes connecting for a still-connecting session", async () => {
 
-    const pendingClient = Promise.withResolvers<FakeClient>();
-    const openClient = makeOpenClient(() => pendingClient.promise);
+    const pendingClient = Promise.withResolvers<TestEspHomeClient>();
+    const openClient = makeFakeOpenClient(() => pendingClient.promise);
     const { browser, feed, pushes } = makeFeed({ openClient });
 
     feed.startDiscovery();
@@ -834,14 +745,14 @@ describe("StatusFeed view", () => {
     assert.equal(emitted.length, 1, "view emits one push for a session still connecting");
     assert.equal(emitted[0]?.kind, "connecting", "a session with no client yet pushes connecting");
 
-    pendingClient.resolve(new FakeClient({ cache: restingCache() }));
+    pendingClient.resolve(makeClient({ snapshot: restingCache() }));
 
     await settle();
   });
 
   test("pushes connecting for a warmed-but-undiscovered mac and for an unwarmed mac", async () => {
 
-    const { feed, pushes } = makeFeed({ discoveryTimeoutSeconds: 5, openClient: makeOpenClient(async () => new FakeClient({ cache: restingCache() })) });
+    const { feed, pushes } = makeFeed({ discoveryTimeoutSeconds: 5, openClient: makeFakeOpenClient(async () => makeClient({ snapshot: restingCache() })) });
 
     feed.startDiscovery();
     feed.warm({ devices: [{ mac: MAC }] });
@@ -909,8 +820,8 @@ describe("StatusFeed addresses", () => {
 
     // The feed has no per-device discovery removal: #devices is populated on advertisement and cleared only at dispose, so a mac dropped from the warm set stays in the
     // projection. This pins the actual departure behavior rather than inventing a removal the feed does not perform.
-    const client = new FakeClient({ cache: restingCache() });
-    const { browser, feed } = makeFeed({ discoveryTimeoutSeconds: 5, openClient: makeOpenClient(async () => client) });
+    const client = makeClient({ snapshot: restingCache() });
+    const { browser, feed } = makeFeed({ discoveryTimeoutSeconds: 5, openClient: makeFakeOpenClient(async () => client) });
 
     feed.startDiscovery();
     browser().found(makeService(MAC));
@@ -941,8 +852,8 @@ describe("StatusFeed row model", () => {
       { objectId: "obstruction", type: "binary_sensor" } ];
     const cache = buildCache([ makeTelemetry("cover", "door", {}), makeLightEvent("light", false), makeLockEvent("lock_remotes", LockState.UNLOCKED),
       makeBinarySensorEvent("motion", true), makeBinarySensorEvent("obstruction", false) ]);
-    const client = new FakeClient({ cache, entities });
-    const { browser, feed, pushes } = makeFeed({ openClient: makeOpenClient(async () => client) });
+    const client = makeClient({ entities, snapshot: cache });
+    const { browser, feed, pushes } = makeFeed({ openClient: makeFakeOpenClient(async () => client) });
 
     feed.startDiscovery();
     browser().found(makeService());
@@ -968,7 +879,8 @@ describe("StatusFeed row model", () => {
 
   test("builds the Konnected row set from the Konnected wire ids, with no motion row", async () => {
 
-    const { browser, feed, pushes } = makeFeed({ openClient: makeOpenClient(async () => new FakeClient({ cache: konnectedCache(), entities: KONNECTED_ADVERTISED })) });
+    const { browser, feed, pushes } = makeFeed({ openClient: makeFakeOpenClient(async () => makeClient({ entities: KONNECTED_ADVERTISED,
+      snapshot: konnectedCache() })) });
 
     feed.startDiscovery();
     browser().found(makeKonnectedService());
@@ -998,7 +910,7 @@ describe("StatusFeed row model", () => {
 
     // Emit a panel event and a non-panel event the instant the telemetry listener registers. The row map is computed before registration, so the panel event pushes a row
     // while the non-panel event is filtered out - a read-then-register regression would drop the panel event, and an uninitialized filter would admit the stray one.
-    const onListen = (event: string, client: FakeClient): void => {
+    const onListen = (event: string, client: TestEspHomeClient): void => {
 
       if(event === "telemetry") {
 
@@ -1006,7 +918,7 @@ describe("StatusFeed row model", () => {
         client.emit("telemetry", strayEvent);
       }
     };
-    const { browser, feed, pushes } = makeFeed({ openClient: makeOpenClient(async () => new FakeClient({ cache: restingCache(), onListen })) });
+    const { browser, feed, pushes } = makeFeed({ openClient: makeFakeOpenClient(async () => makeClient({ onListen, snapshot: restingCache() })) });
 
     feed.startDiscovery();
     browser().found(makeService());
@@ -1025,8 +937,8 @@ describe("StatusFeed row model", () => {
 
   test("filters telemetry to panel rows, dropping unregistered types and registered-but-not-panel entities", async () => {
 
-    const client = new FakeClient({ cache: restingCache(), entities: [ ...ADVERTISED, { objectId: "laser", type: "switch" } ] });
-    const { browser, feed, pushes } = makeFeed({ openClient: makeOpenClient(async () => client) });
+    const client = makeClient({ entities: [ ...ADVERTISED, { objectId: "laser", type: "switch" } ], snapshot: restingCache() });
+    const { browser, feed, pushes } = makeFeed({ openClient: makeFakeOpenClient(async () => client) });
 
     feed.startDiscovery();
     browser().found(makeService());
@@ -1055,7 +967,7 @@ describe("StatusFeed row model", () => {
     // the motion row rather than rendering a phantom value; a later motion telemetry event would still push a row, because the entity is a real advertised member.
     const cache = buildCache([ makeTelemetry("cover", "door", {}), makeLightEvent("light", false), makeLockEvent("lock_remotes", LockState.UNLOCKED),
       makeBinarySensorEvent("obstruction", false) ]);
-    const { browser, feed, pushes } = makeFeed({ openClient: makeOpenClient(async () => new FakeClient({ cache })) });
+    const { browser, feed, pushes } = makeFeed({ openClient: makeFakeOpenClient(async () => makeClient({ snapshot: cache })) });
 
     feed.startDiscovery();
     browser().found(makeService());
@@ -1079,8 +991,8 @@ describe("StatusFeed row value mapping", () => {
   // Drive one telemetry event through a live session and return the value of the row push it produced.
   const rowValueFor = async (event: TelemetryEvent, rowId: string): Promise<string | undefined> => {
 
-    const client = new FakeClient({ cache: restingCache() });
-    const { browser, feed, pushes } = makeFeed({ openClient: makeOpenClient(async () => client) });
+    const client = makeClient({ snapshot: restingCache() });
+    const { browser, feed, pushes } = makeFeed({ openClient: makeFakeOpenClient(async () => client) });
 
     feed.startDiscovery();
     browser().found(makeService());
@@ -1127,7 +1039,7 @@ describe("StatusFeed snapshot sizers", () => {
 
     // The ratgdo variant carries every StatusRowId, so one snapshot proves the whole sizer record's values. Each expected string is the widest display value that row's
     // vocabulary can produce, pinned here so a value-set change that widens a row must update this expectation in step with the module's frozen record.
-    const { browser, feed, pushes } = makeFeed({ openClient: makeOpenClient(async () => new FakeClient({ cache: restingCache() })) });
+    const { browser, feed, pushes } = makeFeed({ openClient: makeFakeOpenClient(async () => makeClient({ snapshot: restingCache() })) });
 
     feed.startDiscovery();
     browser().found(makeService());
@@ -1158,8 +1070,8 @@ describe("StatusFeed availability", () => {
 
   test("pushes an availability event for each lifecycle transition, in order, with the boolean values", async () => {
 
-    const client = new FakeClient({ cache: restingCache() });
-    const { browser, feed, pushes } = makeFeed({ openClient: makeOpenClient(async () => client) });
+    const client = makeClient({ snapshot: restingCache() });
+    const { browser, feed, pushes } = makeFeed({ openClient: makeFakeOpenClient(async () => client) });
 
     feed.startDiscovery();
     browser().found(makeService());
@@ -1185,9 +1097,9 @@ describe("StatusFeed availability", () => {
 describe("StatusFeed connection failures", () => {
 
   // Drive a connect whose client factory fails in the given way and return the classified error reason it pushed, if any.
-  const failureReasonFor = async (handler: (options: RecordedOpenOptions) => Promise<unknown>): Promise<string | undefined> => {
+  const failureReasonFor = async (handler: OpenClientHandler): Promise<string | undefined> => {
 
-    const { browser, feed, pushes } = makeFeed({ openClient: makeOpenClient(handler) });
+    const { browser, feed, pushes } = makeFeed({ openClient: makeFakeOpenClient(handler) });
 
     feed.startDiscovery();
     browser().found(makeService());
@@ -1256,8 +1168,8 @@ describe("StatusFeed connection failures", () => {
 
     // The first connect defers. A re-warm with a changed key supersedes it - tearing its session down and aborting its signal - then the deferred connect fails. With the
     // session's signal aborted, openConnection classifies the outcome as a shutdown, which the pool stands down on silently rather than surfacing an error.
-    const pendingFirst = Promise.withResolvers<FakeClient>();
-    const openClient = makeOpenClient((_options, index) => (index === 0) ? pendingFirst.promise : Promise.resolve(new FakeClient({ cache: restingCache() })));
+    const pendingFirst = Promise.withResolvers<TestEspHomeClient>();
+    const openClient = makeFakeOpenClient((_options, index) => (index === 0) ? pendingFirst.promise : Promise.resolve(makeClient({ snapshot: restingCache() })));
     const { browser, feed, pushes } = makeFeed({ openClient });
 
     feed.startDiscovery();
@@ -1281,7 +1193,7 @@ describe("StatusFeed connection failures", () => {
 
     // The connect body is total: a client whose listener registration throws mid-connect is caught, logged, and surfaced as unreachable rather than escaping as a
     // rejection that would terminate the custom-UI child process.
-    const { browser, feed, pushes } = makeFeed({ openClient: makeOpenClient(async () => new FakeClient({ cache: restingCache(), throwOnListen: true })) });
+    const { browser, feed, pushes } = makeFeed({ openClient: makeFakeOpenClient(async () => makeClient({ snapshot: restingCache(), throwOnListen: true })) });
 
     feed.startDiscovery();
     browser().found(makeService());
@@ -1314,7 +1226,7 @@ describe("StatusFeed connection failures", () => {
 
         throw new Error("the settings panel channel is closed");
       };
-      const { browser, entries, feed } = makeFeed({ openClient: makeOpenClient(async () => {
+      const { browser, entries, feed } = makeFeed({ openClient: makeFakeOpenClient(async () => {
 
         throw new Error("connect refused");
       }), push: throwingPush });
@@ -1347,7 +1259,7 @@ describe("StatusFeed connection logging", () => {
 
     // openConnection forwards this adapter to the client factory as its logger, so the client's own lines - connect retries, heartbeat, the encryption diagnostic that
     // sent us looking for this identity in the first place - reach the feed's log carrying the device they belong to.
-    const openClient = makeOpenClient(async () => new FakeClient({ cache: restingCache() }));
+    const openClient = makeFakeOpenClient(async () => makeClient({ snapshot: restingCache() }));
     const { browser, entries, feed } = makeFeed({ openClient });
 
     feed.startDiscovery();
@@ -1389,7 +1301,7 @@ describe("StatusFeed connection logging", () => {
     // run the same assertion against a freshly built feed, so the check lives in one local helper rather than being written out twice.
     const assertAddressIsTheIdentity = async (overrides: Record<string, string | undefined>): Promise<void> => {
 
-      const openClient = makeOpenClient(async () => new FakeClient({ cache: restingCache() }));
+      const openClient = makeFakeOpenClient(async () => makeClient({ snapshot: restingCache() }));
       const { browser, entries, feed } = makeFeed({ openClient });
 
       feed.startDiscovery();
@@ -1425,7 +1337,7 @@ describe("StatusFeed connection logging", () => {
 
       throw new Error("the settings panel channel is closed");
     };
-    const { browser, entries, feed } = makeFeed({ openClient: makeOpenClient(async () => new FakeClient({ cache: restingCache() })), push: throwingPush });
+    const { browser, entries, feed } = makeFeed({ openClient: makeFakeOpenClient(async () => makeClient({ snapshot: restingCache() })), push: throwingPush });
 
     feed.startDiscovery();
     browser().found(makeService());
@@ -1443,7 +1355,7 @@ describe("StatusFeed connection logging", () => {
   test("gives each of two concurrent connects its own device identity", async () => {
 
     // The adapter is minted per connect inside the connect body, so two connects in flight together cannot share one adapter or overwrite one another's identity.
-    const openClient = makeOpenClient(async () => new FakeClient({ cache: restingCache() }));
+    const openClient = makeFakeOpenClient(async () => makeClient({ snapshot: restingCache() }));
     const { browser, entries, feed } = makeFeed({ openClient });
 
     feed.startDiscovery();
@@ -1475,7 +1387,7 @@ describe("StatusFeed connection logging", () => {
 
     // The connect body's totality catch runs with the device still in scope, so its line opens with the same identity every other line of this connection does. A
     // client whose listener registration throws lands in exactly that catch, and the caught error renders after the sentence, so the head is what the assertion reads.
-    const { browser, entries, feed } = makeFeed({ openClient: makeOpenClient(async () => new FakeClient({ cache: restingCache(), throwOnListen: true })) });
+    const { browser, entries, feed } = makeFeed({ openClient: makeFakeOpenClient(async () => makeClient({ snapshot: restingCache(), throwOnListen: true })) });
 
     feed.startDiscovery();
     browser().found(makeService());
@@ -1498,7 +1410,7 @@ describe("StatusFeed discovery", () => {
     // The budget is short (30ms) and the clock is driven PAST it, so a dropped timer clear surfaces: an uncleared timer would fire not-found at 30ms, well inside the
     // 50ms the clock moves. The advertisement lands before the deadline, so discovery clears the timer and connects, and the later advance proves the timer is gone.
     const { browser, clock, feed, pushes } = makeFeed({ discoveryTimeoutSeconds: 0.03,
-      openClient: makeOpenClient(async () => new FakeClient({ cache: restingCache() })) });
+      openClient: makeFakeOpenClient(async () => makeClient({ snapshot: restingCache() })) });
 
     feed.startDiscovery();
     feed.warm({ devices: [{ mac: MAC }] });
@@ -1520,7 +1432,7 @@ describe("StatusFeed discovery", () => {
     // place) - the unrelated activity. A per-mac timer keeps MAC's original deadline (50ms from its arming warm); a shared timer re-armed on every warm would push MAC's
     // deadline out past the assertion window. The last re-warm lands at 45ms, so the read at 72ms is past the true 50ms deadline but well short of any re-armed 95ms
     // one.
-    const openClient = makeOpenClient(async () => new FakeClient({ cache: restingCache(), isEncrypted: true }));
+    const openClient = makeFakeOpenClient(async () => makeClient({ isEncrypted: true, snapshot: restingCache() }));
     const { browser, clock, feed, pushes } = makeFeed({ discoveryTimeoutSeconds: 0.05, openClient });
 
     // Re-warm the set with a fresh key for the discovered device, driving its reconnect while MAC stays warmed and undiscovered.
@@ -1563,9 +1475,9 @@ describe("StatusFeed discovery", () => {
 
   test("keeps a live session when its mac is absent from a re-warm and stops discovery-driven reconnects for it", async () => {
 
-    const clientA = new FakeClient({ cache: restingCache() });
-    const clientB = new FakeClient({ cache: restingCache() });
-    const openClient = makeOpenClient((options) => Promise.resolve((options.host === ADDR_TWO) ? clientB : clientA));
+    const clientA = makeClient({ snapshot: restingCache() });
+    const clientB = makeClient({ snapshot: restingCache() });
+    const openClient = makeFakeOpenClient((options) => Promise.resolve((options.host === ADDR_TWO) ? clientB : clientA));
     const { browser, feed } = makeFeed({ openClient });
 
     feed.startDiscovery();
@@ -1599,7 +1511,7 @@ describe("StatusFeed discovery", () => {
 
     // Isolate the #warmKeys gate. The device's connect fails, so its session is gone; then the device is dropped from the warm set. On re-advertisement, with no session
     // to block it, the session guard admits a reconnect - only #warmKeys.has() being false gates it out - so a flat factory count proves warm-set membership is the gate.
-    const openClient = makeOpenClient(async () => {
+    const openClient = makeFakeOpenClient(async () => {
 
       throw new Error("connect refused");
     });
@@ -1627,7 +1539,7 @@ describe("StatusFeed discovery", () => {
 
   test("ignores an advertised service that is not a ratgdo device", async () => {
 
-    const { browser, feed, pushes } = makeFeed({ discoveryTimeoutSeconds: 1, openClient: makeOpenClient(async () => new FakeClient({ cache: restingCache() })) });
+    const { browser, feed, pushes } = makeFeed({ discoveryTimeoutSeconds: 1, openClient: makeFakeOpenClient(async () => makeClient({ snapshot: restingCache() })) });
 
     feed.startDiscovery();
     feed.warm({ devices: [{ mac: MAC }] });
@@ -1646,7 +1558,7 @@ describe("StatusFeed advertisement", () => {
 
   test("never double-connects on repeated re-advertisements of a live mac", async () => {
 
-    const openClient = makeOpenClient(async () => new FakeClient({ cache: restingCache() }));
+    const openClient = makeFakeOpenClient(async () => makeClient({ snapshot: restingCache() }));
     const { browser, feed, pushes } = makeFeed({ openClient });
 
     feed.startDiscovery();
@@ -1677,9 +1589,9 @@ describe("StatusFeed isolation", () => {
 
   test("leaves sibling connects unaffected when one device's connect fails", async () => {
 
-    const clientA = new FakeClient({ cache: restingCache() });
-    const clientC = new FakeClient({ cache: restingCache() });
-    const openClient = makeOpenClient(async (options) => {
+    const clientA = makeClient({ snapshot: restingCache() });
+    const clientC = makeClient({ snapshot: restingCache() });
+    const openClient = makeFakeOpenClient(async (options) => {
 
       if(options.host === ADDR_TWO) {
 
@@ -1713,10 +1625,10 @@ describe("StatusFeed supersede", () => {
 
   test("disposes a superseded connection without pushing, while the successor completes its snapshot", async () => {
 
-    const first = new FakeClient({ cache: restingCache() });
-    const second = new FakeClient({ cache: restingCache() });
-    const pendingFirst = Promise.withResolvers<FakeClient>();
-    const openClient = makeOpenClient((_options, index) => (index === 0) ? pendingFirst.promise : Promise.resolve(second));
+    const first = makeClient({ snapshot: restingCache() });
+    const second = makeClient({ snapshot: restingCache() });
+    const pendingFirst = Promise.withResolvers<TestEspHomeClient>();
+    const openClient = makeFakeOpenClient((_options, index) => (index === 0) ? pendingFirst.promise : Promise.resolve(second));
     const { browser, feed, pushes } = makeFeed({ openClient });
 
     feed.startDiscovery();
@@ -1747,9 +1659,9 @@ describe("StatusFeed dispose", () => {
 
   test("tears down every session and timer, is safe on repeat, and connects nothing afterward", async () => {
 
-    const clientA = new FakeClient({ cache: restingCache() });
-    const clientB = new FakeClient({ cache: restingCache() });
-    const openClient = makeOpenClient((options) => Promise.resolve((options.host === ADDR_TWO) ? clientB : clientA));
+    const clientA = makeClient({ snapshot: restingCache() });
+    const clientB = makeClient({ snapshot: restingCache() });
+    const openClient = makeFakeOpenClient((options) => Promise.resolve((options.host === ADDR_TWO) ? clientB : clientA));
     const { browser, clock, factory, feed, pushes } = makeFeed({ discoveryTimeoutSeconds: 0.03, openClient });
 
     feed.startDiscovery();
@@ -1797,7 +1709,7 @@ describe("StatusFeed discovery lifecycle", () => {
 
   test("builds the browser ahead of the first warm and never builds it twice", async () => {
 
-    const { browser, factory, feed, pushes } = makeFeed({ openClient: makeOpenClient(async () => new FakeClient({ cache: restingCache() })) });
+    const { browser, factory, feed, pushes } = makeFeed({ openClient: makeFakeOpenClient(async () => makeClient({ snapshot: restingCache() })) });
 
     feed.startDiscovery();
 
@@ -1833,7 +1745,7 @@ describe("StatusFeed discovery lifecycle", () => {
     // one after construction, two after the warm. The discovery budget is generous so the warmed mac's not-found timer never pre-empts the advertisement's connect.
     const factory = new FlakeyBrowserFactory(1);
     const { browser, feed, pushes } = makeFeed({ browserFactory: factory, discoveryTimeoutSeconds: 5,
-      openClient: makeOpenClient(async () => new FakeClient({ cache: restingCache() })) });
+      openClient: makeFakeOpenClient(async () => makeClient({ snapshot: restingCache() })) });
 
     feed.startDiscovery();
 
@@ -1855,7 +1767,7 @@ describe("StatusFeed discovery lifecycle", () => {
 
     // A warm re-ensures the stream through startDiscovery, but a stream already running must not be replaced: ensureBrowser's early return makes the call a no-op
     // while one runs. The build count stays one across three warms that add and drop devices, proving the warm-cadence retry costs nothing on a healthy stream.
-    const { factory, feed } = makeFeed({ openClient: makeOpenClient(async () => new FakeClient({ cache: restingCache() })) });
+    const { factory, feed } = makeFeed({ openClient: makeFakeOpenClient(async () => makeClient({ snapshot: restingCache() })) });
 
     feed.startDiscovery();
 
@@ -1873,7 +1785,7 @@ describe("StatusFeed discovery lifecycle", () => {
     // A browser that loses its last network socket aborts itself: the stream ends rather than throwing, so the feed's loop is where that fault becomes visible. The
     // loop nulls its field on the way out, and the next warm is what builds the replacement - the warm cadence IS the retry.
     const { browser, entries, factory, feed } = makeFeed({ discoveryTimeoutSeconds: 5,
-      openClient: makeOpenClient(async () => new FakeClient({ cache: restingCache() })) });
+      openClient: makeFakeOpenClient(async () => makeClient({ snapshot: restingCache() })) });
 
     feed.startDiscovery();
 
@@ -1925,10 +1837,10 @@ describe("StatusFeed address change", () => {
 
     // The session records the address its connect dialed, so an advertisement carrying a different one is a device that moved. The pool follows it exactly as the
     // platform does: tear the session down and re-dial at the new address, which is the same shape warm() uses for a changed key.
-    const first = new FakeClient({ cache: restingCache() });
-    const second = new FakeClient({ cache: restingCache() });
+    const first = makeClient({ snapshot: restingCache() });
+    const second = makeClient({ snapshot: restingCache() });
     let call = 0;
-    const openClient = makeOpenClient(async () => {
+    const openClient = makeFakeOpenClient(async () => {
 
       call++;
 
@@ -1961,10 +1873,10 @@ describe("StatusFeed address change", () => {
     /* The device advertises three addresses and is dialed at the unique-local one, then advertises a set without it. The session's own address is gone from the
      * advertisement, which is what a device that moved looks like, and the pool tears the session down and re-dials at what the remaining set picks.
      */
-    const first = new FakeClient({ cache: restingCache() });
-    const second = new FakeClient({ cache: restingCache() });
+    const first = makeClient({ snapshot: restingCache() });
+    const second = makeClient({ snapshot: restingCache() });
     let call = 0;
-    const openClient = makeOpenClient(async () => {
+    const openClient = makeFakeOpenClient(async () => {
 
       call++;
 
@@ -2001,8 +1913,8 @@ describe("StatusFeed address change", () => {
      * re-dialed, and the panel sees no Connecting flash. The projection follows the session rather than the pick, because the panel's "IP Address" means where the
      * connection actually is.
      */
-    const client = new FakeClient({ cache: restingCache() });
-    const openClient = makeOpenClient(async () => client);
+    const client = makeClient({ snapshot: restingCache() });
+    const openClient = makeFakeOpenClient(async () => client);
     const { browser, feed, pushes } = makeFeed({ discoveryTimeoutSeconds: 5, openClient });
 
     feed.startDiscovery();
@@ -2035,8 +1947,8 @@ describe("StatusFeed address change", () => {
 
     // The browser lists a host's addresses in the order they arrived in its cache, so a record that lapses and returns re-enters at the end. The ranked pick already
     // ignores that order and membership ignores it too, so a reorder of a stable set is an event at neither gate.
-    const client = new FakeClient({ cache: restingCache() });
-    const openClient = makeOpenClient(async () => client);
+    const client = makeClient({ snapshot: restingCache() });
+    const openClient = makeFakeOpenClient(async () => client);
     const { browser, feed, pushes } = makeFeed({ discoveryTimeoutSeconds: 5, openClient });
 
     feed.startDiscovery();
@@ -2067,9 +1979,9 @@ describe("StatusFeed address change", () => {
      * advertisement, so the session is torn down, and the re-dial at the new pick fails - which leaves the device discovered with no session at all. The read falls
      * back to what the advertisement picks, which is the address the next connect will dial.
      */
-    const first = new FakeClient({ cache: restingCache() });
+    const first = makeClient({ snapshot: restingCache() });
     let call = 0;
-    const openClient = makeOpenClient(async () => {
+    const openClient = makeFakeOpenClient(async () => {
 
       call++;
 
@@ -2106,8 +2018,8 @@ describe("StatusFeed address change", () => {
   test("leaves a live session alone when a mac outside the warm set moves", async () => {
 
     // The warm-set departure rule outranks the address change: a mac the sidebar no longer names keeps whatever session it holds, and discovery drives nothing for it.
-    const client = new FakeClient({ cache: restingCache() });
-    const openClient = makeOpenClient(async () => client);
+    const client = makeClient({ snapshot: restingCache() });
+    const openClient = makeFakeOpenClient(async () => client);
     const { browser, feed } = makeFeed({ discoveryTimeoutSeconds: 5, openClient });
 
     feed.startDiscovery();
@@ -2133,8 +2045,8 @@ describe("StatusFeed address change", () => {
     // A lost advertisement changes nothing: the discovery entry stands so the projection and any later connect keep the last address, and whether a connected device
     // is still there is the ESPHome connection's to report. The client's dispose count staying zero is what tells a correct lost arm from one that tears the session
     // down; the absence of an availability push follows from the same fact.
-    const client = new FakeClient({ cache: restingCache() });
-    const { browser, feed, pushes } = makeFeed({ discoveryTimeoutSeconds: 5, openClient: makeOpenClient(async () => client) });
+    const client = makeClient({ snapshot: restingCache() });
+    const { browser, feed, pushes } = makeFeed({ discoveryTimeoutSeconds: 5, openClient: makeFakeOpenClient(async () => client) });
 
     feed.startDiscovery();
     browser().found(makeService(MAC));
@@ -2198,7 +2110,7 @@ describe("narrowStatusWarmRequest", () => {
 
   test("creates no session for an empty warm at the feed layer", async () => {
 
-    const { feed, pushes } = makeFeed({ openClient: makeOpenClient(async () => new FakeClient({ cache: restingCache() })) });
+    const { feed, pushes } = makeFeed({ openClient: makeFakeOpenClient(async () => makeClient({ snapshot: restingCache() })) });
 
     feed.startDiscovery();
     feed.warm({ devices: [] });

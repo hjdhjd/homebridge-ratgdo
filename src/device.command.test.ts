@@ -7,29 +7,19 @@
  * "button-pre-close_warning") are read straight from RATGDO_ENTITIES, so the assertions pin the wire-faithful resolution rather than re-deriving it.
  *
  * Timer-driven command concerns - the command-failure UI revert (RATGDO_UI_REVERT_DELAY) and the Konnected pre-close-warning momentary auto-revert
- * (RATGDO_KONNECTED_PCW_DURATION) - run under node:test mock timers so the deferred characteristic write is observed deterministically without a real-time delay.
+ * (RATGDO_KONNECTED_PCW_DURATION) - run on the platform double's test clock, so the deferred characteristic write is observed deterministically without a real-time
+ * delay.
  */
 import { Characteristic, Service, buildRatgdoAccessory, makeCoverEvent, makeKonnectedInitialState, makeRatgdoInitialState } from "./testing.helpers.ts";
 import { RATGDO_KONNECTED_PCW_DURATION, RATGDO_UI_REVERT_DELAY } from "./settings.ts";
 import { RatgdoService, RatgdoVariant } from "./types.ts";
-import { afterEach, beforeEach, describe, mock, test } from "node:test";
+import { describe, test } from "node:test";
 import { LockCommand } from "esphome-client";
+import { MQTT_SET_SUFFIX } from "homebridge-plugin-utils";
 import assert from "node:assert/strict";
 import { loggedAt } from "homebridge-plugin-utils/testing";
 
 describe("RatgdoAccessory command dispatch", () => {
-
-  // Every command-concern test either dispatches no timer (the happy paths) or relies on a deferred revert; enabling fake setTimeout for all of them keeps the timing
-  // deterministic and lets the failure / momentary tests tick the clock forward without any real-time wait.
-  beforeEach(() => {
-
-    mock.timers.enable({ apis: ["setTimeout"] });
-  });
-
-  afterEach(() => {
-
-    mock.timers.reset();
-  });
 
   describe("the light switch", () => {
 
@@ -162,7 +152,7 @@ describe("RatgdoAccessory command dispatch", () => {
 
       const { client, mqtt } = buildRatgdoAccessory({ mqtt: true });
 
-      await mqtt?.invokeSet("garagedoor", "open 50");
+      await mqtt?.invokeSet("garagedoor" + MQTT_SET_SUFFIX, "open 50");
 
       assert.deepEqual(client.commands, [{ id: "cover-door", payload: { position: 0.5 } }],
         "an \"open 50\" MQTT set maps the 0-100 percentage onto the 0-1 cover position scale");
@@ -172,7 +162,7 @@ describe("RatgdoAccessory command dispatch", () => {
 
       const { client, mqtt } = buildRatgdoAccessory({ mqtt: true });
 
-      await mqtt?.invokeSet("garagedoor", "open");
+      await mqtt?.invokeSet("garagedoor" + MQTT_SET_SUFFIX, "open");
 
       assert.deepEqual(client.commands, [{ id: "cover-door", payload: { position: 1 } }],
         "a bare \"open\" MQTT set with no position dispatches a full-open position-1 command");
@@ -182,7 +172,7 @@ describe("RatgdoAccessory command dispatch", () => {
 
       const { client, mqtt } = buildRatgdoAccessory({ initialState: makeRatgdoInitialState([makeCoverEvent("door", 1)]), mqtt: true });
 
-      await mqtt?.invokeSet("garagedoor", "close");
+      await mqtt?.invokeSet("garagedoor" + MQTT_SET_SUFFIX, "close");
 
       assert.deepEqual(client.commands, [{ id: "cover-door", payload: { position: 0 } }],
         "a \"close\" MQTT set on an open door dispatches a full-close position-0 command");
@@ -197,7 +187,7 @@ describe("RatgdoAccessory command dispatch", () => {
       // eslint-disable-next-line camelcase
       ratgdo.updateState({ current_operation: "OPENING", id: "cover-door", position: 0.5, state: "OPENING" });
 
-      await mqtt?.invokeSet("garagedoor", "close");
+      await mqtt?.invokeSet("garagedoor" + MQTT_SET_SUFFIX, "close");
 
       assert.deepEqual(client.commands, [{ id: "cover-door", payload: { stop: true } }],
         "a set issued while the door is transitioning dispatches a stop command against the cover entity");
@@ -207,7 +197,7 @@ describe("RatgdoAccessory command dispatch", () => {
 
       const { client, entries, mqtt } = buildRatgdoAccessory({ mqtt: true });
 
-      await mqtt?.invokeSet("garagedoor", "wiggle");
+      await mqtt?.invokeSet("garagedoor" + MQTT_SET_SUFFIX, "wiggle");
 
       assert.deepEqual(client.commands, [], "an unrecognized MQTT verb dispatches no command to the device");
       assert.equal(loggedAt(entries, "error", "Invalid garage door MQTT command received"), true,
@@ -219,7 +209,7 @@ describe("RatgdoAccessory command dispatch", () => {
 
     test("reverts the characteristic to its prior value when the client is unavailable", async () => {
 
-      const { accessory, client } = buildRatgdoAccessory({ clientUnavailable: true });
+      const { accessory, client, clock } = buildRatgdoAccessory({ clientUnavailable: true });
       const on = accessory.getService(Service.Lightbulb)?.getCharacteristic(Characteristic.On);
 
       await on?.triggerSet(true);
@@ -228,7 +218,7 @@ describe("RatgdoAccessory command dispatch", () => {
       assert.equal(on?.value, true, "the user's set value is held until the deferred revert fires");
 
       // The failed onSet scheduled a deferred revert; advancing past the revert delay must put the characteristic back to its prior off state.
-      mock.timers.tick(RATGDO_UI_REVERT_DELAY);
+      clock.advance(RATGDO_UI_REVERT_DELAY);
 
       assert.equal(on?.value, false, "after the revert delay elapses the On characteristic reverts to its prior off value");
     });
@@ -238,7 +228,7 @@ describe("RatgdoAccessory command dispatch", () => {
 
     test("dispatches a momentary button command then auto-reverts the switch off", async () => {
 
-      const { accessory, client } = buildRatgdoAccessory({ device: { variant: RatgdoVariant.KONNECTED }, initialState: makeKonnectedInitialState(),
+      const { accessory, client, clock } = buildRatgdoAccessory({ device: { variant: RatgdoVariant.KONNECTED }, initialState: makeKonnectedInitialState(),
         userOptions: ["Enable.Konnected.Switch.Pcw"] });
       const on = accessory.getServiceById(Service.Switch, RatgdoService.SWITCH_KONNECTED_PCW)?.getCharacteristic(Characteristic.On);
 
@@ -249,7 +239,7 @@ describe("RatgdoAccessory command dispatch", () => {
       assert.equal(on?.value, true, "the switch stays on while the pre-close warning audio plays");
 
       // The momentary switch auto-reverts to off after the pre-close warning duration elapses.
-      mock.timers.tick(RATGDO_KONNECTED_PCW_DURATION * 1000);
+      clock.advance(RATGDO_KONNECTED_PCW_DURATION * 1000);
 
       assert.equal(on?.value, false, "after the pre-close warning duration the momentary switch reverts to off");
     });

@@ -5,11 +5,11 @@
  * availability fan-out (Model refresh, StatusActive across every sensor service, and the disconnect log that the device - not the platform - owns).
  */
 import { Characteristic, Service, buildRatgdoAccessory, makeLockEvent, makeRatgdoInitialState } from "./testing.helpers.ts";
+import { assertNoUnhandledRejections, loggedAt, settle } from "homebridge-plugin-utils/testing";
 import { describe, test } from "node:test";
 import { LockState } from "esphome-client";
 import { RatgdoService } from "./types.ts";
 import assert from "node:assert/strict";
-import { loggedAt } from "homebridge-plugin-utils/testing";
 
 describe("RatgdoAccessory.updateState() lock and availability", () => {
 
@@ -34,7 +34,7 @@ describe("RatgdoAccessory.updateState() lock and availability", () => {
       assert.equal(lockout?.getCharacteristic(Characteristic.On).value, true, "the lockout automation switch turns on when the remotes are locked out");
       assert.equal(loggedAt(entries, "info", "Wireless remotes are locked out"), true, "locking the remotes emits the locked-out deviation log");
 
-      const lockPublish = mqtt?.publishes.find((entry) => entry.topic.endsWith("/lock"));
+      const lockPublish = mqtt?.published.find((entry) => entry.topic.endsWith("/lock"));
 
       assert.equal(lockPublish?.payload, "1", "the lock case publishes the numeric SECURED lock state (1) to the lock MQTT topic");
     });
@@ -55,7 +55,7 @@ describe("RatgdoAccessory.updateState() lock and availability", () => {
         "an UNLOCKED lock event drives the lock target state to UNSECURED");
       assert.equal(loggedAt(entries, "info", "Wireless remotes are permitted"), true, "unlocking the remotes emits the permitted deviation log");
 
-      const lockPublish = mqtt?.publishes.find((entry) => entry.topic.endsWith("/lock"));
+      const lockPublish = mqtt?.published.find((entry) => entry.topic.endsWith("/lock"));
 
       assert.equal(lockPublish?.payload, "0", "the lock case publishes the numeric UNSECURED lock state (0) to the lock MQTT topic");
     });
@@ -68,7 +68,7 @@ describe("RatgdoAccessory.updateState() lock and availability", () => {
       ratgdo.updateState({ id: "lock-lock_remotes", state: "UNLOCKED" });
 
       assert.equal(loggedAt(entries, "info", "Wireless remotes"), false, "an unchanged lock state produces no lock deviation log");
-      assert.equal(mqtt?.publishes.some((entry) => entry.topic.endsWith("/lock")), false, "an unchanged lock state produces no lock MQTT publish");
+      assert.equal(mqtt?.published.some((entry) => entry.topic.endsWith("/lock")), false, "an unchanged lock state produces no lock MQTT publish");
     });
 
     test("warns and leaves state unchanged for an unrecognized lock state value", () => {
@@ -84,7 +84,7 @@ describe("RatgdoAccessory.updateState() lock and availability", () => {
 
       assert.equal(door?.getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.UNSECURED,
         "an unrecognized lock state leaves the lock current state at its prior value");
-      assert.equal(mqtt?.publishes.some((entry) => entry.topic.endsWith("/lock")), false, "an unrecognized lock state produces no lock MQTT publish");
+      assert.equal(mqtt?.published.some((entry) => entry.topic.endsWith("/lock")), false, "an unrecognized lock state produces no lock MQTT publish");
     });
 
     test("ignores lock updates entirely when the Opener.Lock feature is disabled", () => {
@@ -95,7 +95,33 @@ describe("RatgdoAccessory.updateState() lock and availability", () => {
 
       assert.equal(loggedAt(entries, "info", "Wireless remotes"), false, "a disabled lock feature suppresses the lock deviation log");
       assert.equal(loggedAt(entries, "warn", "Unknown wireless remote"), false, "a disabled lock feature bails before the unrecognized-state warning path");
-      assert.equal(mqtt?.publishes.some((entry) => entry.topic.endsWith("/lock")), false, "a disabled lock feature produces no lock MQTT publish");
+      assert.equal(mqtt?.published.some((entry) => entry.topic.endsWith("/lock")), false, "a disabled lock feature produces no lock MQTT publish");
+    });
+
+    test("survives a broker that refuses the lock publish, reporting it once at error level without floating a rejection", async () => {
+
+      const { entries, mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true });
+
+      assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
+
+      /* Arm the refusal lever so the publish the lock transition issues is rejected the way an unreachable broker rejects one. The accessory publishes through the
+       * client's guarded path, which answers a failure in the log rather than to its caller, so the whole contract under test is that nothing escapes: the
+       * updateState call below returns normally, no rejection reaches the process, and the user learns about it on one error line.
+       */
+      mqtt.publishRejection = new Error("the broker refused the message");
+
+      await assertNoUnhandledRejections(async () => {
+
+        ratgdo.updateState({ id: "lock-lock_remotes", state: "LOCKED" });
+
+        // The guarded path routes its failure on a later microtask, so the log line and the counter are read only once the turn has drained.
+        await settle();
+      });
+
+      assert.equal(mqtt.rejectedPublishes, 1, "the refused publish is counted rather than recorded");
+      assert.equal(mqtt.published.some((entry) => entry.topic.endsWith("/lock")), false, "a refused publish records nothing, so no lock payload lands");
+      assert.equal(loggedAt(entries, "error", "Unable to publish to the MQTT topic"), true,
+        "the guarded path reports a genuine publish failure once, at error level, naming the topic");
     });
   });
 

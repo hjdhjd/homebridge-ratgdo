@@ -3,10 +3,10 @@
  * platform.ts: homebridge-ratgdo platform class.
  */
 import type { API, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
+import type { Clock, HomebridgePluginLogging, MdnsDiscovery, MdnsDiscoveryEvent, MqttClient, Nullable } from "homebridge-plugin-utils";
 import { CoalescingTask, FeatureOptions, HbpuAbortError, createMqttClient, debugGatedLog, discoverServices, formatErrorMessage, mqttConnectionSettings,
-  prefixedLog, sanitizeName, superviseLoop } from "homebridge-plugin-utils";
+  prefixedLog, sanitizeName, superviseLoop, systemClock } from "homebridge-plugin-utils";
 import type { EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
-import type { HomebridgePluginLogging, MdnsDiscovery, MdnsDiscoveryEvent, MqttClient, Nullable } from "homebridge-plugin-utils";
 import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_MDNS_SERVICE_TYPE } from "./settings.ts";
 import { applyDeviceInfo, isEncryptionError, openConnection } from "./connection.ts";
 import { consolidatedFlag, featureOptionCategories, featureOptions, normalizeConfig } from "./options.ts";
@@ -42,6 +42,10 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   // lookup at the reconcile pass's "have we seen this UUID before?" check.
   private readonly accessories: Map<string, PlatformAccessory>;
   public readonly api: API;
+  /* The one time source every timer the plugin arms reads: each accessory's timer registry and the discovery stream's own deadlines. It is the production clock in the
+   * field and a controllable one under a platform double, so a suite drives every deadline on a virtual timeline instead of serving it out in real seconds.
+   */
+  public readonly clock: Clock;
   public readonly config: RatgdoResolvedConfig;
   public readonly configuredDevices: Map<string, RatgdoAccessory>;
   private readonly connections: Map<string, RatgdoConnection>;
@@ -58,6 +62,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
     this.accessories = new Map();
     this.api = api;
+    this.clock = systemClock;
 
     const legacy = normalizeConfig(config);
 
@@ -181,8 +186,8 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
    */
   private async runDiscovery(): Promise<void> {
 
-    await using discovery = discoverServices<DiscoveredRatgdo>({ classify: parseRatgdoService, log: this.log, serviceType: RATGDO_MDNS_SERVICE_TYPE,
-      signal: this.shutdownController.signal });
+    await using discovery = discoverServices<DiscoveredRatgdo>({ classify: parseRatgdoService, clock: this.clock, log: this.log,
+      serviceType: RATGDO_MDNS_SERVICE_TYPE, signal: this.shutdownController.signal });
 
     /* One reconciliation pass at a time, over the discovery's own snapshot. Every event asks for a pass, and a burst of events arriving during a pass buys exactly
      * one follow-up rather than one pass apiece, so an address change that lands while a device is mid-connect is applied after that connect settles instead of
