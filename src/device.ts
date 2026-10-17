@@ -100,6 +100,27 @@ type CharacteristicTarget = WithUUID<new () => Characteristic>;
 // A catalog key naming one of the opener's state topics: every topic in the MQTT catalog except the availability statement, which the opener publishes on its own.
 type StateTopic = Exclude<keyof typeof mqttTopics, "availability">;
 
+/* Whether each state topic reports held state rather than a momentary event. A topic reporting held state is restated when a broker session begins, while a topic
+ * reporting a momentary event never is, because a replayed event would be the event happening a second time. The record names every state topic, so a topic added to
+ * the catalog fails compilation here until its kind is decided. The session restatement in configureMqtt() is its one reader.
+ */
+const HELD_STATE: Readonly<Record<StateTopic, boolean>> = {
+
+  doorOpenOccupancy: true,
+  garageDoor: true,
+  laser: true,
+  led: true,
+  light: true,
+  lock: true,
+  motion: false,
+  obstruction: true,
+  occupancy: true,
+  strobe: true,
+  vehicleArriving: false,
+  vehicleLeaving: false,
+  vehiclePresence: true
+};
+
 /* Wiring for every timer-derived occupancy indicator. Each kind maps to its RatgdoStatus field, its HomeKit OccupancySensor subtype, the key of its topic in the MQTT
  * catalog, and its log label, so the shared setOccupancy() writer stays generic across both paths. Adding a future occupancy kind is a single descriptor entry plus
  * its trigger wiring - the write (status, characteristic, log, MQTT) lives in one place and cannot drift. This mirrors the RATGDO_ENTITIES registry in entities.ts.
@@ -126,6 +147,7 @@ export class RatgdoAccessory implements Disposable {
   private readonly accessory: PlatformAccessory;
   private readonly api: API;
   public readonly device: RatgdoDevice;
+  private readonly enabled: Readonly<Record<StateTopic, boolean>>;
   private readonly hap: HAP;
   public readonly hints: RatgdoHints;
   public readonly log: HomebridgePluginLogging;
@@ -164,6 +186,7 @@ export class RatgdoAccessory implements Disposable {
     this.status = this.buildInitialStatus(initialState);
 
     this.hints = this.buildHints();
+    this.enabled = this.buildEnabled();
 
     /* Read-only deviation log runs AFTER `this.hints` is assigned. The `name` getter (the prefix supplier behind every log line) reads `this.hints.logName`, so any
      * logging that fires while `this.hints` is still undefined would crash with a TypeError. Keeping the call here - and out of `buildHints()` - means the cache
@@ -428,6 +451,31 @@ export class RatgdoAccessory implements Disposable {
     };
   }
 
+  /* Build the MQTT enablement table. A state topic has an MQTT counterpart, its publishes and its get, only while the HomeKit control it reports on exists. The door
+   * and the obstruction report the opener service, which is always present, and every other entry is the hint that creates its control. The publish helper, the
+   * session restatement and the get subscriptions in configureMqtt() are the table's readers. The record names every state topic, so a topic added to the catalog
+   * fails compilation here until its enablement is decided, and the table is resolved once because hints are fixed for the accessory's life.
+   */
+  private buildEnabled(): Record<StateTopic, boolean> {
+
+    return {
+
+      doorOpenOccupancy: this.hints.doorOpenOccupancySensor,
+      garageDoor: true,
+      laser: this.hints.discoLaserSwitch,
+      led: this.hints.discoLedSwitch,
+      light: this.hints.light,
+      lock: this.hints.lock,
+      motion: this.hints.motionSensor,
+      obstruction: true,
+      occupancy: this.hints.motionOccupancySensor,
+      strobe: this.hints.konnectedStrobeSwitch,
+      vehicleArriving: this.hints.discoVehicleArriving,
+      vehicleLeaving: this.hints.discoVehicleLeaving,
+      vehiclePresence: this.hints.discoVehiclePresence
+    };
+  }
+
   // Configure the device information for HomeKit. The Manufacturer and SerialNumber characteristics never mutate over the lifetime of this accessory (they derive
   // from immutable RatgdoDevice fields populated at discovery time), so we write them exactly once here. The Model and FirmwareRevision characteristics route
   // through refreshInfo(), which is what the availability event handler calls on each reconnect.
@@ -520,8 +568,15 @@ export class RatgdoAccessory implements Disposable {
   }
 
   // Publish a state topic's current payload to MQTT. The library's guarded publish owns the failure routing: a broker we are disconnected from and a shutdown abort
-  // are both reported at debug level, while a genuine failure is reported at error. Publishing is fire-and-forget by design, so nothing here waits on delivery.
+  // are both reported at debug level, while a genuine failure is reported at error. Publishing is fire-and-forget by design, so nothing here waits on delivery. This
+  // helper is the one place every state topic passes, so every publish reads the enablement rule here; the session restatement reads the same table to choose
+  // what it restates.
   private publishTopic(key: StateTopic): void {
+
+    if(!this.enabled[key]) {
+
+      return;
+    }
 
     this.platform.mqtt?.publishGuarded(mqttTopic(this.device.mac, mqttTopics[key].topic), this.topicPayload(key));
   }
@@ -587,8 +642,11 @@ export class RatgdoAccessory implements Disposable {
       this.setDoorState(command, position);
     }, { signal });
 
-    // Return our lock state.
-    this.platform.mqtt?.subscribeGet(mqttTopic(this.device.mac, mqttTopics.lock.topic), mqttTopics.lock.label, () => this.topicPayload("lock"), { signal });
+    // Return our lock state if configured to do so.
+    if(this.enabled.lock) {
+
+      this.platform.mqtt?.subscribeGet(mqttTopic(this.device.mac, mqttTopics.lock.topic), mqttTopics.lock.label, () => this.topicPayload("lock"), { signal });
+    }
 
     // Return our obstruction state.
     this.platform.mqtt?.subscribeGet(mqttTopic(this.device.mac, mqttTopics.obstruction.topic), mqttTopics.obstruction.label, () => this.topicPayload("obstruction"),
@@ -597,54 +655,35 @@ export class RatgdoAccessory implements Disposable {
     // Return our door open occupancy state if configured to do so. We read from status rather than from the HAP characteristic so MQTT and HomeKit share the same
     // source of truth - the status field is updated atomically with the characteristic write at every transition site (the open-door timer fire and the door-closed
     // clear) so the two never drift.
-    if(this.hints.doorOpenOccupancySensor) {
+    if(this.enabled.doorOpenOccupancy) {
 
       this.platform.mqtt?.subscribeGet(mqttTopic(this.device.mac, mqttTopics.doorOpenOccupancy.topic), mqttTopics.doorOpenOccupancy.label,
         () => this.topicPayload("doorOpenOccupancy"), { signal });
     }
 
     // Return our light state if configured to do so.
-    if(this.hints.light) {
+    if(this.enabled.light) {
 
       this.platform.mqtt?.subscribeGet(mqttTopic(this.device.mac, mqttTopics.light.topic), mqttTopics.light.label, () => this.topicPayload("light"), { signal });
     }
 
     // Return our motion occupancy state if configured to do so. See the doorOpenOccupancy reader above for the rationale on reading from status rather than HAP.
-    if(this.hints.motionOccupancySensor) {
+    if(this.enabled.occupancy) {
 
       this.platform.mqtt?.subscribeGet(mqttTopic(this.device.mac, mqttTopics.occupancy.topic), mqttTopics.occupancy.label, () => this.topicPayload("occupancy"),
         { signal });
     }
 
     // Return our motion state if configured to do so.
-    if(this.hints.motionSensor) {
+    if(this.enabled.motion) {
 
       this.platform.mqtt?.subscribeGet(mqttTopic(this.device.mac, mqttTopics.motion.topic), mqttTopics.motion.label, () => this.topicPayload("motion"), { signal });
     }
 
-    /* The state topics this opener restates on each broker session: exactly the ones its transition paths can publish, gated as those paths gate them. Hints and
-     * variant are fixed for the accessory's life, so the set is resolved once here rather than on every session. The record names every state topic, so a topic
-     * added to the catalog fails compilation here until its restatement is decided. Motion and the vehicle arriving and leaving contacts are momentary events, and a
-     * replayed event is the event happening a second time, so none of them is ever restated.
+    /* The state topics this opener restates on each broker session: the enabled topics that report held state. The enablement table and HELD_STATE are fixed for the
+     * accessory's life, so the set is resolved once here rather than on every session.
      */
-    const isRatgdo = this.device.variant === RatgdoVariant.RATGDO;
-    const restatement: Record<StateTopic, boolean> = {
-
-      doorOpenOccupancy: this.hints.doorOpenOccupancySensor,
-      garageDoor: true,
-      laser: isRatgdo,
-      led: isRatgdo,
-      light: true,
-      lock: this.hints.lock,
-      motion: false,
-      obstruction: true,
-      occupancy: this.hints.motionOccupancySensor,
-      strobe: this.device.variant === RatgdoVariant.KONNECTED,
-      vehicleArriving: false,
-      vehicleLeaving: false,
-      vehiclePresence: isRatgdo
-    };
-    const restated = (Object.keys(restatement) as StateTopic[]).filter((key) => restatement[key]);
+    const restated = (Object.keys(this.enabled) as StateTopic[]).filter((key) => this.enabled[key] && HELD_STATE[key]);
 
     /* Restate what this opener holds each time the client establishes a broker session: its availability first, then every state topic above. Nothing published
      * during an outage is replayed later, so a subscriber that missed a statement hears the current one when the session begins. The registration carries the same

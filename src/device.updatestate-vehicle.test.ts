@@ -86,6 +86,17 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
       assert.equal(service?.getCharacteristic(Characteristic.ContactSensorState).value, true, "the characteristic still flips to true with logging disabled");
       assert.equal(mqtt.published.find((entry) => entry.topic.endsWith("vehiclearriving"))?.payload, "true", "MQTT still publishes with logging disabled");
     });
+
+    test("publishes nothing on a vehicle-arriving ON transition when the arriving contact sensor is disabled", () => {
+
+      const { entries, mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true });
+
+      ratgdo.updateState({ id: "binary_sensor-vehicle_arriving", state: "ON" });
+
+      assert.equal(loggedAt(entries, "info", "Vehicle arriving detected."), true, "the arriving event reaches the vehicle branch, which logs its transition");
+      assert.equal(mqtt?.published.some((entry) => entry.topic.endsWith("/vehiclearriving")), false,
+        "a disabled vehicle arriving contact sensor produces no vehiclearriving MQTT publish");
+    });
   });
 
   describe("the Disco vehicle leaving contact sensor", () => {
@@ -118,6 +129,17 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       assert.equal(mqtt.published.some((entry) => entry.topic.endsWith("vehicleleaving")), false, "an unchanged OFF leaving event publishes nothing to MQTT");
       assert.equal(entries.some((entry) => formatLogEntry(entry).includes("Vehicle leaving")), false, "an unchanged OFF leaving event logs nothing");
+    });
+
+    test("publishes nothing on a vehicle-leaving ON transition when the leaving contact sensor is disabled", () => {
+
+      const { entries, mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true });
+
+      ratgdo.updateState({ id: "binary_sensor-vehicle_leaving", state: "ON" });
+
+      assert.equal(loggedAt(entries, "info", "Vehicle leaving detected."), true, "the leaving event reaches the vehicle branch, which logs its transition");
+      assert.equal(mqtt?.published.some((entry) => entry.topic.endsWith("/vehicleleaving")), false,
+        "a disabled vehicle leaving contact sensor produces no vehicleleaving MQTT publish");
     });
   });
 
@@ -171,6 +193,17 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       assert.equal(mqtt.published.some((entry) => entry.topic.endsWith("vehiclepresence")), false, "an unchanged OFF vehicle-detected event publishes nothing to MQTT");
       assert.equal(entries.some((entry) => formatLogEntry(entry).includes("Vehicle")), false, "an unchanged OFF vehicle-detected event logs nothing");
+    });
+
+    test("publishes nothing on a vehicle-detected ON transition when the vehicle presence occupancy sensor is disabled", () => {
+
+      const { entries, mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true });
+
+      ratgdo.updateState({ id: "binary_sensor-vehicle_detected", state: "ON" });
+
+      assert.equal(loggedAt(entries, "info", "Vehicle detected."), true, "the vehicle-detected event reaches the vehicle branch, which logs its transition");
+      assert.equal(mqtt?.published.some((entry) => entry.topic.endsWith("/vehiclepresence")), false,
+        "a disabled vehicle presence occupancy sensor produces no vehiclepresence MQTT publish");
     });
   });
 
@@ -236,6 +269,16 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
       assert.equal(service?.getCharacteristic(Characteristic.On).value, true, "the characteristic still flips to true with light logging disabled");
       assert.equal(mqtt.published.find((entry) => entry.topic.endsWith("light"))?.payload, "true", "MQTT still publishes with light logging disabled");
     });
+
+    test("publishes nothing on a light ON transition when the Light feature is disabled", () => {
+
+      const { entries, mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true, userOptions: ["Disable.Light"] });
+
+      ratgdo.updateState({ id: "light-light", state: "ON" });
+
+      assert.equal(loggedAt(entries, "info", "Light on."), true, "the light event reaches the light branch, which logs its transition");
+      assert.equal(mqtt?.published.some((entry) => entry.topic.endsWith("/light")), false, "a disabled light feature produces no light MQTT publish");
+    });
   });
 
   describe("the Disco laser and LED switches", () => {
@@ -280,6 +323,24 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       assert.equal(mqtt.published.some((entry) => entry.topic.endsWith("laser")), false, "an unchanged OFF laser event publishes nothing to MQTT");
     });
+
+    test("publishes nothing on a switch-laser ON transition when the laser switch is disabled", () => {
+
+      const { mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true });
+
+      ratgdo.updateState({ id: "switch-laser", state: "ON" });
+
+      assert.equal(mqtt?.published.some((entry) => entry.topic.endsWith("/laser")), false, "a disabled laser switch produces no laser MQTT publish");
+    });
+
+    test("publishes nothing on a switch-led ON transition when the LED switch is disabled", () => {
+
+      const { mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true });
+
+      ratgdo.updateState({ id: "switch-led", state: "ON" });
+
+      assert.equal(mqtt?.published.some((entry) => entry.topic.endsWith("/led")), false, "a disabled LED switch produces no led MQTT publish");
+    });
   });
 
   describe("the Konnected strobe switch", () => {
@@ -310,6 +371,15 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
       ratgdo.updateState({ id: "switch-str_output", state: "OFF" });
 
       assert.equal(mqtt.published.some((entry) => entry.topic.endsWith("strobe")), false, "an unchanged OFF strobe event publishes nothing to MQTT");
+    });
+
+    test("publishes nothing on a switch-str_output ON transition when the strobe switch is disabled", () => {
+
+      const { mqtt, ratgdo } = buildRatgdoAccessory({ device: { variant: RatgdoVariant.KONNECTED }, initialState: makeKonnectedInitialState(), mqtt: true });
+
+      ratgdo.updateState({ id: "switch-str_output", state: "ON" });
+
+      assert.equal(mqtt?.published.some((entry) => entry.topic.endsWith("/strobe")), false, "a disabled strobe switch produces no strobe MQTT publish");
     });
   });
 

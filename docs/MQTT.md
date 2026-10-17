@@ -101,6 +101,7 @@ The topics that `homebridge-ratgdo` subscribes to are:
 >   * MQTT support is disabled by default. It's enabled when an MQTT broker is specified in the configuration.
 >   * If connectivity to the broker is lost, it will perpetually retry to connect in one-minute intervals.
 >   * Messages published while the broker is unreachable are not delivered later. Each opener restates its current state topics when a broker session begins, while `motion`, `vehiclearriving`, and `vehicleleaving` are momentary events and are never replayed.
+>   * A state topic is published only while the HomeKit control it reports on is enabled. A feature the user has turned off publishes nothing, at a change or when a session begins. Its get topic is subscribed only while that control is enabled, so a disabled control answers no get.
 >   * If a bad URL is provided, MQTT support will not be enabled.
 
 ---

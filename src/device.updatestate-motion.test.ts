@@ -147,6 +147,21 @@ describe("RatgdoAccessory.updateState() motion and obstruction handling", () => 
         "a motion-OFF event publishes nothing to MQTT beyond the getter's republish");
       assert.equal(loggedAt(entries, "info", "Motion detected."), false, "a motion-OFF event logs no motion notice");
     });
+
+    test("publishes nothing on a motion event or its reset when the Motion feature is disabled", () => {
+
+      const { clock, entries, mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true, userOptions: ["Disable.Motion"] });
+
+      ratgdo.updateState({ id: "binary_sensor-motion", state: "ON" });
+
+      assert.equal(loggedAt(entries, "info", "Motion detected"), true, "the motion event reaches the motion branch, which logs its detection");
+      assert.equal(mqtt?.published.some((entry) => entry.topic.endsWith("/motion")), false, "a disabled motion feature produces no motion MQTT publish");
+
+      clock.advance(RATGDO_MOTION_DURATION * 1000);
+
+      assert.equal(mqtt.published.some((entry) => entry.topic.endsWith("/motion")), false,
+        "a disabled motion feature produces no motion MQTT publish when the motion window resets");
+    });
   });
 
   describe("the obstruction branch", () => {

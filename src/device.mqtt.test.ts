@@ -3,7 +3,7 @@
  * device.mqtt.test.ts: MQTT concern net for RatgdoAccessory.configureMqtt - the subscribeGet / subscribeSet handlers the accessory registers on the platform's
  * MqttClient at configuration time.
  *
- * configureMqtt wires a fixed set of get topics (garagedoor, lock, obstruction) plus its feature-gated get topics (dooropenoccupancy, light, occupancy, motion) and a
+ * configureMqtt wires a fixed set of get topics (garagedoor, obstruction) plus its feature-gated get topics (dooropenoccupancy, light, lock, occupancy, motion) and a
  * single set topic (garagedoor). The recording MqttClient double retains every registered handler by topic, so these tests invoke a get handler and assert its returned
  * string, invoke a set handler and assert the resulting setDoorState -> client command dispatch (or the error log on an unrecognized verb), and confirm that every gated
  * subscription is present exactly when its feature option is enabled and absent otherwise. The per-device topic prefix ("<mac>/<suffix>") is asserted across the whole
@@ -184,6 +184,15 @@ describe("RatgdoAccessory MQTT configuration", () => {
 
       assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
       assert.equal(await mqtt.invokeGet("lock" + MQTT_GET_SUFFIX), "1", "a LOCKED snapshot maps to the SECURED current state and stringifies to \"1\"");
+    });
+
+    test("is absent when the lock option is disabled", () => {
+
+      const { mqtt } = buildRatgdoAccessory({ mqtt: true, userOptions: ["Disable.Opener.Lock"] });
+
+      assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
+      assert.equal(mqtt.subscriptions.some((entry) => entry.topic.endsWith("lock" + MQTT_GET_SUFFIX)), false,
+        "disabling the lock option leaves no lock subscription registered");
     });
   });
 
@@ -381,9 +390,9 @@ describe("RatgdoAccessory MQTT configuration", () => {
     });
   });
 
-  /* The restatement covers exactly the state topics each opener's transition paths can publish, gated as those paths are, and each payload is read from the status
-   * the test drove, so a payload answered from the wrong field fails here. Every state below differs from the resting snapshot, and paired topics are driven apart
-   * (laser on, LED off; occupancy raised while motion has cleared), so no two topics can swap payloads unseen.
+  /* The restatement covers the enabled state topics that report held state, and the rows below hold each opener's default set and the sets an option adds or
+   * removes. Each payload is read from the status the test drove, so a payload answered from the wrong field fails here. Every state below differs from the resting
+   * snapshot, and paired topics are driven apart (laser on, LED off; occupancy raised while motion has cleared), so no two topics can swap payloads unseen.
    */
   describe("the session restatement", () => {
 
@@ -400,9 +409,8 @@ describe("RatgdoAccessory MQTT configuration", () => {
       assert.deepEqual(session.slice(0, 2), [ { payload: "online", retain: true, topic: "availability" },
         { payload: "online", retain: true, topic: DEVICE_MAC + "/availability" } ],
       "the session opens with the plugin-level statement and the opener's own availability, ahead of every state topic");
-      assert.deepEqual(restatedIn(session), [ [ "garagedoor", "open", false ], [ "laser", "true", false ], [ "led", "false", false ], [ "light", "true", false ],
-        [ "lock", "1", false ], [ "obstruction", "true", false ], [ "vehiclepresence", "true", false ] ],
-      "a default Ratgdo opener restates the door, light, and obstruction, the lock its default option enables, and its Disco laser, LED, and vehicle presence");
+      assert.deepEqual(restatedIn(session), [ [ "garagedoor", "open", false ], [ "light", "true", false ], [ "lock", "1", false ], [ "obstruction", "true", false ] ],
+        "a default Ratgdo opener restates the door, light, obstruction, and lock, while its default-off laser and vehicle presence stay silent with their state raised");
     });
 
     test("restates a default Konnected opener's state topics with their current payloads", () => {
@@ -413,8 +421,42 @@ describe("RatgdoAccessory MQTT configuration", () => {
       assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
 
       assert.deepEqual(restatedIn(restoreSession(mqtt)), [ [ "garagedoor", "closed", false ], [ "light", "true", false ], [ "lock", "1", false ],
+        [ "obstruction", "false", false ] ],
+      "a default Konnected opener restates the door, light, obstruction, and lock, while its default-off strobe stays silent with its state raised");
+    });
+
+    test("adds the Disco laser, LED, and vehicle presence topics when their options are enabled", () => {
+
+      const { mqtt } = buildRatgdoAccessory({ initialState: makeRatgdoInitialState([ makeSwitchEvent("laser", true), makeBinarySensorEvent("vehicle_detected", true) ]),
+        mqtt: true, userOptions: [ "Enable.Disco.Switch.Laser", "Enable.Disco.Switch.Led", "Enable.Disco.OccupancySensor.Vehicle.Presence" ] });
+
+      assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
+
+      assert.deepEqual(restatedIn(restoreSession(mqtt)), [ [ "garagedoor", "closed", false ], [ "laser", "true", false ], [ "led", "false", false ],
+        [ "light", "false", false ], [ "lock", "0", false ], [ "obstruction", "false", false ], [ "vehiclepresence", "true", false ] ],
+      "enabling the Disco laser, LED, and vehicle presence options adds their topics beside the default set, each restated with its current payload");
+    });
+
+    test("adds the strobe topic when its option is enabled", () => {
+
+      const { mqtt } = buildRatgdoAccessory({ device: { variant: RatgdoVariant.KONNECTED },
+        initialState: makeKonnectedInitialState([makeSwitchEvent("str_output", true)]), mqtt: true, userOptions: ["Enable.Konnected.Switch.Strobe"] });
+
+      assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
+
+      assert.deepEqual(restatedIn(restoreSession(mqtt)), [ [ "garagedoor", "closed", false ], [ "light", "false", false ], [ "lock", "0", false ],
         [ "obstruction", "false", false ], [ "strobe", "true", false ] ],
-      "a default Konnected opener restates the door, light, obstruction, and lock, and its strobe in place of the Disco topics");
+      "enabling the Konnected strobe option adds its topic beside the default set, restated with the strobe on");
+    });
+
+    test("leaves the light out when the Light feature is disabled", () => {
+
+      const { mqtt } = buildRatgdoAccessory({ mqtt: true, userOptions: ["Disable.Light"] });
+
+      assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
+
+      assert.deepEqual(restatedIn(restoreSession(mqtt)), [ [ "garagedoor", "closed", false ], [ "lock", "0", false ], [ "obstruction", "false", false ] ],
+        "an opener whose Light feature is disabled restates the door, lock, and obstruction, and no session restates the light");
     });
 
     test("leaves the lock out when the lock option is disabled", () => {
@@ -423,9 +465,8 @@ describe("RatgdoAccessory MQTT configuration", () => {
 
       assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
 
-      assert.deepEqual(restatedIn(restoreSession(mqtt)), [ [ "garagedoor", "closed", false ], [ "laser", "false", false ], [ "led", "false", false ],
-        [ "light", "false", false ], [ "obstruction", "false", false ], [ "vehiclepresence", "false", false ] ],
-      "an opener whose lock option is disabled never publishes the lock, so no session restates it");
+      assert.deepEqual(restatedIn(restoreSession(mqtt)), [ [ "garagedoor", "closed", false ], [ "light", "false", false ], [ "obstruction", "false", false ] ],
+        "an opener whose lock option is disabled restates the door, light, and obstruction, and no session restates the lock");
     });
 
     test("adds the door-open occupancy topic when its option is enabled, reading the raised indicator", () => {
@@ -439,9 +480,9 @@ describe("RatgdoAccessory MQTT configuration", () => {
       ratgdo.updateState({ current_operation: "IDLE", id: "cover-door", position: 1, state: "OPEN" });
       clock.advance(RATGDO_OCCUPANCY_DURATION * 1000);
 
-      assert.deepEqual(restatedIn(restoreSession(mqtt)), [ [ "dooropenoccupancy", "true", false ], [ "garagedoor", "open", false ], [ "laser", "false", false ],
-        [ "led", "false", false ], [ "light", "false", false ], [ "lock", "0", false ], [ "obstruction", "false", false ], [ "vehiclepresence", "false", false ] ],
-      "enabling the door-open occupancy sensor adds its topic, restated with the raised indicator");
+      assert.deepEqual(restatedIn(restoreSession(mqtt)), [ [ "dooropenoccupancy", "true", false ], [ "garagedoor", "open", false ], [ "light", "false", false ],
+        [ "lock", "0", false ], [ "obstruction", "false", false ] ],
+      "enabling the door-open occupancy sensor adds its topic beside the default set, restated with the raised indicator");
     });
 
     test("adds the motion occupancy topic when its option is enabled, reading occupancy rather than motion", () => {
@@ -454,9 +495,9 @@ describe("RatgdoAccessory MQTT configuration", () => {
       ratgdo.updateState({ id: "binary_sensor-motion", state: "ON" });
       clock.advance(RATGDO_MOTION_DURATION * 1000);
 
-      assert.deepEqual(restatedIn(restoreSession(mqtt)), [ [ "garagedoor", "closed", false ], [ "laser", "false", false ], [ "led", "false", false ],
-        [ "light", "false", false ], [ "lock", "0", false ], [ "obstruction", "false", false ], [ "occupancy", "true", false ], [ "vehiclepresence", "false", false ] ],
-      "enabling the motion occupancy sensor adds its topic, restated with occupancy still raised after motion has cleared");
+      assert.deepEqual(restatedIn(restoreSession(mqtt)), [ [ "garagedoor", "closed", false ], [ "light", "false", false ], [ "lock", "0", false ],
+        [ "obstruction", "false", false ], [ "occupancy", "true", false ] ],
+      "enabling the motion occupancy sensor adds its topic beside the default set, restated with occupancy still raised after motion has cleared");
     });
 
     test("never restates the momentary motion and vehicle arriving and leaving events, even mid-event", () => {
