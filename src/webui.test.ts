@@ -5,13 +5,13 @@
  * feature-options parameters the page declares, the legacy-settings migration's write path, and the shared route constants both halves address.
  *
  * The page is the real module, not a re-implementation: the harness routes its framework specifiers to the shipped browser files and its webUI shell to the double,
- * so the feature-option engine that resolves each device's key and the configuration session that stages the migration are the library's own. What the fakes observe
+ * so the feature-option engine the card composes its writes through and the configuration session that stages the migration are the library's own. What the fakes observe
  * is therefore the page's behavior rather than a restatement of it - the host's request log, the listener records each fake keeps for what the page registered on
  * it, the double's counters, and the fake document's state.
  */
 import type { FakeCatalog, FakeConfigEntry, FakeDevice, FakeElement, RecordedLog } from "./webui-double.helpers.ts";
 import { LIBRARY_UI_DIR, loadUi } from "./webui.helpers.ts";
-import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE, STATUS_WARM_ROUTE, defaultConfig, defaultDevices, fire, realCatalog, webUi } from "./webui-double.helpers.ts";
+import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE, STATUS_WARM_ROUTE, defaultConfig, defaultDevices, fire, webUi } from "./webui-double.helpers.ts";
 import { describe, test } from "node:test";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import type { LoadedUi } from "./webui.helpers.ts";
@@ -27,13 +27,8 @@ const KEY = "c2VjcmV0LWtleQ==";
 // A primary platform entry carrying the given option entries, which is the one shape every configuration test in this file varies.
 const configWith = (...options: string[]): FakeConfigEntry[] => [{ name: "Ratgdo", options, platform: "Ratgdo" }];
 
-// The device-scoped encryption-key entry the real feature-option engine resolves into a warm entry's psk.
-const keyEntry = (mac: string, key: string): string => "Enable.Device.Encryption.Key." + mac + "=" + key;
-
-/* The log-name entry the engine resolves into a warm entry's logName, at whichever scope the caller addresses. Passing no mac composes the global entry, which is what
- * lets one helper describe both halves of the inheritance the page leaves entirely to the engine.
- */
-const logNameEntry = (name: string, mac?: string): string => "Enable.Device.LogName" + ((mac === undefined) ? "" : ("." + mac)) + "=" + name;
+// The encryption-key entry at a device's mac, or the global one when no mac is given, spelled the way the options editor writes it.
+const keyEntry = (mac: string | undefined, key: string): string => "Enable.Device.Encryption.Key" + ((mac === undefined) ? "" : ("." + mac)) + "=" + key;
 
 // Every warm request the page has sent, in order. Reading the log by route is how each test counts sends without depending on what else the page asked for.
 const warmSends = (page: LoadedUi): unknown[] => page.host.requests.filter((entry) => (entry.route === STATUS_WARM_ROUTE)).map((entry) => entry.body);
@@ -62,7 +57,7 @@ describe("the ratgdo settings page", () => {
 
   describe("the first warm", () => {
 
-    test("sends once from the load announcement, carrying every device and the key the engine resolves", async () => {
+    test("sends once from the load announcement, carrying every device and the edited configuration", async () => {
 
       using page = await loadUi({ config: configWith(keyEntry(MAC, KEY)) });
 
@@ -71,8 +66,8 @@ describe("the ratgdo settings page", () => {
       assert.ok(page.double.params.onLoaded, "the page answers the framework's load announcement, which is what carries its first warm");
       assert.equal(page.double.showCalls, 1, "the page ran exactly one show cycle");
       assert.equal(sends.length, 1, "establishing the page sends exactly one warm");
-      assert.deepEqual(sends[0], { addresses: [], devices: [ { mac: MAC, psk: KEY }, { mac: MAC_TWO } ] },
-        "the warm lists every device, carrying the configured key for the device that has one and no key for the device that does not");
+      assert.deepEqual(sends[0], { devices: [ MAC, MAC_TWO ], options: [keyEntry(MAC, KEY)] },
+        "the warm lists every device by its mac and carries the configuration's options as they stand, for the feed to resolve");
 
       const warm = page.host.requests.find((entry) => (entry.route === STATUS_WARM_ROUTE));
 
@@ -109,37 +104,50 @@ describe("the ratgdo settings page", () => {
       assert.equal(warmSends(page).length, 2, "a cycle after a key moved sends once");
     });
 
-    test("a catalog read that fails sends nothing and reports the diagnostic, and the next trigger sends once it resolves", async (t) => {
+    test("sends its warm even when the option catalog cannot be read, because the page resolves nothing itself", async () => {
+
+      /* The warm carries the configuration rather than values the page computed from it, so the page's warm needs no catalog at all. A catalog that cannot be read
+       * still costs the migration its run, since the migration reads it at load, but it does not cost the panel its devices.
+       */
+      using page = await loadUi({ catalog: async (): Promise<FakeCatalog> => {
+
+        throw new Error("The option catalog could not be read.");
+      } });
+
+      assert.equal(warmSends(page).length, 1, "the page warms on its load announcement whatever became of the catalog read");
+      assert.ok(page.console.errors.some((entry) => (entry.message === "The configuration migration did not complete.")),
+        "while the migration, which does need the catalog, reports that it did not run");
+    });
+
+    test("a device-list read that fails sends nothing and reports the diagnostic, and the next trigger sends once it resolves", async (t) => {
 
       t.mock.timers.enable({ apis: ["setTimeout"] });
 
-      /* The read fails for as long as the flag stands. Both of the page's catalog readers are served by this one override - the configuration wiring reads it at load
-       * and the recompute reads it on every send - so the flag governs the whole page rather than a counted read whose number would depend on their ordering.
-       */
-      let failing = true;
-      const catalog = async (): Promise<FakeCatalog> => {
+      using page = await loadUi();
 
-        if(failing) {
+      const before = warmSends(page).length;
+      const devices = page.double.featureOptions.getHomebridgeDevices;
 
-          throw new Error("The option catalog could not be read.");
-        }
+      // The read fails for as long as the override stands, and the edit guarantees the recovered read has something new to send.
+      page.double.featureOptions.getHomebridgeDevices = async () => {
 
-        return realCatalog();
+        throw new Error("The device list could not be read.");
       };
+      setOptions(page, keyEntry(MAC, KEY));
+      page.double.params.onOptionsEdited?.();
 
-      using page = await loadUi({ catalog });
+      await releaseDebounce(t.mock.timers);
 
-      assert.equal(warmSends(page).length, 0, "a page that cannot read its option catalog sends no warm rather than one computed keyless");
+      assert.equal(warmSends(page).length, before, "a page that cannot read its device list sends no warm rather than one listing nothing");
       assert.ok(page.console.errors.some((entry) => (entry.message === "The device warm set could not be recomputed.")),
         "the failed recompute reports its own diagnostic");
 
-      // The accessor cleared its memo on each rejection, so the next trigger reaches a fresh read - which now resolves.
-      failing = false;
+      page.double.featureOptions.getHomebridgeDevices = devices;
       page.double.resume();
 
       await releaseDebounce(t.mock.timers);
 
-      assert.equal(warmSends(page).length, 1, "the trigger after a recovered catalog read sends once");
+      assert.equal(warmSends(page).length, before + 1, "the trigger after a recovered device-list read sends once");
     });
   });
 
@@ -170,14 +178,14 @@ describe("the ratgdo settings page", () => {
       const sends = warmSends(page);
 
       assert.equal(sends.length, before + 1, "the burst coalesces into exactly one send");
-      assert.deepEqual(sends.at(-1), { addresses: [], devices: [ { mac: MAC, psk: "second" }, { mac: MAC_TWO } ] },
+      assert.deepEqual(sends.at(-1), { devices: [ MAC, MAC_TWO ], options: [keyEntry(MAC, "second")] },
         "the one send carries the settled value, not the half-typed one");
     });
   });
 
   describe("send suppression", () => {
 
-    test("re-sends only when a key would change", async (t) => {
+    test("re-sends only when the configuration would change", async (t) => {
 
       t.mock.timers.enable({ apis: ["setTimeout"] });
 
@@ -190,7 +198,7 @@ describe("the ratgdo settings page", () => {
 
       await releaseDebounce(t.mock.timers);
 
-      assert.equal(warmSends(page).length, before, "a recompute over unchanged keys sends nothing");
+      assert.equal(warmSends(page).length, before, "a recompute over an unchanged configuration sends nothing");
 
       setOptions(page, keyEntry(MAC, KEY));
       page.double.params.onOptionsEdited?.();
@@ -199,106 +207,72 @@ describe("the ratgdo settings page", () => {
 
       assert.equal(warmSends(page).length, before + 1, "a changed key sends once");
     });
-  });
 
-  describe("the log names the warm payload carries", () => {
+    test("sends the devices and the options, suppresses an identical resend, and resends after an edit to an option the feed never reads", async (t) => {
 
-    test("carries the name the engine resolves at the device's own scope and at the global one, and omits it for a device with neither", async () => {
-
-      // Two devices and two scopes in one fixture: the first device's own entry, and a global entry the second device inherits. Resolution is the engine's alone, so
-      // what this asserts is that the page reads the option at each device's identity and sends exactly what came back.
-      using page = await loadUi({ config: configWith(logNameEntry("North Door", MAC)) });
-
-      assert.deepEqual(warmSends(page)[0], { addresses: [], devices: [ { logName: "North Door", mac: MAC }, { mac: MAC_TWO } ] },
-        "the named device carries its name and the unnamed one carries no logName field at all");
-
-      using global = await loadUi({ config: configWith(logNameEntry("Every Opener")) });
-
-      assert.deepEqual(warmSends(global)[0], { addresses: [], devices: [ { logName: "Every Opener", mac: MAC }, { logName: "Every Opener", mac: MAC_TWO } ] },
-        "a global entry reaches every device, because the page asks the engine rather than reading the entry itself");
-    });
-
-    test("re-sends for a log-name-only edit and stays suppressed when nothing moved", async (t) => {
-
+      /* The signature covers the devices and the whole options array, so the page resends on any edit and leaves deciding what moved to the feed's own diff - which
+       * resolves exactly what the plugin resolves, so an edit to an option it never reads moves no connection there. A device list handed back in another order is
+       * the same list, and suppresses.
+       */
       t.mock.timers.enable({ apis: ["setTimeout"] });
 
       using page = await loadUi({ config: configWith(keyEntry(MAC, KEY)) });
 
-      const before = warmSends(page).length;
-
-      // A name is not a key, so this edit moves no field the old per-mac key memory could have seen. It re-sends because the payload itself spells differently.
-      setOptions(page, keyEntry(MAC, KEY), logNameEntry("North Door", MAC));
-      page.double.params.onOptionsEdited?.();
-
-      await releaseDebounce(t.mock.timers);
-
-      const sends = warmSends(page);
-
-      assert.equal(sends.length, before + 1, "an edit that changed only a log name sends once");
-      assert.deepEqual(sends.at(-1), { addresses: [], devices: [ { logName: "North Door", mac: MAC, psk: KEY }, { mac: MAC_TWO } ] },
-        "the send carries the new name beside the unchanged key");
-
-      page.double.params.onOptionsEdited?.();
-
-      await releaseDebounce(t.mock.timers);
-
-      assert.equal(warmSends(page).length, before + 1, "a recompute over the same names and keys sends nothing");
-    });
-
-    test("tells an omitted field from a present one, so a name and a key cannot be confused for each other", async (t) => {
-
-      t.mock.timers.enable({ apis: ["setTimeout"] });
-
-      /* The distinguishing input for a signature that collapses its fields: one device moves its key from "x" to nothing while another takes the name "x". A
-       * comparison over a flattened set of values would read those two edits as no change at all, where a fixed-position tuple reads them as two.
-       */
-      using page = await loadUi({ config: configWith(keyEntry(MAC, "x")) });
+      assert.deepEqual(warmSends(page).at(-1), { devices: [ MAC, MAC_TWO ], options: [keyEntry(MAC, KEY)] },
+        "the payload is the sidebar's macs and the configuration's options, with nothing resolved by the page");
 
       const before = warmSends(page).length;
+      const devices = page.double.featureOptions.getHomebridgeDevices;
 
-      setOptions(page, logNameEntry("x", MAC_TWO));
+      page.double.featureOptions.getHomebridgeDevices = async () => {
+
+        const result = await devices();
+
+        return { ...result, devices: [...result.devices].reverse() };
+      };
       page.double.params.onOptionsEdited?.();
 
       await releaseDebounce(t.mock.timers);
 
-      assert.equal(warmSends(page).length, before + 1, "dropping one device's key while another takes that same text as its name is a change, and it sends");
-      assert.deepEqual(warmSends(page).at(-1), { addresses: [], devices: [ { mac: MAC }, { logName: "x", mac: MAC_TWO } ] },
-        "the payload carries the key's removal and the name's arrival together");
+      assert.equal(warmSends(page).length, before, "an identical payload, its devices merely reordered, is not sent again");
+
+      setOptions(page, keyEntry(MAC, KEY), "Enable.Opener.ReadOnly");
+      page.double.params.onOptionsEdited?.();
+
+      await releaseDebounce(t.mock.timers);
+
+      assert.equal(warmSends(page).length, before + 1, "an edit to an option the feed never reads still resends, because the page does not decide what the feed reads");
+      assert.deepEqual((warmSends(page).at(-1) as { options: string[] }).options, [ keyEntry(MAC, KEY), "Enable.Opener.ReadOnly" ],
+        "and the resend carries the configuration exactly as it now stands");
     });
   });
 
   describe("the manual addresses the warm payload carries", () => {
 
-    test("carries every listed address with the key the engine resolves at that address's own identity", async () => {
+    test("carries every listed address as the configuration's own entry, for the feed to canonicalize and key", async () => {
 
-      /* The key for a manually addressed device is stored under the ADDRESS, because a device nobody has connected to yet has no mac anyone knows. The three
-       * address shapes are here together because each one reaches the engine's stored form differently: an IPv4 address and a hostname both carry periods the
-       * stored form gives meaning to, while an IPv6 literal's colons pass through untouched.
+      /* The feed reads the listed addresses out of the configuration through the plugin's own list function, and keys each dial for the MAC its device announces, so
+       * the page sends the list exactly as the user wrote it and resolves no key for any address. The address shapes are here together because they are the ones a
+       * user types.
        */
-      using page = await loadUi({ config: configWith(
-        "Enable.Device.Address=10.0.0.20, garage.local, fd00::1",
-        "Enable.Device.Encryption.Key.10-0-0-20=" + KEY,
-        "Enable.Device.Encryption.Key.garage-local=hostname-key",
-        "Enable.Device.Encryption.Key.fd00::1=literal-key"
-      ) });
+      const listed = "Enable.Device.Address=10.0.0.20, garage.local, fd00::1";
 
-      const sent = warmSends(page)[0] as { addresses: unknown[] };
+      using page = await loadUi({ config: configWith(listed, keyEntry(MAC, KEY)) });
 
-      assert.deepEqual(sent.addresses, [ { address: "10.0.0.20", psk: KEY }, { address: "garage.local", psk: "hostname-key" },
-        { address: "fd00::1", psk: "literal-key" } ],
-      "each listed address travels with the key stored at its own identity, in the order the user listed them");
+      assert.deepEqual(warmSends(page)[0], { devices: [ MAC, MAC_TWO ], options: [ listed, keyEntry(MAC, KEY) ] },
+        "the list travels as the entry the user wrote, beside the key stored at a device's MAC, with nothing resolved at any address");
     });
 
-    test("carries a listed address with no key at all, and omits the list entirely for an install that has none", async () => {
+    test("carries a listed address with no key at all, and no address entry for an install that lists none", async () => {
 
       using none = await loadUi();
 
-      assert.deepEqual((warmSends(none)[0] as { addresses: unknown[] }).addresses, [], "an install listing no address sends an empty list rather than nothing");
+      assert.deepEqual((warmSends(none)[0] as { options: string[] }).options, [], "an install listing no address sends an empty configuration rather than nothing");
 
       using listed = await loadUi({ config: configWith("Enable.Device.Address=10.0.0.20") });
 
-      assert.deepEqual((warmSends(listed)[0] as { addresses: unknown[] }).addresses, [{ address: "10.0.0.20" }],
-        "an address the user has set no key for carries no psk field, exactly as a keyless device does");
+      assert.deepEqual((warmSends(listed)[0] as { options: string[] }).options, ["Enable.Device.Address=10.0.0.20"],
+        "an address the user has set no key for is sent as its list entry alone, exactly as a keyless device is sent with no key entry");
     });
 
     test("re-sends when an address is added and stays suppressed when the list has not moved", async (t) => {
@@ -322,12 +296,12 @@ describe("the ratgdo settings page", () => {
 
       assert.equal(warmSends(page).length, before + 1, "a recompute over the same list sends nothing");
 
-      setOptions(page, "Enable.Device.Address=10.0.0.20", "Enable.Device.Encryption.Key.10-0-0-20=" + KEY);
+      setOptions(page, "Enable.Device.Address=10.0.0.20", keyEntry(MAC, KEY));
       page.double.params.onOptionsEdited?.();
 
       await releaseDebounce(t.mock.timers);
 
-      assert.equal(warmSends(page).length, before + 2, "a key set against a listed address is a change the signature sees, so it sends");
+      assert.equal(warmSends(page).length, before + 2, "a key stored at the device the address reaches is a change the signature sees, so it sends");
     });
   });
 
@@ -546,7 +520,7 @@ describe("the ratgdo settings page", () => {
 
       using page = await loadUi({ config: configWith(keyEntry(MAC, KEY)) });
 
-      assert.deepEqual(warmSends(page)[0], { addresses: [], devices: [ { mac: MAC, psk: KEY }, { mac: MAC_TWO } ] },
+      assert.deepEqual(warmSends(page)[0], { devices: [ MAC, MAC_TWO ], options: [keyEntry(MAC, KEY)] },
         "tagging a row for the sidebar adds nothing to the warm body the server receives");
     });
   });
@@ -662,9 +636,9 @@ describe("the ratgdo settings page", () => {
  */
 describe("the ratgdo settings page's Add Device card", () => {
 
-  // A probe answer describing a device that responded, which is the input every save row starts from.
-  const ANSWERED = { address: "10.0.0.20", encrypted: true, firmwareVersion: "2.0.0", kind: "ok", mac: MAC, model: "Ratgdo Disco", name: "North Door",
-    variant: "ratgdo" };
+  // A probe answer describing a device that responded through an encrypted handshake announcing its MAC, which is the input every save row starts from.
+  const ANSWERED = { address: "10.0.0.20", announcesMac: true, encrypted: true, firmwareVersion: "2.0.0", kind: "ok", mac: MAC, model: "Ratgdo Disco",
+    name: "North Door", variant: "ratgdo" };
 
   // Find one element the page built, by the text it carries. Reading by text is how a row addresses a button the way a user would - by what it says.
   const byText = (page: LoadedUi, text: string): FakeElement => {
@@ -1044,7 +1018,7 @@ describe("the ratgdo settings page's Add Device card", () => {
 
     test("writes nothing at all when the device did not answer", async () => {
 
-      // A17 and T18's second half: the probe-first guard is the card's whole promise, so a failed answer must leave the configuration untouched.
+      // The probe-first guard is the card's whole promise, so a failed answer must leave the configuration untouched.
       using page = await loadUi({ probe: async () => ({ kind: "error", reason: "auth-missing" }) });
 
       const card = openCard(page);
@@ -1075,7 +1049,7 @@ describe("the ratgdo settings page's Add Device card", () => {
       const options = (page.double.featureOptions.commits[0]?.patch as { options?: string[] })?.options ?? [];
 
       assert.ok(options.some((entry) => (entry === "Enable.Device.Address=10.0.0.20")), "the one patch lists the address");
-      assert.ok(options.some((entry) => (entry === ("Enable.Device.Encryption.Key.10-0-0-20=" + KEY))), "and carries its key at the address identity");
+      assert.ok(options.some((entry) => (entry === keyEntry(MAC, KEY))), "and carries its key at the MAC of the device that answered");
       assert.deepEqual(page.host.toasts, [{ channel: "success", message: "Saved. Restart Homebridge to add this device." }],
         "a new device is a restart away from HomeKit, and one success toast says so");
       assert.equal(isHeld(page, card.region), false, "a saved card gives the content area back");
@@ -1083,8 +1057,7 @@ describe("the ratgdo settings page's Add Device card", () => {
 
     test("tells a listed address with a new key apart from one with nothing to change", async () => {
 
-      using rewritten = await loadUi({ config: configWith("Enable.Device.Address=10.0.0.20", "Enable.Device.Encryption.Key.10-0-0-20=old-key"),
-        probe: async () => ANSWERED });
+      using rewritten = await loadUi({ config: configWith("Enable.Device.Address=10.0.0.20", keyEntry(MAC, "old-key")), probe: async () => ANSWERED });
 
       const first = openCard(rewritten);
 
@@ -1201,7 +1174,7 @@ describe("the ratgdo settings page's Add Device card", () => {
       const options = (page.double.featureOptions.commits[0]?.patch as { options?: string[] })?.options ?? [];
 
       assert.ok(options.includes("Enable.Device.Address=2001:db8::5"), "and the address saved is the same one that was tested, not the spelling that was typed");
-      assert.ok(options.includes("Enable.Device.Encryption.Key.2001:db8::5=" + KEY), "with the key stored at that canonical identity");
+      assert.ok(options.includes(keyEntry(MAC, KEY)), "with the key stored at the MAC of the device that answered there");
     });
 
     test("tells a user their bracketed spelling of a listed address is already listed", async () => {
@@ -1220,17 +1193,80 @@ describe("the ratgdo settings page's Add Device card", () => {
       assert.equal(page.double.featureOptions.commits.length, 0, "and no write is opened for it");
     });
 
-    test("sends the canonical form of every listed address in the warm payload", async () => {
+    test("sends every listed address in the warm payload as written, leaving its canonical form to the feed", async () => {
 
-      // The page and the plugin have to name one identity for one address, so the payload carries what the plugin would dial rather than what the user typed - and
-      // an entry nothing could dial is dropped rather than sent for the feed to drop again.
-      using page = await loadUi({ config: configWith("Enable.Device.Address=[2001:DB8::5], Garage.Local, fe80::1%en0",
-        "Enable.Device.Encryption.Key.2001:db8::5=" + KEY) });
+      // The feed reads the list through the plugin's own list function, which is the one place an address takes its canonical form and a zoned entry is dropped, so
+      // the page sends the entry exactly as it stands rather than a second canonicalization the two sides would have to keep in step.
+      const listed = "Enable.Device.Address=[2001:DB8::5], Garage.Local, fe80::1%en0";
 
-      const sent = warmSends(page)[0] as { addresses: { address: string; psk?: string }[] };
+      using page = await loadUi({ config: configWith(listed, keyEntry(MAC, KEY)) });
 
-      assert.deepEqual(sent.addresses, [ { address: "2001:db8::5", psk: KEY }, { address: "garage.local" } ],
-        "the bracketed literal is sent bare with the key found at its canonical identity, the hostname is lower-cased, and the zoned entry is not sent at all");
+      assert.deepEqual((warmSends(page)[0] as { options: string[] }).options, [ listed, keyEntry(MAC, KEY) ],
+        "the bracketed literal, the mixed-case hostname, and the zoned entry all travel as written, beside the key stored at the device's MAC");
+    });
+
+    test("stores a typed key at the MAC the test learned, and writes no key entry when that key already resolves there", async () => {
+
+      // The card learns the device's MAC by testing the address, and the key goes where every connection to that device reads it. A key the engine already
+      // resolves at that MAC - here, the global encryption key the device inherits - writes nothing beyond the address.
+      using page = await loadUi({ probe: async () => ANSWERED });
+
+      const card = openCard(page);
+
+      card.address.value = "10.0.0.20";
+      card.key.value = KEY;
+      fire(card.save, "click");
+
+      await settle();
+
+      const options = (page.double.featureOptions.commits[0]?.patch as { options?: string[] })?.options ?? [];
+
+      assert.ok(options.includes("Enable.Device.Encryption.Key." + MAC + "=" + KEY), "the key is committed at the answered device's MAC");
+
+      using inherited = await loadUi({ config: configWith(keyEntry(undefined, KEY)), probe: async () => ANSWERED });
+
+      const second = openCard(inherited);
+
+      second.address.value = "10.0.0.20";
+      second.key.value = KEY;
+      fire(second.save, "click");
+
+      await settle();
+
+      const written = (inherited.double.featureOptions.commits[0]?.patch as { options?: string[] })?.options ?? [];
+
+      assert.ok(written.includes("Enable.Device.Address=10.0.0.20"), "the address is still listed");
+      assert.ok(!written.some((entry) => entry.startsWith("Enable.Device.Encryption.Key." + MAC)), "and no key entry is written where the key already resolves");
+    });
+
+    test("refuses to save a typed key for an encrypted device whose firmware announces no MAC, unless it is the global encryption key", async () => {
+
+      /* The runtime reaches a device whose firmware announces no MAC only with the global encryption key, so a different key saved for it could never be used. The
+       * card says why and names the fix, with the device's identity rows still shown, and Save writes nothing; typing the global encryption key itself saves.
+       */
+      const silent = { ...ANSWERED, announcesMac: false };
+
+      using page = await loadUi({ config: configWith(keyEntry(undefined, "global-key")), probe: async () => silent });
+
+      const card = openCard(page);
+
+      card.address.value = "10.0.0.20";
+      card.key.value = KEY;
+      fire(card.save, "click");
+
+      await settle();
+
+      assert.equal(card.verdict.textContent, "This device answered, but its firmware does not announce its MAC address, so the plugin can reach it only with the " +
+        "global encryption key. Update the device to ESPHome 2025.4.0 or newer, or set the global encryption key to this key.", "the card names the limit and the fix");
+      assert.ok(page.findElement((element) => (element.textContent === "MAC: ")), "and still shows the device that answered");
+      assert.equal(page.double.featureOptions.commits.length, 0, "while Save commits nothing");
+
+      card.key.value = "global-key";
+      fire(card.save, "click");
+
+      await settle();
+
+      assert.equal(page.double.featureOptions.commits.length, 1, "the global encryption key is the one key such a device can use, so typing it saves");
     });
   });
 
@@ -1238,8 +1274,8 @@ describe("the ratgdo settings page's Add Device card", () => {
 
     test("shows the newer answer when two tests overlap, whichever resolves last, and reports nothing for the retired one", async () => {
 
-      /* Risk 8's ordering row. The first probe answers LAST and describes a different device, so an implementation without a latest-action guard would paint the first
-       * device's verdict over the second's - the reason the card's actions start on one guard at all.
+      /* The first probe answers LAST and describes a different device, so an implementation without a latest-action guard would paint the first device's verdict
+       * over the second's - the reason the card's actions start on one guard at all.
        */
       const answers = [ Promise.withResolvers<unknown>(), Promise.withResolvers<unknown>() ];
       let issued = 0;
@@ -1328,7 +1364,7 @@ describe("the ratgdo settings page's Add Device card", () => {
 
     test("renders nothing and schedules no warm when a probe answers after the card closed", async () => {
 
-      // The ruling's named row, probe half. A user who presses Test Connection and then Cancel must not have the card light up underneath them afterward.
+      // A user who presses Test Connection and then Cancel must not have the card light up underneath them afterward.
       const answer = Promise.withResolvers<unknown>();
 
       using page = await loadUi({ probe: () => answer.promise });
@@ -1358,10 +1394,10 @@ describe("the ratgdo settings page's Add Device card", () => {
 
     test("leaves a commit that lands after the card closed written exactly once, raising no toast and scheduling no warm", async (t) => {
 
-      /* The ruling's named row, commit half. A commit already in flight cannot be recalled, so the configuration IS written - what the close suppresses is
-       * everything after the write: the confirmation, the release, and the warm recompute. The distinguishing observation is the commit COUNT, because an
-       * implementation that retried or re-entered on the late result would write twice. The debounce is released before the warms are counted, because the write
-       * moved the address list, so a warm the page wrongly scheduled would send rather than hide inside the window.
+      /* A commit already in flight cannot be recalled, so the configuration IS written - what the close suppresses is everything after the write: the confirmation,
+       * the release, and the warm recompute. The distinguishing observation is the commit COUNT, because an implementation that retried or re-entered on the late
+       * result would write twice. The debounce is released before the warms are counted, because the write moved the address list, so a warm the page wrongly
+       * scheduled would send rather than hide inside the window.
        */
       t.mock.timers.enable({ apis: ["setTimeout"] });
 

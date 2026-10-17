@@ -10,8 +10,8 @@
  */
 import { Characteristic, Service, TestEspHomeClient, TestService, asEspHomeClient, buildRatgdoAccessory, makeBinarySensorEvent,
   makeCoverEvent, makeFakeOpenClient, makeKonnectedInitialState, makeLightEvent, makeLockEvent, makeRatgdoInitialState, makeRatgdoService, makeSwitchEvent,
-  makeTelemetry, makeTestAccessory, makeTestDevice, makeTestPlatform } from "./testing.helpers.ts";
-import { CoverOperation, LockState, entityId } from "esphome-client";
+  makeTelemetry, makeTestAccessory, makeTestDevice, makeTestPlatform, openThroughHello, resolverOf } from "./testing.helpers.ts";
+import { ConnectionError, CoverOperation, EncryptionKeyMissingError, EncryptionRequiredError, LockState, NegotiationFailedError, entityId } from "esphome-client";
 import { TestMqttClient, logCount, loggedAt } from "homebridge-plugin-utils/testing";
 import { describe, test } from "node:test";
 import type { LifecycleEvent } from "esphome-client";
@@ -477,12 +477,68 @@ describe("asEspHomeClient and makeFakeOpenClient", () => {
   test("makeFakeOpenClient records the options each invocation received", async () => {
 
     const open = makeFakeOpenClient(new TestEspHomeClient());
+    const resolver = (): string => "k";
 
-    await open({ host: "192.0.2.10", psk: "k" });
+    await open({ host: "192.0.2.10", psk: resolver });
 
     assert.equal(open.calls.length, 1, "every invocation is recorded");
     assert.equal(open.calls[0]?.host, "192.0.2.10", "the recorded options carry the host openConnection forwards");
-    assert.equal(open.calls[0]?.psk, "k", "the recorded options carry the psk, so a test can assert the resolved key threads through the boundary unchanged");
+    assert.equal(open.calls[0]?.psk, resolver, "the recorded options carry the key resolver, so a test can read what the connection core handed the client");
+  });
+
+  test("resolverOf answers the resolver a recorded invocation carried, and refuses one that carried none", async () => {
+
+    const open = makeFakeOpenClient(new TestEspHomeClient());
+    const resolver = (): string => "k";
+
+    await open({ host: "192.0.2.10", psk: resolver });
+    await open({ host: "192.0.2.11", psk: null });
+
+    assert.equal(resolverOf(open.calls[0]), resolver, "the resolver the invocation carried is the one answered");
+    assert.throws(() => resolverOf(open.calls[1]), /carried no key resolver/, "an invocation opened with no resolver fails at the read rather than at a call of null");
+    assert.throws(() => resolverOf(undefined), /carried no key resolver/, "and so does an invocation that never happened");
+  });
+
+  test("openThroughHello settles the way the client settles on what the resolver did with the hello", async () => {
+
+    const client = new TestEspHomeClient();
+    const hello = { macAddress: "AA:BB:CC:DD:EE:FF" };
+    const heard: unknown[] = [];
+
+    const keyed = makeFakeOpenClient(openThroughHello({ client, hello }));
+
+    assert.equal(await keyed({ host: "192.0.2.10", psk: (announced) => {
+
+      heard.push(announced);
+
+      return "k";
+    } }), client, "a resolver answering a key resolves the client");
+    assert.deepEqual(heard, [hello], "and the resolver was handed the hello the device announced");
+
+    const refusal = new NegotiationFailedError("refused", "API_MAJOR_OUT_OF_RANGE");
+
+    await assert.rejects(() => makeFakeOpenClient(openThroughHello({ client, hello }))({ host: "192.0.2.10", psk: () => {
+
+      throw refusal;
+    } }), (error) => error === refusal, "a library error the resolver throws rejects as thrown");
+
+    const fault = new Error("the resolver came apart");
+
+    await assert.rejects(() => makeFakeOpenClient(openThroughHello({ client, hello }))({ host: "192.0.2.10", psk: () => {
+
+      throw fault;
+    } }), (error) => (error instanceof ConnectionError) && (error.code === "CONNECT_FAILED") && (error.cause === fault),
+    "any other exception rejects as a connection failure carrying it as its cause, as the library wraps one");
+
+    for(const answer of [ null, "" ]) {
+
+      // eslint-disable-next-line no-await-in-loop
+      await assert.rejects(() => makeFakeOpenClient(openThroughHello({ client, hello }))({ host: "192.0.2.10", psk: () => answer }),
+        (error) => error instanceof EncryptionKeyMissingError, "a resolver answering " + JSON.stringify(answer) + " fails as a missing key");
+    }
+
+    await assert.rejects(() => makeFakeOpenClient(openThroughHello({ client, hello }))({ host: "192.0.2.10", psk: null }),
+      (error) => error instanceof EncryptionRequiredError, "and an invocation carrying no resolver fails the way an encrypted device answers a plaintext client");
   });
 
   test("makeFakeOpenClient answers each call through a handler, passing that call's options and its zero-based index", async () => {

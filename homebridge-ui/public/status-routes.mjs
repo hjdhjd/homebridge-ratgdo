@@ -12,8 +12,8 @@
  * own additions to the protocol and nothing else.
  */
 
-// The onRequest route the warm extension registers. It carries the whole warm set - every device the sidebar knows plus that device's effective encryption key, and
-// every address the user listed - so the connection pool connects ahead of selection rather than waiting for the user to click a device.
+// The onRequest route the warm extension registers. It carries the whole warm set - the sidebar's devices and the edited configuration, from which the pool resolves
+// every key, name, and listed address - so the connection pool connects ahead of selection rather than waiting for the user to click a device.
 export const STATUS_WARM_ROUTE = "/statusWarm";
 
 // The onRequest route the address projection registers, beside the warm route. It carries no request body and answers with the feed's live discovery map: each

@@ -3,7 +3,7 @@
  * discovery.test.ts: Unit tests for the two wire-record readers - the mDNS-service parse and the device-info classification - plus the identity composition,
  * classification, MAC normalization, and validity guards they share.
  */
-import { classifyDeviceInfo, parseRatgdoService } from "./discovery.ts";
+import { classifyDeviceInfo, normalizeMac, parseRatgdoService } from "./discovery.ts";
 import { describe, test } from "node:test";
 import type { DeviceInfo } from "esphome-client";
 import type { Nullable } from "homebridge-plugin-utils";
@@ -261,6 +261,17 @@ describe("classifyDeviceInfo", () => {
 
       test(why, () => assert.equal(classifyDeviceInfo(info, DIALED), null, why));
     }
+  });
+});
+
+describe("normalizeMac", () => {
+
+  test("reduces every spelling of one MAC to one identity form", () => {
+
+    assert.equal(normalizeMac("AA:BB:CC:DD:EE:FF"), "AABBCCDDEEFF", "the colon form a device-info record and a server hello carry loses its colons");
+    assert.equal(normalizeMac("AABBCCDDEEFF"), "AABBCCDDEEFF", "the bare form a TXT record carries is already the identity form");
+    assert.equal(normalizeMac("aa:Bb:cC:dd-EE:ff"), "AABBCCDDEEFF", "a mixed-case spelling with mixed separators is upper-cased to the same identity");
+    assert.equal(normalizeMac(""), "", "an input carrying no hex digit reduces to the empty string");
   });
 });
 /* eslint-enable camelcase */

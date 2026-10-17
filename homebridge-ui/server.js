@@ -37,9 +37,9 @@ class PluginUiServer extends HomebridgePluginUiServer {
     // Register the /getOptions request handler with the Homebridge server API.
     this.onRequest("/getOptions", () => ({ categories: featureOptionCategories, options: featureOptions }));
 
-    // Apply a warm set - every device the sidebar knows plus each device's effective encryption key. We narrow the untrusted body in the tested module and drop a
-    // malformed body without dispatching. feed.warm is synchronous and total by the feed's contract, so we call it and return null; connection progress flows over push
-    // events.
+    // Apply a warm set - the sidebar's devices and the edited configuration, from which the pool resolves every key, name, and listed address. We narrow the untrusted
+    // body in the tested module and drop a malformed body without dispatching. feed.warm is synchronous and total by the feed's contract, so we call it and return null;
+    // connection progress flows over push events.
     this.onRequest(STATUS_WARM_ROUTE, (body) => {
 
       const request = narrowStatusWarmRequest(body);

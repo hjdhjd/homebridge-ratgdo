@@ -4,7 +4,7 @@
  */
 import type { FeatureCategoryEntry, FeatureOptionEntry, FeatureOptionScope } from "homebridge-plugin-utils";
 import { RATGDO_MQTT_TOPIC, RATGDO_OCCUPANCY_DURATION } from "./settings.ts";
-import { buildFixedScopeDescribers, mqttFeatureOptions, scopeSafeId } from "homebridge-plugin-utils";
+import { buildFixedScopeDescribers, mqttFeatureOptions } from "homebridge-plugin-utils";
 import type { PlatformConfig } from "homebridge";
 import { RatgdoVariant } from "./types.ts";
 
@@ -78,26 +78,6 @@ export function normalizeConfig(config: PlatformConfig | undefined): RatgdoOptio
     mqttUrl: (typeof mqttUrl === "string") ? mqttUrl : undefined,
     options: (Array.isArray(options) && options.every((entry): entry is string => typeof entry === "string")) ? options : undefined
   };
-}
-
-/* The identity a manually addressed device's options are read at, before that device has an identity of its own.
- *
- * A device IS its MAC as far as this plugin is concerned, and every option resolved for a device is keyed by that MAC. A MAC, though, is unknowable until a connection
- * to the device has opened - and the one option a connection needs BEFORE it opens is the encryption key. The address the user typed is the only identity in hand at
- * that moment, so that is the identity the key is read at. One rule, in both directions: a connection to a listed address reads the key at the address identity, and a
- * connection to a discovered address reads it at the MAC. Once a manually addressed device has connected and named its MAC, everything else about it resolves at the
- * MAC like any other device.
- *
- * `scopeSafeId` and nothing else. The engine's stored form is an option name, a period, and an id, so an id carrying a period of its own would be read back as a
- * different option entirely; `scopeSafeId` is the engine's own answer to that, and it leaves an IPv6 literal's colons alone.
- *
- * @param address - The address as the user listed it.
- *
- * @returns The id to hand the engine as the device argument, which resolves the address's own entry and then walks to the global one.
- */
-export function manualAddressScope(address: string): string {
-
-  return scopeSafeId(address);
 }
 
 /* The library's canonical MQTT option group, composed once at module scope and read by both the category list and the catalog below, so the two always describe the

@@ -21,8 +21,8 @@
 // constructs a feed or an accessory reads against globals that are guaranteed to exist.
 import "homebridge-plugin-utils/polyfills";
 import type { Clock, HomebridgePluginLogging, MdnsService, Nullable } from "homebridge-plugin-utils";
-import { CoverOperation, LockState, entityId } from "esphome-client";
-import type { DeviceInfo, EntityId, EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
+import { ConnectionError, CoverOperation, EncryptionKeyMissingError, EncryptionRequiredError, EspHomeError, LockState, entityId } from "esphome-client";
+import type { DeviceInfo, EntityId, EspHomeClient, LifecycleEvent, LogEventData, NoiseServerHello, PskResolver, TelemetryEvent } from "esphome-client";
 import { TestClock, TestMqttClient, capturingLog, makeService, makeTxtStrings } from "homebridge-plugin-utils/testing";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import { FeatureOptions } from "homebridge-plugin-utils";
@@ -729,18 +729,18 @@ export function asEspHomeClient(client: TestEspHomeClient): EspHomeClient {
   return client as unknown as EspHomeClient;
 }
 
-/* One recorded factory invocation, narrowed to the open-options fields a connection test asserts on: the static clientId, the host, the resolved psk the platform
- * threads through openConnection, and the logger and cancellation signal it forwards. Recording these is what lets a test prove openConnection forwarded the right
- * values across the injected boundary (the headline of the client-factory port), rather than merely that the call returned a result. The logger and the signal are
- * required rather than optional because openConnection forwards its own log argument and the caller's shutdown signal unconditionally, so a recorded invocation
- * always carries both and optionality would misstate the contract.
+/* One recorded factory invocation, narrowed to the open-options fields a connection test asserts on: the static clientId, the host, the key resolver the connection
+ * core hands the client (or null for a connection opened plaintext-first), and the logger and cancellation signal it forwards. Recording these is what lets a test
+ * prove openConnection forwarded the right values across the injected boundary (the headline of the client-factory port), rather than merely that the call returned a
+ * result. The logger and the signal are required rather than optional because openConnection forwards its own log argument and the caller's shutdown signal
+ * unconditionally, so a recorded invocation always carries both and optionality would misstate the contract.
  */
 export interface RecordedOpenOptions {
 
   clientId?: Nullable<string>;
   host: string;
   logger: HomebridgePluginLogging;
-  psk?: Nullable<string>;
+  psk?: Nullable<string> | PskResolver;
   signal: AbortSignal;
 }
 
@@ -782,6 +782,73 @@ export function makeFakeOpenClient(result: Error | OpenClientHandler | TestEspHo
   };
 
   return Object.assign(open, { calls }) as unknown as OpenEspHomeClient & { calls: RecordedOpenOptions[] };
+}
+
+/* The key resolver a recorded factory invocation carried, for a test that plays the device's side of the handshake by hand - a first contact's hello, or a reconnect's
+ * after the connection was admitted. It throws when the invocation carried none, so a test reading a resolver that was never handed over fails at the read rather than
+ * at a confusing call of null.
+ *
+ * @param call - The recorded invocation, typically `openClient.calls[n]`.
+ *
+ * @returns The resolver that invocation carried.
+ */
+export function resolverOf(call: RecordedOpenOptions | undefined): PskResolver {
+
+  const psk = call?.psk;
+
+  if(typeof psk !== "function") {
+
+    throw new Error("The recorded open carried no key resolver.");
+  }
+
+  return psk;
+}
+
+/* A per-call open handler that answers as an encrypting device does, for the parts of esphome-client's handshake a consumer can observe. It hands the invocation's
+ * resolver the given server hello, exactly as the client does after reading one, and then settles the way the client settles on what the resolver did: an exception
+ * the resolver throws rejects as thrown when it is an EspHomeError, and otherwise as a ConnectionError (`CONNECT_FAILED`) carrying it as `cause`; a resolver answering
+ * no key fails with EncryptionKeyMissingError; an invocation carrying no resolver at all fails with EncryptionRequiredError, which is how an encrypted device answers a
+ * plaintext client; and a resolver answering a key resolves the client. It never checks the key itself - a test asserts on what the resolver answered, and a
+ * mismatched key is the fixed-error form's to model.
+ *
+ * @param options.client - The client the open resolves when the resolver answers a key.
+ * @param options.hello  - The server hello the device announces.
+ *
+ * @returns The handler, for makeFakeOpenClient.
+ */
+export function openThroughHello({ client, hello }: { client: TestEspHomeClient; hello: NoiseServerHello }): OpenClientHandler {
+
+  return async (options: RecordedOpenOptions): Promise<TestEspHomeClient> => {
+
+    const { psk } = options;
+
+    if(typeof psk !== "function") {
+
+      throw new EncryptionRequiredError("The device requires encryption, and no key resolver was offered.");
+    }
+
+    let key: Nullable<string>;
+
+    try {
+
+      key = psk(hello);
+    } catch(error) {
+
+      if(error instanceof EspHomeError) {
+
+        throw error;
+      }
+
+      throw new ConnectionError("The key resolver threw.", "CONNECT_FAILED", { cause: error });
+    }
+
+    if(!key) {
+
+      throw new EncryptionKeyMissingError("The key resolver answered no key for this device.");
+    }
+
+    return client;
+  };
 }
 
 /* Build a single telemetry event in the wire-faithful shape the esphome-client snapshot carries, mirroring esphome-client's own test factory: a { entity, key, type,

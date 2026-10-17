@@ -62,6 +62,19 @@ export interface DiscoveredRatgdo {
 // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing
 const advertised = (value: Nullable<string> | undefined): string | undefined => value || undefined;
 
+/* Reduce any spelling of a MAC address to the plugin's identity form: its hex digits alone, upper-cased. A TXT record carries bare hex, while a device-info record
+ * and an encrypted handshake's server hello carry the colon-delimited form, and every comparison and every feature-option id this plugin makes reads one form - so
+ * every spelling passes through here, and two spellings of one device can never read as two devices.
+ *
+ * @param mac - The MAC in whichever spelling its source used.
+ *
+ * @returns The identity form, or an empty string for an input carrying no hex digit at all.
+ */
+export function normalizeMac(mac: string): string {
+
+  return mac.replace(/[^0-9a-f]/gi, "").toUpperCase();
+}
+
 /* The already-read fields an identity is composed from, in the vocabulary this module derives rather than the vocabulary either wire format spells them in. A reader
  * validates its own record, translates it into this shape, and hands it over; the composer owns everything that follows.
  *
@@ -102,12 +115,13 @@ function composeIdentity({ address, addresses, firmwareVersion, friendlyName, ma
     return null;
   }
 
-  /* Two MAC representations: macColon is the uppercased colon-delimited form HomeKit's UUID generator and the discovered-device dedup set use; strippedMac is the
-   * bare-hex form everything downstream consumes (device.mac, feature-option lookup keys, MQTT topics). The two wire formats spell a MAC differently - a TXT record
-   * carries bare hex and a device-info record carries the colon-delimited form - so every non-hex character comes out first and one spelling goes in. The (?=.)
-   * lookahead then inserts a colon after every pair except the final one, so AABBCCDDEEFF becomes AA:BB:CC:DD:EE:FF with no trailing colon.
+  /* Two MAC representations: strippedMac is the bare-hex identity form everything downstream consumes (device.mac, feature-option lookup keys, MQTT topics), and
+   * macColon is the uppercased colon-delimited form HomeKit's UUID generator and the discovered-device dedup set use. The two wire formats spell a MAC differently -
+   * a TXT record carries bare hex and a device-info record carries the colon-delimited form - so the identity form is derived first, through the one normalization
+   * every spelling goes through, and the colon form is built from it. The (?=.) lookahead inserts a colon after every pair except the final one, so AABBCCDDEEFF
+   * becomes AA:BB:CC:DD:EE:FF with no trailing colon.
    */
-  const macColon = mac.replace(/[^0-9a-f]/gi, "").toUpperCase().replace(/(.{2})(?=.)/g, "$1:");
+  const strippedMac = normalizeMac(mac);
 
   return {
 
@@ -115,9 +129,9 @@ function composeIdentity({ address, addresses, firmwareVersion, friendlyName, ma
     addresses: addresses,
     firmwareVersion: firmwareVersion,
     friendlyName: friendlyName,
-    macColon: macColon,
+    macColon: strippedMac.replace(/(.{2})(?=.)/g, "$1:"),
     model: projectVersion,
-    strippedMac: macColon.replace(/:/g, ""),
+    strippedMac: strippedMac,
     variant: project.variant
   };
 }

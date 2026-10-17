@@ -2,7 +2,7 @@
  *
  * ui.mjs: Homebridge Ratgdo webUI.
  */
-import { FeatureOptions, formatValueList, scopeSafeId } from "homebridge-plugin-utils/featureOptions.js";
+import { FeatureOptions, formatValueList } from "homebridge-plugin-utils/featureOptions.js";
 import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE, STATUS_WARM_ROUTE } from "./status-routes.mjs";
 import { canonicalManualAddress, isZonedAddress, makeRatgdoConfig } from "./ratgdo-config.mjs";
 import { createActionGuard, withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
@@ -93,51 +93,51 @@ const refreshAddresses = async () => {
 
 /* Reduce a warm payload to one canonical string, the whole of what the send-suppression comparison reads.
  *
- * Two properties make the comparison sound. Each list is sorted by its own identity, so a device list the framework happens to hand back in a different order is not
- * mistaken for a change; and each entry is a fixed-position tuple with an explicit null for an absent field rather than an object with the field omitted, so no omitted
- * field can ever collide with a present one - a device named "x" with no key spells differently from a device with no name and the key "x". Together they make
- * "changed" mean exactly what it says: some field of some entry moved.
+ * The device list is sorted, so a list the framework happens to hand back in a different order is not mistaken for a change. The options stay in the order the
+ * configuration holds them, because that array is exactly what the server's engine reads, and this page makes no claim about which reorderings the engine would read
+ * alike. Together they make "changed" mean exactly what it says: the sidebar's devices or the configuration moved.
  *
- * @param {{ addresses?: Object[], devices: Object[] }} payload - The warm payload about to be sent.
+ * @param {{ devices: string[], options: string[] }} payload - The warm payload about to be sent.
  *
  * @returns {string} The canonical spelling of that payload.
  */
 const warmSignature = (payload) => JSON.stringify({
 
-  addresses: [...payload.addresses ?? []].sort((a, b) => a.address.localeCompare(b.address)).map((entry) => [ entry.address, entry.psk ?? null ]),
-  devices: [...payload.devices].sort((a, b) => a.mac.localeCompare(b.mac)).map((entry) => [ entry.mac, entry.psk ?? null, entry.logName ?? null ])
+  devices: [...payload.devices].sort((a, b) => a.localeCompare(b)),
+  options: payload.options
 });
 
-/* Recompute the warm set from the live device list and feature-option edits, and re-send it to the server when it would change. Every warm send funnels through this one
- * function, which gates on config-view establishment before it sends, so the diff-and-send logic and the integrity conditions that guard it live in
- * exactly one place rather than being restated per trigger; the address-refresh request is a read and is deliberately outside this funnel. The whole body is guarded:
- * a failed lookup logs to the console and keeps the last-sent set rather than throwing out of a callback. The device list comes from the public HBPU device-list source
- * (never a hand-parse of the cached accessories), and each device's effective key and log name come from one FeatureOptions engine rebuilt from the live editedConfig
- * against the framework's page-lifetime catalog, which it fetches once and shares with every reader, so option inheritance resolves entirely through the engine. The
- * payload is then reduced to a canonical signature and compared against the last one sent, so the send is suppressed unless some field of some entry moved - a
- * redundant warm would be a no-op at the server's authoritative diff, so suppressing it is purely an optimization.
+/* Recompute the warm set from the live device list and the edited configuration, and re-send it to the server when it would change. Every warm send funnels through
+ * this one function, which gates on config-view establishment before it sends, so the diff-and-send logic and the integrity conditions that guard it live in exactly
+ * one place rather than being restated per trigger; the address-refresh request is a read and is deliberately outside this funnel. The whole body is guarded: a failed
+ * lookup logs to the console and keeps the last-sent set rather than throwing out of a callback. The device list comes from the public HBPU device-list source (never a
+ * hand-parse of the cached accessories), and the configuration goes as the edited block's own options array: the server resolves every key, log name, and listed
+ * address from it through the plugin's own engine, so this page resolves nothing and cannot disagree with the plugin about any of them.
+ *
+ * The payload is then reduced to a canonical signature and compared against the last one sent. A resend is suppressed only while the sidebar's devices and the
+ * configuration are both unchanged, so any option edit resends; an edit that moves no key, log name, or listed address moves nothing at the server's diff, which is
+ * what makes the suppression purely an optimization.
  */
 const recomputeWarmSet = async () => {
 
   try {
 
-    const catalog = await ui.featureOptions.catalog();
     const devices = (await deviceList()).devices ?? [];
 
     /* The primary config block, read by position, whose absence is the establishment gate. The plugin-config session holds config[0] fixed as the primary platform
      * entry and the editedConfig getter hands that entry back first on every read, and the array it reads is Ratgdo-only by the host's own construction - the server
      * filters plugin config by platform tag before it ever reaches the browser - so position is the durable identity for this block. Matching by the platform tag is
      * fragile against the host UI: its schema-driven Settings form emits only schema-declared keys and strips every undeclared key, the platform tag included, from the
-     * in-memory config block, so a tag match can miss against a fully keyed configuration after a Settings-tab visit and compute every encrypted device keyless.
+     * in-memory config block, so a tag match can miss against a fully keyed configuration after a Settings-tab visit and send the server an empty configuration.
      *
      * The getter answers with an empty array exactly until show() has supplied the session - a failed launch included, because the shell's show() reports a launch
      * failure to the user and resolves rather than rejecting - so an absent block gates establishment for every caller of this function alike: the load announcement's
      * warm, the debounced triggers, and the forced re-sends. The gate keys on the block being absent and never on its options being empty, so an established session
-     * that has configured no options passes it and computes an honest keyless set for devices that need no key.
+     * that has configured no options passes it and sends an honest empty configuration.
      *
      * Every show cycle that establishes the page announces its loaded model and warms at once; a cycle that fails before that point announces nothing, and the relaunch
      * the menu's recovery runs announces and warms when it establishes. A repeat cycle costs nothing beyond one cached-accessories read - the same read every trigger
-     * already pays, served from the host's own cache - because the send suppression below refuses a re-send while no key has moved.
+     * already pays, served from the host's own cache - because the send suppression below refuses a re-send while nothing it would send has moved.
      */
     const block = ui.featureOptions.editedConfig[0];
 
@@ -146,80 +146,13 @@ const recomputeWarmSet = async () => {
       return;
     }
 
-    const featureOptions = new FeatureOptions(catalog.categories, catalog.options, block.options ?? []);
+    // The sidebar's devices by mac, and a copy of the configuration's options array, so a later edit to the block cannot reach into a payload already sent.
+    const payload = {
 
-    // One option's effective value at one identity, answered only when it is a non-empty string. Every option this page reads for the warm payload goes through here,
-    // so the rule that an empty entry means "the user set nothing" is stated once for the page rather than once per read. The runtime states the same rule for itself;
-    // browser code cannot import it, so the two are written apart deliberately rather than by oversight.
-    const optionText = (option, id) => {
-
-      const value = featureOptions.value(option, id);
-
-      return ((typeof value === "string") && (value.length > 0)) ? value : undefined;
+      devices: devices.map((device) => device.serialNumber).filter((mac) => (typeof mac === "string") && (mac.length > 0)),
+      options: Array.isArray(block.options) ? [...block.options] : []
     };
 
-    const devicePayload = [];
-
-    for(const device of devices) {
-
-      const mac = device.serialNumber;
-
-      if((typeof mac !== "string") || (mac.length === 0)) {
-
-        continue;
-      }
-
-      const logName = optionText("Device.LogName", mac);
-      const psk = optionText("Device.Encryption.Key", mac);
-      const entry = { mac };
-
-      // Each optional field is attached only when the engine answered one, so the payload on the wire carries exactly what the user configured and the server's
-      // narrowing reads an absent field rather than an explicit undefined that JSON would drop anyway.
-      if(logName !== undefined) {
-
-        entry.logName = logName;
-      }
-
-      if(psk !== undefined) {
-
-        entry.psk = psk;
-      }
-
-      devicePayload.push(entry);
-    }
-
-    /* The listed addresses, read once per recompute and canonicalized before anything is done with them. Canonicalizing first is what makes the scope id the page
-     * computes the same one the plugin computes: the runtime canonicalizes its own list before it dials, so a raw entry here would store a key at an identity the
-     * plugin never looks for. Each key is then read at the address's OWN identity, exactly as the runtime reads it before a manual dial - a device named by address
-     * has no mac anyone knows until something connects to it. scopeSafeId is the engine's own answer to an identifier carrying characters its stored form gives
-     * meaning to, and using the library's function rather than a local rewrite is what keeps the page and the runtime writing the same entry.
-     *
-     * A zoned address is dropped rather than sent. The card refuses one before it is ever written, so an entry reaching here names a device nothing can dial, and
-     * sending it would only have the feed drop it again.
-     */
-    const addressPayload = [];
-
-    for(const entry of featureOptions.valueList({ option: "Device.Address" })) {
-
-      const address = canonicalManualAddress(entry);
-
-      if(!address.length || isZonedAddress(address)) {
-
-        continue;
-      }
-
-      const psk = optionText("Device.Encryption.Key", scopeSafeId(address));
-      const payloadEntry = { address };
-
-      if(psk !== undefined) {
-
-        payloadEntry.psk = psk;
-      }
-
-      addressPayload.push(payloadEntry);
-    }
-
-    const payload = { addresses: addressPayload, devices: devicePayload };
     const signature = warmSignature(payload);
 
     // Send-suppression: re-send only when the payload would spell differently than the one the server already holds. This premise - that an unchanged payload needs no
@@ -369,7 +302,7 @@ let interpreter = null;
 
 const configInterpreter = async () => {
 
-  interpreter ??= makeRatgdoConfig({ FeatureOptions, catalog: await ui.featureOptions.catalog(), formatValueList, scopeSafeId });
+  interpreter ??= makeRatgdoConfig({ FeatureOptions, catalog: await ui.featureOptions.catalog(), formatValueList });
 
   return interpreter;
 };
@@ -498,6 +431,10 @@ const openCard = () => {
  * The signal is the action's own, started on the card's guard at the click: a newer action, a closed card, and a navigation away all retire it, and a retired probe
  * renders nothing and reports nothing. The request is bounded by the page's own deadline, which is longer than the server's own probe budget so the server's
  * classified answer wins a race with it, and by that signal, so a retired probe stops waiting at once rather than when the deadline runs out.
+ *
+ * One answer is a success on the wire and a refusal here: an encrypted device whose firmware does not announce its MAC, tested with a typed key other than the global
+ * encryption key. The plugin reaches such a device only with the global encryption key, so a key saved for it could never be used; the verdict says so and names the
+ * fix, and the null this answers is what keeps Save from writing it.
  */
 const runProbe = async (signal) => {
 
@@ -544,6 +481,24 @@ const runProbe = async (signal) => {
     if(answer.encrypted) {
 
       rows.push([ "Encrypted", "Yes" ]);
+    }
+
+    if(answer.encrypted && !answer.announcesMac && (psk.length > 0)) {
+
+      const ratgdoConfig = await configInterpreter();
+
+      if(signal.aborted) {
+
+        return null;
+      }
+
+      if(psk !== ratgdoConfig.globalKey(ui.featureOptions.editedConfig[0])) {
+
+        renderVerdict("This device answered, but its firmware does not announce its MAC address, so the plugin can reach it only with the global encryption key. " +
+          "Update the device to ESPHome 2025.4.0 or newer, or set the global encryption key to this key.", rows);
+
+        return null;
+      }
     }
 
     renderVerdict("This device answered.", rows);
@@ -598,7 +553,7 @@ const saveCard = async () => {
 
   const listed = ratgdoConfig.manualAddresses(ui.featureOptions.editedConfig[0]);
 
-  if(!ratgdoConfig.withManualDevice(ui.featureOptions.editedConfig[0], { address, key })) {
+  if(!ratgdoConfig.withManualDevice(ui.featureOptions.editedConfig[0], { address, key, mac: answered.mac })) {
 
     renderVerdict("This device is already listed.");
 
@@ -610,7 +565,7 @@ const saveCard = async () => {
    * itself applies, which is what keeps the copy and the write from disagreeing.
    */
   const wasListed = listed.some((entry) => (canonicalManualAddress(entry) === address));
-  const result = await ui.featureOptions.commitConfig((platform) => ratgdoConfig.withManualDevice(platform, { address, key }) ?? {});
+  const result = await ui.featureOptions.commitConfig((platform) => ratgdoConfig.withManualDevice(platform, { address, key, mac: answered.mac }) ?? {});
 
   // A commit already in flight cannot be recalled, so a save retired across it - by a newer action, a closed card, or a navigation away - still leaves the
   // configuration written, once. What the retired save suppresses is everything AFTER the write: the confirmation, the release, and the warm recompute.

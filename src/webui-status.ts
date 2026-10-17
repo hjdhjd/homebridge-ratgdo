@@ -3,37 +3,40 @@
  * webui-status.ts: The live device-status connection pool for the Config UI X settings panel.
  *
  * This module runs exclusively inside the transient custom-UI child process that Config UI X forks for the plugin's settings modal - never inside Homebridge. At panel
- * open the frontend hands the pool the warm set: every device the sidebar knows, with that device's effective encryption key and log name. The pool connects to every
- * discovered warm device immediately and holds each connection for the whole settings session, so clicking between devices is an instant view switch rather than a
- * teardown and reconnect. It opens each connection by reusing the platform's own connection.ts / discovery.ts / entities.ts / protocol modules end to end, translates
- * telemetry into status rows, and pushes those rows to the iframe over the plugin-ui-utils bridge. The status wire contract - the StatusEvent union, the StatusRow
- * shape, and the classified StatusErrorReason - lives in homebridge-plugin-utils and is imported here; this module is that contract's ratgdo adapter, owning the
- * ESPHome StatusFeed, the per-device session lifecycle, the row vocabulary, and the warm extension. It consumes openConnection, parseRatgdoService,
- * ratgdoStatusEntityIds, presentEntityIds, idFor, and translateTelemetry, and never touches raw wire semantics.
+ * open the frontend hands the pool the warm set: every device the sidebar knows, and the page's edited configuration. The pool resolves each device's key, its log
+ * name, and every listed address from that configuration through the same feature-option engine and the same list function the plugin itself runs on, so the page,
+ * the pool, and the runtime cannot disagree about a device. The pool connects to every discovered warm device immediately and holds each connection for the whole
+ * settings session, so clicking between devices is an instant view switch rather than a teardown and reconnect. It opens each connection by reusing the platform's own
+ * connection.ts / discovery.ts / entities.ts / protocol modules end to end, translates telemetry into status rows, and pushes those rows to the iframe over the
+ * plugin-ui-utils bridge. The status wire contract - the StatusEvent union, the StatusRow shape, and the classified StatusErrorReason - lives in
+ * homebridge-plugin-utils and is imported here; this module is that contract's ratgdo adapter, owning the ESPHome StatusFeed, the per-device session lifecycle, the row
+ * vocabulary, and the warm extension. It consumes openConnection, parseRatgdoService, ratgdoStatusEntityIds, presentEntityIds, idFor, and translateTelemetry, and
+ * never touches raw wire semantics.
  *
- * A warm whose effective key for a device differs from the key that device's session last reconciled reconnects every such session except a healthy, connected,
- * negotiated-plaintext one, which adopts the new key in place - a transport that never used the key has nothing to reconnect for, and the reconnect would only flash the
- * panel. Mid-connect, offline, and encrypted sessions reconnect instead; an auth-failed device reconnects only on a changed key, never on a resend of the key that
- * failed; disposal tears down everything. Key resolution is the frontend's FeatureOptions engine output, diffed here per device, so encryption-key
- * inheritance lives nowhere in this module. A session is never torn down on the word of a transient device-list read - a mac merely absent from a re-warm keeps its live
- * connection. The pool holds per-mac outcome memory because
+ * A warm under which a session's key would no longer be the one it was offered reconnects that session, except a healthy, connected, negotiated-plaintext one, which
+ * adopts the new key in place - a transport that never used the key has nothing to reconnect for, and the reconnect would only flash the panel. Mid-connect, offline,
+ * and encrypted sessions reconnect instead; an auth-failed device reconnects only on a changed key, never on a resend of the key that failed; disposal tears down
+ * everything. Which MAC a key is read at is the connection core's rule and how a key is inherited is the engine's, so neither lives in this module. A session is never
+ * torn down on the word of a transient device-list read - a mac merely absent from a re-warm keeps its live connection. The pool holds per-mac outcome memory because
  * connects happen while no device is selected and their pushes are unrenderable, so a later view of a device that failed while unselected must re-surface the classified
  * failure rather than a permanent "Connecting...".
  *
  * The warm set and its route are ratgdo's extension to the shared protocol: the warm route declared in homebridge-ui/public/status-routes.mjs, where both halves of the
- * settings surface can read it, and narrowStatusWarmRequest here carry every known device to the pool with its effective key - the input the key diff reads - and its
- * log name, which the connect log speaks under, while the shared contract carries the pushed status back. Everything the panel renders - rows, updates, availability, and
- * errors - crosses the bridge as ESPHome-free, variant-free, entity-id-free data, so the row vocabulary and the label choices stay ratgdo's while the ESPHome details
- * never reach the wire.
+ * settings surface can read it, and narrowStatusWarmRequest here carry the sidebar's devices and the edited configuration to the pool, while the shared contract
+ * carries the pushed status back. The configuration is read and never logged, because it can carry encryption keys. Everything the panel renders - rows, updates,
+ * availability, and errors - crosses the bridge as ESPHome-free, variant-free, entity-id-free data, so the row vocabulary and the label choices stay ratgdo's while the
+ * ESPHome details never reach the wire.
  */
 import type { Clock, HomebridgePluginLogging, MdnsBrowserFactory, MdnsDiscovery, MdnsDiscoveryEvent, Nullable, StatusErrorReason, StatusEvent,
   StatusRow } from "homebridge-plugin-utils";
 import type { EntityId, EspHomeClient, LifecycleEvent, TelemetryEvent } from "esphome-client";
-import { HbpuAbortError, TimerRegistry, composeSignals, discoverServices, isAdvertisedAt, prefixedLog, superviseLoop, systemClock } from "homebridge-plugin-utils";
+import { FeatureOptions, HbpuAbortError, TimerRegistry, composeSignals, discoverServices, isAdvertisedAt, prefixedLog, superviseLoop,
+  systemClock } from "homebridge-plugin-utils";
 import type { ManualConnectionFailureReason, OpenEspHomeClient } from "./connection.ts";
 import { RATGDO_ENTITIES, idFor, presentEntityIds, ratgdoInitialStateEntityIds, ratgdoStatusEntityIds } from "./entities.ts";
 import { RATGDO_MDNS_SERVICE_TYPE, RATGDO_MOTION_DURATION, RATGDO_WEBUI_DISCOVERY_TIMEOUT, RATGDO_WEBUI_PROBE_TIMEOUT } from "./settings.ts";
-import { canonicalManualAddress, governingAddress, isRetryableFailure, isZonedAddress } from "./manual.ts";
+import { canonicalManualAddress, governingAddress, isRetryableFailure, isZonedAddress, manualAddressList } from "./manual.ts";
+import { featureOptionCategories, featureOptions } from "./options.ts";
 import { openConnection, openManualConnection } from "./connection.ts";
 import type { DiscoveredRatgdo } from "./discovery.ts";
 import type { EspHomeEvent } from "./types.ts";
@@ -66,35 +69,33 @@ export interface StatusFeedOptions {
   push: (event: StatusEvent) => void;
 }
 
-/* One warm-set entry on the wire: a device's stripped mac, its effective encryption key, and the name the user set for it, each absent when the device has none. This
- * is the single named shape the warm narrowing produces and the warm method consumes, so neither re-declares it inline.
+/* The warm request on the wire: the stripped mac of every device the sidebar knows, and the options array of the configuration the page is editing. This is the single
+ * named shape the warm narrowing produces and the warm method consumes, so neither re-declares it inline.
  *
- * The log name travels the wire rather than being resolved here because option inheritance is the frontend engine's to walk: the page already holds a FeatureOptions
- * engine over the live edited configuration, and this process holds none. The same reasoning put the key on this entry.
+ * The configuration travels whole rather than as values the page resolved, because resolving it is the plugin's own engine's job: the pool builds that engine over
+ * the plugin's catalog and reads every key, log name, and listed address through it exactly as the platform does. The listed addresses matter beyond the sidebar,
+ * because a device named only by address may be in nobody's sidebar yet - the pool has to dial the address to learn which device is there.
+ *
+ * @property devices - The sidebar's devices, by stripped mac.
+ * @property options - The edited configuration's feature-option entries.
  */
-export interface WarmDeviceEntry {
+export interface StatusWarmRequest {
 
-  logName?: string;
-  mac: string;
-  psk?: string;
+  devices: string[];
+  options: string[];
 }
 
-/* One warmed manual address on the wire: an address the user listed under Device.Address, and the key that resolves at that address's own identity. The page sends the
- * list alongside the devices because a manually addressed device may be in nobody's sidebar yet - the pool has to dial the address to learn which device is there.
+/* What a connection was offered: the key, and the MAC it was chosen for - undefined when it was chosen for no MAC, which reads the global key. Every store that has to
+ * tell a doomed resend of a key from a changed one keeps this record, and the one comparison that asks it reads the key at the record's own MAC, so a connection keyed
+ * for no MAC is compared against the global key and a key stored later at its device's MAC moves nothing.
+ *
+ * @property key - The key the lookup answered, or undefined when it answered none.
+ * @property mac - The MAC the key was chosen for, or undefined for the global key.
  */
-export interface WarmAddressEntry {
+interface OfferedKey {
 
-  address: string;
-  psk?: string;
-}
-
-/* What the pool remembers about one warmed device: everything the page said about it, keyed in `#warmed` by stripped mac. One record per warmed mac rather than a map
- * per field, so a warm applies as a single replacement and a reader cannot see one field from this warm beside another from the last.
- */
-interface WarmedDevice {
-
-  logName: string | undefined;
-  psk: string | undefined;
+  readonly key: string | undefined;
+  readonly mac: string | undefined;
 }
 
 /* What the pool knows about one device, keyed in `#devices` by stripped mac, whichever source told it: an mDNS advertisement or a manual address it dialed and
@@ -113,18 +114,21 @@ interface KnownDevice {
  *
  * `dialing` carries the controller that cancels the dial in flight, and its presence IS the guard against a second concurrent dial of one address: it is installed
  * synchronously before the dial's first await, so a re-warm arriving mid-dial finds it. `resolved` carries the mac that answered, which is how a later warm knows the
- * address needs no re-dial and how a departure knows whose governance to drop. `failed` carries the classified reason and the key the attempt used, so the retry gate
- * can tell a doomed re-send of the key that just failed from a genuine retry with a changed one - the same rule the per-mac outcome memory follows.
+ * address needs no re-dial and how a departure knows whose governance to drop. `failed` carries the classified reason and what the attempt was offered - undefined
+ * when the dial failed before any key was chosen - so the retry gate can tell a doomed re-send of the key that just failed from a genuine retry with a changed one, the
+ * same rule the per-mac outcome memory follows.
  */
 type AddressRecord = { controller: AbortController; state: "dialing" } | { mac: string; state: "resolved" } |
-  { psk: string | undefined; reason: ManualConnectionFailureReason; state: "failed" };
+  { offered: OfferedKey | undefined; reason: ManualConnectionFailureReason; state: "failed" };
 
 /* What one address probe answers the settings page's Add Device card. A discriminated union on `kind`, because the two answers are what the card renders and it must
  * not have to guess: `ok` carries everything the card shows about the device that answered, and `error` carries the one classified reason it did not. `encrypted`
  * records whether the transport the probe negotiated actually used a key, which is how the card tells a device that accepted a key from one that never needed one.
+ * `announcesMac` records whether the device's encrypted handshake named its MAC - false for a device whose firmware names none, and for a device that did not
+ * encrypt - which is how the card knows a key stored for that MAC could ever be offered to it.
  */
-export type StatusProbeResult = { address: string; encrypted: boolean; firmwareVersion: string; kind: "ok"; mac: string; model: string | undefined; name: string |
-  undefined; variant: RatgdoVariant; } | { kind: "error"; reason: StatusErrorReason };
+export type StatusProbeResult = { address: string; announcesMac: boolean; encrypted: boolean; firmwareVersion: string; kind: "ok"; mac: string; model: string |
+  undefined; name: string | undefined; variant: RatgdoVariant; } | { kind: "error"; reason: StatusErrorReason };
 
 /* The reason a probe's own deadline aborts its controller with, a module-scope value whose whole job is to be recognizable by identity.
  *
@@ -141,10 +145,11 @@ const PROBE_DEADLINE = Object.freeze({ reason: "probe-deadline" });
  * session holds the dialed one, and the address projection reads the dialed one because that is where the panel's connection is; `client` is null until the connection
  * opens; `controller` cancels every in-flight step; `encryptedTransport` records the negotiated transport captured once at connect resolution - true when the client
  * negotiated encryption - and backs the key diff in place of the live isEncrypted getter, which reads false during the client's own reconnect windows; `online`
- * tracks connect and disconnect through the lifecycle listener; `rowMap` is the entity-id-to-row-id map computed at connect resolution and retained because view()
- * rebuilds a snapshot from it long after the connect; `psk` records the key the diff last reconciled - the key the connection was opened with, or the key a healthy
- * plaintext session adopted in place; `stack` holds the client and then each retained listener, so teardown releases the listeners before the client's disconnect;
- * `token` is the session's monotonic identity.
+ * tracks connect and disconnect through the lifecycle listener; `offered` records what the diff last reconciled - what the connection was offered, or the key a healthy
+ * plaintext session adopted in place - and, because key choice is pure, what the session's own client offers on its reconnects; it is undefined only on the record a
+ * failed address dial mints when that dial failed before any key was chosen; `rowMap` is the entity-id-to-row-id map computed at connect resolution and retained
+ * because view() rebuilds a snapshot from it long after the connect; `stack` holds the client and then each retained listener, so teardown releases the listeners
+ * before the client's disconnect; `token` is the session's monotonic identity.
  */
 interface DeviceSession {
 
@@ -153,8 +158,8 @@ interface DeviceSession {
   controller: AbortController;
   encryptedTransport: boolean;
   mac: string;
+  offered: OfferedKey | undefined;
   online: boolean;
-  psk: string | undefined;
   rowMap: Map<EntityId, StatusRowId>;
   stack: DisposableStack;
   token: number;
@@ -306,7 +311,8 @@ const STATUS_ROW_SIZERS: Record<StatusRowId, string> = {
  * Shutdown answers null rather than a reason: the pool is tearing down and there is no user to tell, so each caller stands down silently on it. `permanent` and
  * `unknown` collapse to one unreachable verdict, because the difference between them is a detail of the connect layer's own classification that a panel reading
  * "unreachable" would gain nothing from. `unrecognized` reads as misconfigured, since something answered at that address and it was not an opener - which is a typed
- * address, not a broken device.
+ * address, not a broken device. `identity-mismatch` reads as unreachable too: a device other than the one this connection is for answered, which for the panel is the
+ * device not being reached.
  *
  * @param reason - The classified reason the connect failed.
  *
@@ -340,6 +346,7 @@ function statusErrorFor(reason: ManualConnectionFailureReason): Nullable<StatusE
 
       return "unsupported";
 
+    case "identity-mismatch":
     case "permanent":
     case "unknown":
 
@@ -355,88 +362,41 @@ function statusErrorFor(reason: ManualConnectionFailureReason): Nullable<StatusE
   }
 }
 
-// One untrusted wire field, read as the warm narrowing reads every optional string: a non-empty string is the value, and anything else - a missing key, a number, an
-// empty string - is the device offering nothing under that name. Shared by every optional member below so the rule is written once.
+// The probe's optional key, read as an untrusted wire field: a non-empty string is the value, and anything else - a missing key, a number, an empty string - is the
+// card offering nothing under that name.
 const narrowText = (value: unknown): string | undefined => ((typeof value === "string") && (value.length > 0)) ? value : undefined;
 
-/* Narrow the untrusted warm-request body at the bridge boundary. The body must be an object carrying a `devices` array or the whole request is null. Each entry is
- * narrowed individually - a non-empty string mac is required, while the key and the log name are each carried only when they are non-empty strings - and a malformed
- * entry is dropped without invalidating the request, because one bad device must not blank the whole panel. An empty devices array is valid: it is how the frontend
- * says "the sidebar knows nothing". This lives in the tested module rather than the untestable server adapter.
+/* Narrow the untrusted warm-request body at the bridge boundary. The body must be an object carrying a `devices` array or the whole request is null. Each device is a
+ * non-empty string mac, and a malformed one is dropped without invalidating the request, because one bad device must not blank the whole panel. An empty devices array
+ * is valid: it is how the frontend says "the sidebar knows nothing". This lives in the tested module rather than the untestable server adapter.
  *
- * The address list is optional and reads as empty when it is absent or is not an array at all, because an install that lists no address is the ordinary one and must
- * not be refused for saying nothing. Each address takes its canonical form here through the runtime's own `canonicalManualAddress`, which is this module's ONE
- * canonicalization point: every address-keyed structure below keys on that form, and sharing the function rather than restating the rule is what keeps the feed's
- * records and the platform's loops agreeing about what one address is called. An address naming a zone is dropped silently - the page refuses one before it can ever
- * be sent, so a zoned entry arriving here is not a user to be told anything, it is a payload to be ignored.
+ * The options array reads as empty when it is absent or is not an array at all, and keeps each string it carries. An empty array is an ordinary configuration - one
+ * that sets no option - and must not be refused for saying nothing; what the strings mean is the engine's to read, exactly as it reads the plugin's own configuration,
+ * so nothing here interprets them.
  */
-export function narrowStatusWarmRequest(body: unknown): Nullable<{ addresses: WarmAddressEntry[]; devices: WarmDeviceEntry[] }> {
+export function narrowStatusWarmRequest(body: unknown): Nullable<StatusWarmRequest> {
 
   if((typeof body !== "object") || (body === null)) {
 
     return null;
   }
 
-  const record = body as { addresses?: unknown; devices?: unknown };
+  const record = body as { devices?: unknown; options?: unknown };
 
   if(!Array.isArray(record.devices)) {
 
     return null;
   }
 
-  const devices: WarmDeviceEntry[] = [];
+  const devices = record.devices.filter((mac): mac is string => (typeof mac === "string") && (mac.length > 0));
+  const options = Array.isArray(record.options) ? record.options.filter((entry): entry is string => typeof entry === "string") : [];
 
-  for(const raw of record.devices) {
-
-    if((typeof raw !== "object") || (raw === null)) {
-
-      continue;
-    }
-
-    const entry = raw as { logName?: unknown; mac?: unknown; psk?: unknown };
-
-    if((typeof entry.mac !== "string") || (entry.mac.length === 0)) {
-
-      continue;
-    }
-
-    devices.push({ logName: narrowText(entry.logName), mac: entry.mac, psk: narrowText(entry.psk) });
-  }
-
-  const addresses: WarmAddressEntry[] = [];
-
-  for(const raw of Array.isArray(record.addresses) ? record.addresses : []) {
-
-    if((typeof raw !== "object") || (raw === null)) {
-
-      continue;
-    }
-
-    const entry = raw as { address?: unknown; psk?: unknown };
-
-    if((typeof entry.address !== "string") || (entry.address.length === 0)) {
-
-      continue;
-    }
-
-    const address = canonicalManualAddress(entry.address);
-
-    // An empty canonical form - the user typed nothing but brackets or whitespace - and a zoned one are both addresses nothing here could dial, so neither becomes a
-    // record. The page refuses both before sending, so this is a second line rather than the user's answer.
-    if((address.length === 0) || isZonedAddress(address)) {
-
-      continue;
-    }
-
-    addresses.push({ address, psk: narrowText(entry.psk) });
-  }
-
-  return { addresses, devices };
+  return { devices, options };
 }
 
 /* Narrow the untrusted probe-request body at the bridge boundary. One non-empty string address is required and takes its canonical form through the very function the
- * warm narrowing uses, so a probe and a warm of one address agree about what that address is called - which is what lets a probe's resolved record be read by the next
- * warm's dial. The key follows the same non-empty-string rule every optional field here follows.
+ * feed's listed addresses go through, so a probe and a warm of one address agree about what that address is called - which is what lets a probe's resolved record be
+ * read by the next warm's dial. The key is carried only when it is a non-empty string.
  *
  * An address naming a zone is refused here as it is everywhere else: nothing could dial it, and answering the card a classified refusal is better than opening a
  * connection attempt that was always going to fail. Anything malformed is null, and the adapter answers the card a misconfigured verdict rather than dispatching - a
@@ -467,13 +427,14 @@ export function narrowStatusProbeRequest(body: unknown): Nullable<{ address: str
 }
 
 /* The status connection pool. It holds one live or in-flight session per warmed device and switches the panel's view between them without teardown. Teardown
- * happens on a differing effective key - which reconnects every session except a healthy, connected, negotiated-plaintext one, that instead adopts the key in place - on
- * an advertisement that moves a warmed device to a different address, which re-dials the session at the new one so the panel follows the device exactly as the platform
- * does, and on disposal; an auth-failed device reconnects only when the key changes. Every push routes through the per-mac identity guard, so a superseded session's late
- * continuation reaches no panel. The pool is disposable; disposal ends the discovery stream, clears the warm set and every timer, and tears down every session.
+ * happens when the key a session was offered moves - which reconnects every session except a healthy, connected, negotiated-plaintext one, that instead adopts the key
+ * in place - on an advertisement that moves a warmed device to a different address, which re-dials the session at the new one so the panel follows the device exactly
+ * as the platform does, and on disposal; an auth-failed device reconnects only when the key changes. Every push routes through the per-mac identity guard, so a
+ * superseded session's late continuation reaches no panel. The pool is disposable; disposal ends the discovery stream, clears the warm set and every timer, and tears
+ * down every session.
  *
  * A device reaches the pool by one of two routes. Discovery is the ordinary one: an advertisement names a mac and an address, and the pool dials it. The other is a
- * listed address, which the page sends with the warm set: the pool dials the address itself, reads the identity off the device-info record the connection produced,
+ * listed address, which the warmed configuration names: the pool dials the address itself, reads the identity off the device-info record the connection produced,
  * and that one connection becomes the device's session under whichever mac answered. A listed address GOVERNS its device the way it does in the plugin's runtime -
  * the pool dials the listed address, and a later advertisement naming some other address for that mac refreshes what the pool knows about the device without moving
  * its connection, because the user has said which address to use. The identity is re-derived on every dial of an address, so a different opener answering there is
@@ -489,19 +450,34 @@ export class StatusFeed implements Disposable {
   // The live discovery while one runs, and null between them: a null field is what makes the next warm's startDiscovery open a new one.
   #discovery: Nullable<MdnsDiscovery<DiscoveredRatgdo>> = null;
   readonly #discoveryTimeoutSeconds: number;
+  // The feature-option engine over the plugin's own catalog and the last warm's configuration, built empty here and replaced by every warm. Every key, log name, and
+  // listed address the pool reads comes from it, through the same calls the platform makes.
+  #engine = new FeatureOptions(featureOptionCategories, featureOptions, []);
+
+  /* The key lookup every connection this pool opens hands the connection core: the key the engine resolves at a MAC, or the global key when called with none, and
+   * undefined for an empty entry, so an absent key and an empty one compare alike. It reads the engine live, so it always answers from the latest warm.
+   */
+  readonly #keyFor = (mac?: string): string | undefined => {
+
+    const key = this.#engine.value("Device.Encryption.Key", mac);
+
+    return key?.length ? key : undefined;
+  };
+
   // The pool's own lifetime, and the signal every discovery it opens is bound to. Aborted exactly once, at disposal.
   readonly #lifetime = new AbortController();
   readonly #log: HomebridgePluginLogging;
   readonly #openClient: OpenEspHomeClient | undefined;
-  readonly #outcomes = new Map<string, { psk: string | undefined; reason: StatusErrorReason }>();
+  readonly #outcomes = new Map<string, { offered: OfferedKey | undefined; reason: StatusErrorReason }>();
   readonly #push: (event: StatusEvent) => void;
   readonly #sessions = new Map<string, DeviceSession>();
   readonly #timers: TimerRegistry;
   #tokenCounter = 0;
-  #warmed = new Map<string, WarmedDevice>();
-  // The addresses the page last listed, keyed by the canonical address with the value being that address's own key. Replaced wholesale by every warm, exactly as
-  // #warmed is, and read as the input the address dial and the governed key diff resolve against.
-  #warmedAddresses = new Map<string, string | undefined>();
+  // The macs the sidebar last listed. Replaced wholesale by every warm.
+  #warmed = new Set<string>();
+  // The addresses the warmed configuration lists, canonical and in the user's own order, which is what settles which of two addresses reaching one device governs it.
+  // Replaced wholesale by every warm, exactly as #warmed is.
+  #warmedAddresses: readonly string[] = [];
   // Every probe still in flight, held only so disposal can cancel them. A probe removes its own entry as it settles, so this set is empty whenever none is running.
   readonly #probes = new Set<AbortController>();
 
@@ -519,27 +495,30 @@ export class StatusFeed implements Disposable {
     this.#timers = new TimerRegistry({ clock, unref: true });
   }
 
-  /* Apply a warm set: the whole sidebar's device list plus each device's effective encryption key and log name. This is the pool's one policy chokepoint. The warm set
-   * replaces `#warmed` wholesale (never merged), so a mac the sidebar dropped simply leaves the set - its live session is deliberately NOT torn down, because a transient
-   * device-list read must never destroy a live connection. For each entry: a discovered device with no session starts a connect, unless outcome memory records an auth
-   * failure against this very key, in which case the connect waits for a changed key; an undiscovered device with no session and no pending discovery timer arms its
-   * per-mac not-found timer; a device whose live session's key differs is torn down and reconnected against the new key, EXCEPT a healthy, connected,
-   * negotiated-plaintext session, which adopts the new key in place with no teardown; a device whose key matches is left untouched. Timers for macs that left the warm
-   * set are cleared, since discovery and the not-found sweep do not concern a departed mac.
+  /* Apply a warm set: the whole sidebar's device list and the configuration the page is editing. This is the pool's one policy chokepoint. The configuration replaces
+   * the engine every key, log name, and listed address is read from, and the device list replaces `#warmed` wholesale (never merged), so a mac the sidebar dropped
+   * simply leaves the set - its live session is deliberately NOT torn down, because a transient device-list read must never destroy a live connection. For each
+   * device: a discovered device with no session starts a connect, unless outcome memory records an auth failure against a key that has not moved, in which case the
+   * connect waits for a changed key; an undiscovered device with no session and no pending discovery timer arms its per-mac not-found timer; a device whose live
+   * session's key has moved is torn down and reconnected against the new key, EXCEPT a healthy, connected, negotiated-plaintext session, which adopts the new key in
+   * place with no teardown; a device whose key has not moved is left untouched. Timers for macs that left the warm set are cleared, since discovery and the not-found
+   * sweep do not concern a departed mac.
    *
-   * The key is the only field of a warm entry that decides anything here. A log name is display truth: the prefix resolver reads it live on every log call, so a warm
-   * that changes nothing but a name is applied by the replacement above and moves no connection.
+   * The key is the only thing a warm resolves that decides anything here. A log name is display truth: the prefix resolver reads it live from the engine on every log
+   * call, so a warm that changes nothing but a name is applied by the engine's replacement and moves no connection, and neither does an edit to an option this pool
+   * never reads.
    *
    * The listed addresses are applied first, and they are applied differently: a mac is something the sidebar already knows, while an address is a question the pool
    * has to ask the network. So each listed address is dialed once, identified, and remembered by what answered, and the device the pool already holds a session for
    * is only then reconciled against it. An address that has left the list is cancelled and forgotten.
    */
-  public warm(request: { addresses?: readonly WarmAddressEntry[]; devices: WarmDeviceEntry[] }): void {
+  public warm(request: StatusWarmRequest): void {
 
     // The macs the previous warm set knew, captured before the wholesale replace so we can clear the timers of the ones that leave.
-    const departed = new Set(this.#warmed.keys());
+    const departed = this.#warmed;
 
-    this.#warmed = new Map(request.devices.map((entry) => [ entry.mac, { logName: entry.logName, psk: entry.psk } ]));
+    this.#engine = new FeatureOptions(featureOptionCategories, featureOptions, request.options);
+    this.#warmed = new Set(request.devices);
 
     for(const mac of departed) {
 
@@ -549,7 +528,12 @@ export class StatusFeed implements Disposable {
       }
     }
 
-    this.#applyAddresses(request.addresses ?? []);
+    /* The listed addresses, read exactly as the platform reads them: the engine's list, canonicalized and de-duplicated in the user's order by the platform's own list
+     * function. The pool then drops what nothing could dial - an entry whose canonical form is empty, and one naming a zone - since the platform refuses both before
+     * dialing and the card refuses both before writing.
+     */
+    this.#applyAddresses(manualAddressList(this.#engine.valueList({ option: "Device.Address" })).filter((address) => (address.length > 0) &&
+      !isZonedAddress(address)));
 
     // Re-ensure the discovery stream before this warm applies. startDiscovery is a no-op while one runs, so a healthy stream pays nothing; a browser whose
     // construction failed, or one that ended after losing its sockets, is replaced here at the warm cadence rather than leaving the pool blind for the child
@@ -558,62 +542,59 @@ export class StatusFeed implements Disposable {
     // before its first await, and view()'s stored-outcome retry covers a mac that re-enters the warm set later.
     this.startDiscovery();
 
-    for(const entry of request.devices) {
+    for(const mac of this.#warmed) {
 
-      const session = this.#sessions.get(entry.mac);
-
-      // The key this device's connection is opened with, which for a governed mac is the one stored against its listed address. See #effectiveKey.
-      const psk = this.#effectiveKey(entry.mac, entry.psk);
+      const session = this.#sessions.get(mac);
 
       if(!session) {
 
         /* No session yet. A discovered device connects now, unless outcome memory holds a verdict that re-dialing cannot change. Two of those exist, and they are
          * suppressed on different terms.
          *
-         * An auth failure is suppressed only against the very key it failed with: a forced warm - the restart recovery or the visibility belt - resends unchanged keys
-         * at foreground cadence, and re-running a connect with the key that just failed is doomed churn that re-flashes the panel, while a changed key is a genuine
-         * retry and falls through to the connect, whose synchronous prefix clears the stored outcome. An unsupported verdict is suppressed regardless of the key,
-         * because a firmware version the client cannot speak does not become speakable when a key is edited; only a firmware or plugin update changes it, and either
-         * one reopens the panel. Every other outcome keeps its unconditional retry here. An undiscovered device arms a not-found timer, but only when none is already
-         * counting down for it - a re-warm that changes an unrelated device's key must not defer this device's verdict.
+         * An auth failure is suppressed only while the key it failed with has not moved: a forced warm - the restart recovery or the visibility belt - resends an
+         * unchanged configuration at foreground cadence, and re-running a connect with the key that just failed is doomed churn that re-flashes the panel, while a
+         * changed key is a genuine retry and falls through to the connect, whose synchronous prefix clears the stored outcome. An unsupported verdict is suppressed
+         * regardless of the key, because a firmware version the client cannot speak does not become speakable when a key is edited; only a firmware or plugin update
+         * changes it, and either one reopens the panel. Every other outcome keeps its unconditional retry here. An undiscovered device arms a not-found timer, but
+         * only when none is already counting down for it - a re-warm that changes an unrelated device's key must not defer this device's verdict.
          */
-        if(this.#devices.has(entry.mac)) {
+        if(this.#devices.has(mac)) {
 
-          const outcome = this.#outcomes.get(entry.mac);
+          const outcome = this.#outcomes.get(mac);
           const authFailedOnThisKey = (outcome !== undefined) && ((outcome.reason === "auth-invalid") || (outcome.reason === "auth-missing")) &&
-            (outcome.psk === psk);
+            !this.#keyMoved(outcome.offered);
 
           if((outcome?.reason === "unsupported") || authFailedOnThisKey) {
 
             continue;
           }
 
-          void this.#connectDevice(entry.mac);
-        } else if(!this.#timers.has(entry.mac)) {
+          void this.#connectDevice(mac);
+        } else if(!this.#timers.has(mac)) {
 
-          this.#armDiscoveryTimer(entry.mac);
+          this.#armDiscoveryTimer(mac);
         }
 
         continue;
       }
 
-      // A live or in-flight session whose key matches is left untouched, which is the whole point of the pool. A session whose key differs adopts the new key in place -
-      // with no teardown - ONLY when it is healthy, connected, and negotiated plaintext: such a transport genuinely does not use the key, so adopting ends the cosmetic
-      // Connecting flash an unencrypted device would otherwise show on a global key edit. Every other differing-key session - mid-connect (client still null), offline
-      // (dropped since its last connect), or encrypted - tears down and reconnects against the new key. The branch reads session.encryptedTransport and
+      // A live or in-flight session whose key has not moved is left untouched, which is the whole point of the pool. A session whose key has moved adopts the new key
+      // in place - with no teardown - ONLY when it is healthy, connected, and negotiated plaintext: such a transport genuinely does not use the key, so adopting ends
+      // the cosmetic Connecting flash an unencrypted device would otherwise show on a global key edit. Every other moved-key session - mid-connect (client still null),
+      // offline (dropped since its last connect), or encrypted - tears down and reconnects against the new key. The branch reads session.encryptedTransport and
       // session.online, both captured at well-defined moments, never the live client.isEncrypted getter: that getter is connection-phase state that reads false
       // during any transient disconnect of the client's own auto-reconnect cycle, so a live read would misclassify a mid-blip encrypted device, adopt the key in place,
       // and permanently desync the still-old-keyed client. An offline plaintext session's reconnect re-captures the transport truth on arrival, which also covers a
       // device whose firmware later enables encryption: it drops offline on its reboot and rejoins through the reconnect path against the then-current key.
-      if(session.psk !== psk) {
+      if(this.#keyMoved(session.offered)) {
 
         if((session.client !== null) && session.online && !session.encryptedTransport) {
 
-          session.psk = psk;
+          session.offered = { key: this.#keyFor(session.offered?.mac), mac: session.offered?.mac };
         } else {
 
-          this.#teardownSession(entry.mac);
-          void this.#connectDevice(entry.mac);
+          this.#teardownSession(mac);
+          void this.#connectDevice(mac);
         }
       }
     }
@@ -622,10 +603,10 @@ export class StatusFeed implements Disposable {
   /* Switch the panel's view to one device. A live session re-pushes its snapshot from the client's cache through the retained row map, so a switch between two live
    * devices constructs and disposes nothing. A still-connecting session pushes "connecting". Otherwise the stored outcome decides: a transient failure (timeout or
    * unreachable), or a not-found for a device that has since been discovered, retries with a fresh connect, so a temporary outage clears the moment the user reselects
-   * the device rather than requiring the panel to be reopened; a key failure re-pushes its error, because retrying is pointless until the key changes and the warm diff
-   * owns that; a warmed-but-undiscovered mac with no outcome
-   * pushes "connecting" and lets its timer classify it. An unwarmed mac pushes "connecting" rather than not-found - the ordered bridge makes this happen only in exotic
-   * timing, and the warm that follows resolves it.
+   * the device rather than requiring the panel to be reopened; a key failure, an unsupported firmware, and a misconfigured address each re-push their error, because
+   * retrying is pointless until a person changes something and the warm owns that; a warmed-but-undiscovered mac with no outcome pushes "connecting" and lets its timer
+   * classify it. An unwarmed mac pushes "connecting" rather than not-found - the ordered bridge makes this happen only in exotic timing, and the warm that follows
+   * resolves it.
    *
    * A mac the pool has no session and no identity for gets one more chance before it falls through to the outcome branches: every listed address whose last dial may
    * yet succeed is re-dialed, because one of them may be this very device. That is the manual path's answer to the discovered path's retry - a device reached only by
@@ -663,7 +644,7 @@ export class StatusFeed implements Disposable {
       return;
     }
 
-    if((reason === "auth-invalid") || (reason === "auth-missing") || (reason === "unsupported")) {
+    if((reason === "auth-invalid") || (reason === "auth-missing") || (reason === "misconfigured") || (reason === "unsupported")) {
 
       this.#emit({ kind: "error", reason, serialNumber: mac, session: ++this.#tokenCounter });
 
@@ -705,9 +686,12 @@ export class StatusFeed implements Disposable {
    * modal closed. openManualConnection classifies every abort of its shutdown signal as the same silent `shutdown` - it cannot know whose abort it was - so the two are
    * told apart afterward by reading the composed signal's own reason back against PROBE_DEADLINE's identity.
    *
+   * The key it offers is the one the user typed, when there is one. Otherwise it is the key the warmed configuration stores at the MAC the device announces, else the
+   * global key - the rule every other connection keys by - so a device whose key is already stored answers without the user retyping it.
+   *
    * It never throws. The card is rendering whatever this resolves, and a rejection would leave the user looking at "Connecting to the device..." forever.
    *
-   * @param request - The address to test, and the key to test it with.
+   * @param request - The address to test, and the key the user typed, if any.
    *
    * @returns What answered, or the classified reason nothing usable did.
    */
@@ -716,6 +700,16 @@ export class StatusFeed implements Disposable {
     const { address, psk } = request;
     const controller = new AbortController();
     const log = prefixedLog(this.#log, () => address);
+
+    // Whether the connection core last asked for a key at a MAC, which for a connection dialed for no MAC is whether the device's handshake announced one.
+    let announcesMac = false;
+
+    const keyFor = (mac?: string): string | undefined => {
+
+      announcesMac = (mac !== undefined);
+
+      return psk ?? this.#keyFor(mac);
+    };
 
     this.#probes.add(controller);
 
@@ -732,7 +726,7 @@ export class StatusFeed implements Disposable {
 
     try {
 
-      const outcome = await openManualConnection({ host: address, log, openClient: this.#openClient, psk, shutdownSignal: signal });
+      const outcome = await openManualConnection({ host: address, keyFor, log, openClient: this.#openClient, shutdownSignal: signal });
 
       if(outcome.ok) {
 
@@ -774,7 +768,7 @@ export class StatusFeed implements Disposable {
       // The transport is read before the client goes, because that is the one fact about this connection the card shows that the identity record does not carry.
       const encrypted = outcome.client.isEncrypted;
 
-      return { address, encrypted, firmwareVersion: identity.firmwareVersion, kind: "ok", mac: identity.strippedMac, model: identity.model,
+      return { address, announcesMac, encrypted, firmwareVersion: identity.firmwareVersion, kind: "ok", mac: identity.strippedMac, model: identity.model,
         name: identity.friendlyName, variant: identity.variant };
     } catch(error) {
 
@@ -821,7 +815,7 @@ export class StatusFeed implements Disposable {
     this.#lifetime.abort(new HbpuAbortError("shutdown"));
     this.#discovery = null;
     this.#warmed.clear();
-    this.#warmedAddresses.clear();
+    this.#warmedAddresses = [];
 
     for(const record of this.#addresses.values()) {
 
@@ -854,11 +848,11 @@ export class StatusFeed implements Disposable {
   /* Open a connection for one known device and hold it as a live session. TOTAL by contract in two layers: the whole body sits in one try/catch so no synchronous or
    * awaited fault escapes, and every push routes through the contained `#emit` so a push sink that throws - the plugin-ui-utils bridge rejecting a pushEvent once the
    * modal has closed the channel - is swallowed rather than escaping. Totality matters because this method is dispatched fire-and-forget, so an escaped rejection would
-   * terminate the custom-UI child process. The key is read ONCE from `#effectiveKey` into a single local that backs BOTH the session record and the openConnection
-   * argument, because the warm diff's correctness rests on those two never diverging. The session is installed in `#sessions` BEFORE the first await, which is the
-   * double-connect guard against advertisement bursts and concurrent warms. Each terminal branch records outcome memory and pushes its classified error (except
-   * shutdown, which stands down silently because the session was torn down mid-connect); a successful open whose session was superseded while connecting disposes its
-   * client silently.
+   * terminate the custom-UI child process. The session records what the connection is offered - the key at this mac, read once - and the connection core keys this
+   * connection for this same mac on its first contact and every reconnect, which is what lets the warm diff compare that record against the key at the same mac now.
+   * The session is installed in `#sessions` BEFORE the first await, which is the double-connect guard against advertisement bursts and concurrent warms. Each terminal
+   * branch records outcome memory and pushes its classified error (except shutdown, which stands down silently because the session was torn down mid-connect); a
+   * successful open whose session was superseded while connecting disposes its client silently.
    *
    * A governed mac is not connected here at all: it is handed to the address dial, because the listed address is where its connection belongs and the identity has to
    * be re-derived on every dial - an address is a place, and what answers there can change. That delegation is what makes a swapped device at a listed address serve
@@ -884,22 +878,17 @@ export class StatusFeed implements Disposable {
     const device = known.device;
 
     /* The feed logs this connection's lifecycle under the name the user knows the device by: the Device.LogName option they set for it, then the mDNS-advertised
-     * friendly name, then the dialed address for a device advertising no usable name. The page resolves that option per device and sends it with the warm request,
-     * because option inheritance is the frontend engine's to walk, and the platform's own lines resolve the same option - so one device reads the same in the settings
-     * page's log as it does in Homebridge's.
+     * friendly name, then the dialed address for a device advertising no usable name. The option is read from the warmed configuration through the same engine call
+     * the platform's own lines resolve it with - so one device reads the same in the settings page's log as it does in Homebridge's.
      *
      * The resolver is a closure rather than a captured string because it is read on every log call, so a warm that changes only the name is carried by the next line
      * this connection writes and moves nothing else. The empty-string guard is deliberate, and it is why each fallback is a logical or rather than a nullish coalesce:
      * an empty name is as unusable an identity as no name at all, and nullish coalescing would let that empty string through as the prefix.
      */
     // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing
-    const log = prefixedLog(this.#log, () => this.#warmed.get(mac)?.logName || device.friendlyName || device.address);
-
-    // The key backs both the session record and the openConnection argument from this one read, so a later warm-set replacement cannot make the two disagree for this
-    // connect.
-    const psk = this.#effectiveKey(mac, this.#warmed.get(mac)?.psk);
-    const session: DeviceSession = { address: device.address, client: null, controller: new AbortController(), encryptedTransport: false, mac, online: false, psk,
-      rowMap: new Map(), stack: new DisposableStack(), token: ++this.#tokenCounter };
+    const log = prefixedLog(this.#log, () => this.#engine.value("Device.LogName", mac) || device.friendlyName || device.address);
+    const session: DeviceSession = { address: device.address, client: null, controller: new AbortController(), encryptedTransport: false, mac,
+      offered: { key: this.#keyFor(mac), mac }, online: false, rowMap: new Map(), stack: new DisposableStack(), token: ++this.#tokenCounter };
 
     try {
 
@@ -909,8 +898,8 @@ export class StatusFeed implements Disposable {
       this.#sessions.set(mac, session);
       this.#pushForSession(session, { kind: "connecting", serialNumber: mac, session: session.token });
 
-      const outcome = await openConnection({ expected: ratgdoInitialStateEntityIds(device.variant), host: device.address, log, openClient: this.#openClient,
-        psk, shutdownSignal: session.controller.signal });
+      const outcome = await openConnection({ expected: ratgdoInitialStateEntityIds(device.variant), host: device.address, keyFor: this.#keyFor, log, mac,
+        openClient: this.#openClient, shutdownSignal: session.controller.signal });
 
       if(!outcome.ok) {
 
@@ -1046,21 +1035,17 @@ export class StatusFeed implements Disposable {
     this.#timers.clear(mac);
   }
 
-  /* The key a mac's connection is opened with. A governed mac reads the key stored against its listed address, because that is where its connection is dialed and
-   * where the Add Device card writes the key it was probed with; every other mac reads the key the sidebar sent for it. Returning the governed answer even when it is
-   * undefined is deliberate: a governed device with no key at its address is a keyless device, not a device that should fall back to a mac-scoped key it was never
-   * connected with.
+  /* Whether the key a connection was offered is no longer the key the lookup answers at the MAC it was chosen for. This is the one key comparison in the pool: the warm
+   * diff, the auth-failure gate for a device with no session, and the address retry gate all ask it, so a connection keyed for the global key is compared against the
+   * global key wherever it is compared, and never against a key stored later at its device's MAC.
    *
-   * @param mac      - The device.
-   * @param sidebarKey - The key the warm entry carried for that mac.
+   * @param offered - What the connection was offered, or undefined when it failed before any key was chosen, which compares as no key chosen for no MAC.
    *
-   * @returns The key to open this device's connection with.
+   * @returns true when a connection opened now would be offered a different key.
    */
-  #effectiveKey(mac: string, sidebarKey: string | undefined): string | undefined {
+  #keyMoved(offered: OfferedKey | undefined): boolean {
 
-    const manualAddress = this.#devices.get(mac)?.manualAddress;
-
-    return (manualAddress === undefined) ? sidebarKey : this.#warmedAddresses.get(manualAddress);
+    return offered?.key !== this.#keyFor(offered?.mac);
   }
 
   /* The one writer of `#devices`. Every route a device identity arrives by - an mDNS advertisement, a manual address the pool dialed and identified - lands here, and
@@ -1102,19 +1087,19 @@ export class StatusFeed implements Disposable {
    *
    * A departure is the only destructive half. Its in-flight dial is aborted, its record dropped, and every mac it governed released - a device the user has stopped
    * naming by address goes back to being an ordinary discovered device, which its next advertisement corrects the address of. The release happens for every state
-   * the departing dial could have ended in, because a device governed by an address the user no longer lists would otherwise keep being dialed there with no key,
-   * ignore its own advertisements from anywhere else, and never be retried. Its live session is left alone, exactly as a mac dropping out of the sidebar leaves its
-   * session alone: a list edit is not a reason to tear down a working connection.
+   * the departing dial could have ended in, because a device governed by an address the user no longer lists would otherwise keep being dialed there, ignore its
+   * own advertisements from anywhere else, and never be retried. Its live session is left alone, exactly as a mac dropping out of the sidebar leaves its session
+   * alone: a list edit is not a reason to tear down a working connection.
    *
-   * @param entries - The addresses the page listed, each already canonical.
+   * @param listed - The addresses the warmed configuration lists, each canonical and dialable, in the user's order.
    */
-  #applyAddresses(entries: readonly WarmAddressEntry[]): void {
+  #applyAddresses(listed: readonly string[]): void {
 
-    const listed = new Map(entries.map((entry) => [ entry.address, entry.psk ]));
+    const kept = new Set(listed);
 
     for(const [ address, record ] of this.#addresses) {
 
-      if(listed.has(address)) {
+      if(kept.has(address)) {
 
         continue;
       }
@@ -1135,11 +1120,11 @@ export class StatusFeed implements Disposable {
 
     this.#warmedAddresses = listed;
 
-    for(const entry of entries) {
+    for(const address of listed) {
 
-      if(this.#shouldDial(entry)) {
+      if(this.#shouldDial(address)) {
 
-        void this.#dialAddress(entry.address);
+        void this.#dialAddress(address);
       }
     }
   }
@@ -1148,16 +1133,16 @@ export class StatusFeed implements Disposable {
    *
    * An address with no record has never been dialed. A dial in flight needs no second one - the record IS the guard. A resolved address is answered, and the device
    * it named is served through its mac from here on. A failed address repeats on exactly the terms the platform's own loop retries on, plus the pool's key rule: a
-   * reachability failure may succeed on the next try, while a refused key repeats only once the key it was refused with has changed, because re-sending the very key
+   * reachability failure may succeed on the next try, while a refused key repeats only once the key it was refused with has moved, because re-sending the very key
    * that just failed is churn that re-flashes the panel for nothing.
    *
-   * @param entry - The listed address and its current key.
+   * @param address - The listed address.
    *
    * @returns true when this warm should dial it.
    */
-  #shouldDial(entry: WarmAddressEntry): boolean {
+  #shouldDial(address: string): boolean {
 
-    const record = this.#addresses.get(entry.address);
+    const record = this.#addresses.get(address);
 
     if(record === undefined) {
 
@@ -1171,7 +1156,7 @@ export class StatusFeed implements Disposable {
 
     if((record.reason === "encryption-invalid") || (record.reason === "encryption-missing")) {
 
-      return record.psk !== entry.psk;
+      return this.#keyMoved(record.offered);
     }
 
     return isRetryableFailure(record.reason);
@@ -1182,9 +1167,9 @@ export class StatusFeed implements Disposable {
    */
   #redialAddresses(): void {
 
-    for(const [ address, psk ] of this.#warmedAddresses) {
+    for(const address of this.#warmedAddresses) {
 
-      if(this.#shouldDial({ address, psk })) {
+      if(this.#shouldDial(address)) {
 
         void this.#dialAddress(address);
       }
@@ -1271,7 +1256,7 @@ export class StatusFeed implements Disposable {
 
     /* ONE dial per address at a time, and the guard lives HERE rather than at each caller, so that every route in meets it: the warm pass walking the listed
      * addresses, a governed device's own connect delegating to its address, and a view of a mac the pool cannot place. A second caller finding a dial already in
-     * flight YIELDS - it does not start a rival dial and it does not wait on one - because the dial already running is dialing the same address with the same key
+     * flight YIELDS - it does not start a rival dial and it does not wait on one - because the dial already running is dialing the same address by the same key rule
      * and will install the same session; a caller that started a second one would race it for the address record and for the mac's session slot.
      */
     if(previous?.state === "dialing") {
@@ -1282,8 +1267,18 @@ export class StatusFeed implements Disposable {
     const controller = new AbortController();
     const log = prefixedLog(this.#log, () => address);
 
-    // The key the address is dialed with, read once here so the failure record and the dial cannot disagree about which key was refused.
-    const psk = this.#warmedAddresses.get(address);
+    /* What this dial offered, recorded by the lookup itself as the connection core calls it - the key, and the MAC the core chose it for - so the failure record and
+     * the session hold exactly what the device was offered rather than a second reading of the configuration. It stays undefined while no key has been chosen: a
+     * dial that failed before the handshake, or a device that answered in plaintext.
+     */
+    let offered: OfferedKey | undefined;
+
+    const keyFor = (mac?: string): string | undefined => {
+
+      offered = { key: this.#keyFor(mac), mac };
+
+      return offered.key;
+    };
 
     this.#addresses.set(address, { controller, state: "dialing" });
 
@@ -1292,7 +1287,7 @@ export class StatusFeed implements Disposable {
       /* The dial is bounded by its own controller AND by the pool's lifetime, composed into one signal. Composing is what lets a departure cancel this one address
        * without touching any other dial, while disposal still ends every one of them.
        */
-      const outcome = await openManualConnection({ host: address, log, openClient: this.#openClient, psk,
+      const outcome = await openManualConnection({ host: address, keyFor, log, openClient: this.#openClient,
         shutdownSignal: composeSignals(controller.signal, this.#lifetime.signal) });
 
       /* Is this dial still the one that owns the address? A departure aborts an in-flight dial and DELETES its record, so a dial whose record has gone - or has been
@@ -1315,8 +1310,8 @@ export class StatusFeed implements Disposable {
 
       if(!outcome.ok) {
 
-        this.#addresses.set(address, { psk, reason: outcome.reason, state: "failed" });
-        this.#reportAddressFailure(address, outcome.reason, onBehalfOf);
+        this.#addresses.set(address, { offered, reason: outcome.reason, state: "failed" });
+        this.#reportAddressFailure(address, outcome.reason, onBehalfOf, offered);
 
         return;
       }
@@ -1329,7 +1324,7 @@ export class StatusFeed implements Disposable {
       /* Which address governs this device, decided exactly as the platform decides it: by the user's own list order, never by which dial happened to answer first.
        * Two listed addresses can reach one opener, and the races between them go differently on every run, so order is the only answer that is stable.
        */
-      const governing = governingAddress(this.#devices.get(mac)?.manualAddress, address, [...this.#warmedAddresses.keys()]);
+      const governing = governingAddress(this.#devices.get(mac)?.manualAddress, address, this.#warmedAddresses);
 
       /* Whoever else was claiming this address gives it up here, inside the write. There is deliberately no separate "what did the record say before" comparison: a
        * dial that began from an address the pool had never placed, or had last seen fail, has no previous claim in hand, which is precisely the case such a
@@ -1360,16 +1355,17 @@ export class StatusFeed implements Disposable {
         this.#teardownSession(mac);
       }
 
-      const session: DeviceSession = { address, client: null, controller, encryptedTransport: false, mac, online: false, psk, rowMap: new Map(),
-        stack: new DisposableStack(), token: ++this.#tokenCounter };
+      // A device that answered in plaintext chose no key, so its record is the key at its own MAC, exactly as a discovered session's is.
+      const session: DeviceSession = { address, client: null, controller, encryptedTransport: false, mac, offered: offered ?? { key: this.#keyFor(mac), mac },
+        online: false, rowMap: new Map(), stack: new DisposableStack(), token: ++this.#tokenCounter };
 
       this.#sessions.set(mac, session);
       this.#adoptConnection({ client: outcome.client, initialState: outcome.initialState, session, variant: identity.variant });
     } catch(error) {
 
       log.error("The live-status connection failed unexpectedly.", error);
-      this.#addresses.set(address, { psk, reason: "unknown", state: "failed" });
-      this.#reportAddressFailure(address, "unknown", onBehalfOf);
+      this.#addresses.set(address, { offered, reason: "unknown", state: "failed" });
+      this.#reportAddressFailure(address, "unknown", onBehalfOf, offered);
     } finally {
 
       /* Whatever happened above, this address is not dialing any more. The guard is only ever released against THIS dial's own record: a departure that aborted this
@@ -1393,8 +1389,9 @@ export class StatusFeed implements Disposable {
    * @param address - The address that failed.
    * @param reason  - The classified reason it failed.
    * @param mac     - The device this dial was answering for, when one asked.
+   * @param offered - What the failed dial was offered, or undefined when it failed before any key was chosen.
    */
-  #reportAddressFailure(address: string, reason: ManualConnectionFailureReason, mac: string | undefined): void {
+  #reportAddressFailure(address: string, reason: ManualConnectionFailureReason, mac: string | undefined, offered: OfferedKey | undefined): void {
 
     const classified = statusErrorFor(reason);
 
@@ -1425,8 +1422,8 @@ export class StatusFeed implements Disposable {
      */
     this.#teardownSession(mac);
 
-    const session: DeviceSession = { address, client: null, controller: new AbortController(), encryptedTransport: false, mac, online: false,
-      psk: this.#warmedAddresses.get(address), rowMap: new Map(), stack: new DisposableStack(), token: ++this.#tokenCounter };
+    const session: DeviceSession = { address, client: null, controller: new AbortController(), encryptedTransport: false, mac, offered, online: false,
+      rowMap: new Map(), stack: new DisposableStack(), token: ++this.#tokenCounter };
 
     this.#sessions.set(mac, session);
     this.#recordFailure(session, classified);
@@ -1586,9 +1583,9 @@ export class StatusFeed implements Disposable {
       return;
     }
 
-    // Store the not-found verdict with an undefined key: the retry gate pairs the stored key with the auth reasons alone - an unsupported verdict suppresses without
-    // reading it, and not-found is not suppressed at all - so the key is inert here, and this write site has no session in scope to read one from.
-    this.#outcomes.set(mac, { psk: undefined, reason: "not-found" });
+    // Store the not-found verdict with no offered record: the retry gate pairs the record with the auth reasons alone - an unsupported verdict suppresses without
+    // reading it, and not-found is not suppressed at all - so the record is inert here, and nothing was ever offered to a device that was never found.
+    this.#outcomes.set(mac, { offered: undefined, reason: "not-found" });
     this.#emit({ kind: "error", reason: "not-found", serialNumber: mac, session: ++this.#tokenCounter });
   }
 
@@ -1622,9 +1619,9 @@ export class StatusFeed implements Disposable {
 
   /* Record a terminal connection failure for the current session's device and surface it. Only the session still installed for the mac owns the mac's outcome memory and
    * session slot, so a session the map no longer holds writes nothing: either a successor owns the device now, or the pool was disposed out from under this connect and
-   * there is nothing left to write to. On the current session: write the classified reason AND the key it failed with - so a later warm can tell a doomed resend of that
-   * same key from a genuine retry with a changed one - to outcome memory, push the error, and remove the session so the device reads as failed-with-no-session until a
-   * re-warm or a view retries it.
+   * there is nothing left to write to. On the current session: write the classified reason AND what the connection was offered - so a later warm can tell a doomed
+   * resend of that same key from a genuine retry with a changed one - to outcome memory, push the error, and remove the session so the device reads as
+   * failed-with-no-session until a re-warm or a view retries it.
    */
   #recordFailure(session: DeviceSession, reason: StatusErrorReason): void {
 
@@ -1633,7 +1630,7 @@ export class StatusFeed implements Disposable {
       return;
     }
 
-    this.#outcomes.set(session.mac, { psk: session.psk, reason });
+    this.#outcomes.set(session.mac, { offered: session.offered, reason });
     this.#emit({ kind: "error", reason, serialNumber: session.mac, session: session.token });
     this.#sessions.delete(session.mac);
   }

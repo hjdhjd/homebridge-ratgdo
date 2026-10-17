@@ -1,19 +1,22 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
  * connection.test.ts: Unit tests for the connection layer - captureInitialState's fast / slow / timeout / shutdown paths, the error taxonomy both entry points
- * classify with, openManualConnection's identification of whatever answered at an address, applyDeviceInfo's identity refresh, and the isEncryptionError predicate.
+ * classify with, openManualConnection's identification of whatever answered at an address, the key rule and the identity checks every connection runs through,
+ * applyDeviceInfo's identity refresh, and the isEncryptionError predicate.
  * The ESPHome client factory is injected as a fake (makeFakeOpenClient), and the state-capture budget (timeoutSeconds) is injected in fractional seconds (e.g. 0.02)
  * so each wait resolves in milliseconds of real time, driving every branch deterministically without a live device, fake timers, or a fake Homebridge harness.
  */
 import { AuthenticationError, EncryptionKeyInvalidError, EncryptionKeyMissingError, EncryptionRequiredError, NegotiationFailedError,
   entityId } from "esphome-client";
-import type { DeviceInfo, EntityId, TelemetryEvent } from "esphome-client";
+import { DeviceIdentityError, applyDeviceInfo, captureInitialState, isEncryptionError, openConnection, openManualConnection } from "./connection.ts";
+import type { DeviceInfo, EntityId, NoiseServerHello, TelemetryEvent } from "esphome-client";
+import type { EncryptionKeyLookup, OpenEspHomeClient } from "./connection.ts";
 import { RATGDO_ENTITIES, idFor, ratgdoInitialStateEntityIds } from "./entities.ts";
-import { TestEspHomeClient, asEspHomeClient, makeCoverEvent, makeFakeOpenClient, makeLightEvent, makeTelemetry, makeTestDevice } from "./testing.helpers.ts";
-import { applyDeviceInfo, captureInitialState, isEncryptionError, openConnection, openManualConnection } from "./connection.ts";
-import { capturingLog, loggedAt } from "homebridge-plugin-utils/testing";
+import { TestEspHomeClient, asEspHomeClient, makeCoverEvent, makeFakeOpenClient, makeLightEvent, makeTelemetry, makeTestDevice, openThroughHello,
+  resolverOf } from "./testing.helpers.ts";
+import { capturingLog, logCount, loggedAt } from "homebridge-plugin-utils/testing";
 import { describe, test } from "node:test";
-import type { OpenEspHomeClient } from "./connection.ts";
+import type { Nullable } from "homebridge-plugin-utils";
 import type { RatgdoEntityRef } from "./entities.ts";
 import { RatgdoVariant } from "./types.ts";
 import type { RecordedOpenOptions } from "./testing.helpers.ts";
@@ -127,7 +130,8 @@ describe("openConnection", () => {
   const run = async (openClient: ReturnType<typeof makeFakeOpenClient>, overrides: Partial<Parameters<typeof openConnection>[0]> = {}) => {
 
     const log = capturingLog();
-    const result = await openConnection({ expected: [coverId], host: "192.0.2.10", log, openClient, shutdownSignal: new AbortController().signal, ...overrides });
+    const result = await openConnection({ expected: [coverId], host: "192.0.2.10", keyFor: () => undefined, log, mac: "AABBCCDDEEFF", openClient,
+      shutdownSignal: new AbortController().signal, ...overrides });
 
     return { entries: log.entries, result };
   };
@@ -137,7 +141,7 @@ describe("openConnection", () => {
     const client = connectedClient();
     const openClient = makeFakeOpenClient(client);
     const shutdownSignal = new AbortController().signal;
-    const { entries, result } = await run(openClient, { psk: "test-psk", shutdownSignal });
+    const { entries, result } = await run(openClient, { keyFor: (mac) => (mac === "AABBCCDDEEFF") ? "test-psk" : undefined, shutdownSignal });
 
     assert.ok(result.ok, "a connected client with a complete snapshot yields a success outcome");
     assert.equal(result.client, client, "the resolved client is returned");
@@ -145,14 +149,14 @@ describe("openConnection", () => {
     assert.equal(client.disposeCount, 0, "a successful open does not dispose the client");
     assert.equal(entries.filter((entry) => entry.level === "error").length, 0, "the success path logs nothing at error level");
 
-    // The headline of the client-factory port: the platform resolves the encryption key and threads a concrete psk through openConnection into the factory. Assert that
-    // the factory received exactly what openConnection forwards - the static clientId, the host, the resolved psk unchanged, and the caller's own shutdown signal by
-    // reference - since 100% line coverage alone would not catch openConnection passing the wrong host, dropping the psk, or handing the factory a different signal
-    // than the one that cancels the call.
+    // The headline of the client-factory port: the caller's key lookup reaches the factory as the resolver the client keys through. Assert that the factory received
+    // exactly what openConnection forwards - the static clientId, the host, a resolver answering the caller's key, and the caller's own shutdown signal by reference -
+    // since 100% line coverage alone would not catch openConnection passing the wrong host, dropping the key, or handing the factory a different signal than the one
+    // that cancels the call.
     assert.equal(openClient.calls.length, 1, "openConnection invokes the factory exactly once");
     assert.equal(openClient.calls[0]?.clientId, "homebridge-ratgdo", "the static clientId is forwarded to the factory");
     assert.equal(openClient.calls[0]?.host, "192.0.2.10", "the host is forwarded to the factory");
-    assert.equal(openClient.calls[0]?.psk, "test-psk", "the resolved psk threads through openConnection to the factory unchanged");
+    assert.equal(resolverOf(openClient.calls[0])({}), "test-psk", "the resolver the factory received answers the caller's key for this device");
     assert.equal(openClient.calls[0]?.signal, shutdownSignal, "the caller's shutdown signal reaches the factory by reference, so an abort cancels the call itself");
   });
 
@@ -259,7 +263,8 @@ describe("openConnection", () => {
     }) as unknown as OpenEspHomeClient;
 
     const log = capturingLog();
-    const pending = openConnection({ expected: [coverId], host: "192.0.2.10", log, openClient, shutdownSignal: controller.signal });
+    const pending = openConnection({ expected: [coverId], host: "192.0.2.10", keyFor: () => undefined, log, mac: "AABBCCDDEEFF", openClient,
+      shutdownSignal: controller.signal });
 
     controller.abort("shutdown");
 
@@ -307,7 +312,8 @@ describe("openManualConnection", () => {
 
     const log = capturingLog();
     const openClient = makeFakeOpenClient(result);
-    const outcome = await openManualConnection({ host: DIALED, log, openClient, shutdownSignal: new AbortController().signal, ...overrides });
+    const outcome = await openManualConnection({ host: DIALED, keyFor: () => undefined, log, openClient, shutdownSignal: new AbortController().signal,
+      ...overrides });
 
     return { entries: log.entries, openClient, outcome };
   };
@@ -315,7 +321,7 @@ describe("openManualConnection", () => {
   test("success: resolves the identity the device-info record named alongside the connected client and its captured state", async () => {
 
     const client = new TestEspHomeClient({ deviceInfo: ratgdoInfo, entities: bothVariants, snapshot: snapshotFor(RatgdoVariant.RATGDO) });
-    const { entries, openClient, outcome } = await dial(client, { psk: "test-psk", timeoutSeconds: 0.05 });
+    const { entries, openClient, outcome } = await dial(client, { keyFor: () => "test-psk", timeoutSeconds: 0.05 });
 
     assert.ok(outcome.ok, "a device that answers, identifies, and pushes its state yields a success outcome");
     assert.equal(outcome.discovered.strippedMac, "AABBCCDDEEFF", "the MAC the record carried is the identity the caller receives");
@@ -326,7 +332,7 @@ describe("openManualConnection", () => {
     assert.equal(outcome.initialState, client.snapshot(), "the captured initial state is the client's populated cache");
     assert.equal(client.disposeCount, 0, "a successful dial does not dispose the client");
     assert.equal(openClient.calls[0]?.host, DIALED, "the listed address is the host the factory was given");
-    assert.equal(openClient.calls[0]?.psk, "test-psk", "the resolved key threads through to the factory unchanged");
+    assert.equal(resolverOf(openClient.calls[0])({}), "test-psk", "the resolver the factory received answers the caller's key");
     assert.equal(entries.filter((entry) => entry.level === "error").length, 0, "the success path logs nothing at error level");
   });
 
@@ -408,10 +414,10 @@ describe("openManualConnection", () => {
 
         const manualLog = capturingLog();
         const discoveredLog = capturingLog();
-        const manual = await openManualConnection({ host: DIALED, log: manualLog, openClient: makeFakeOpenClient(error),
+        const manual = await openManualConnection({ host: DIALED, keyFor: () => undefined, log: manualLog, openClient: makeFakeOpenClient(error),
           shutdownSignal: new AbortController().signal });
-        const discovered = await openConnection({ expected: [], host: DIALED, log: discoveredLog, openClient: makeFakeOpenClient(error),
-          shutdownSignal: new AbortController().signal });
+        const discovered = await openConnection({ expected: [], host: DIALED, keyFor: () => undefined, log: discoveredLog, mac: "AABBCCDDEEFF",
+          openClient: makeFakeOpenClient(error), shutdownSignal: new AbortController().signal });
 
         assert.ok(!manual.ok, "the address dial refuses the connect");
         assert.ok(!discovered.ok, "and so does the discovered connect");
@@ -419,6 +425,188 @@ describe("openManualConnection", () => {
         assert.deepEqual(manualLog.entries, discoveredLog.entries, "and so is every diagnostic the user sees, because one body emits them");
       });
     }
+  });
+});
+
+describe("the key rule and the identity checks", () => {
+
+  // The device each connection below is for, in the plugin's identity form, and the same MAC as a device-info record and a server hello spell it.
+  const MAC = "AABBCCDDEEFF";
+  const MAC_COLON = "AA:BB:CC:DD:EE:FF";
+
+  // Another device, which answers where the one above was expected.
+  const OTHER = "112233445566";
+  const OTHER_COLON = "11:22:33:44:55:66";
+
+  // The refusal the connect core logs, as a format string whose one argument is the error's message.
+  const REFUSAL = "The wrong device answered, so the connection is refused: ";
+
+  // The firmware warning a first contact keyed for no MAC adds to an encryption failure.
+  const FIRMWARE_WARNING = "This device can use only the global encryption key, because its firmware does not announce its MAC address. Update it to ESPHome " +
+    "2025.4.0 or newer to give it a key of its own.";
+
+  /* A key store that inherits the way the feature-option engine does: a MAC's own key when it has one, otherwise the global key. It records every MAC it is asked for
+   * - undefined for the global key - so a row can prove which identity a key was chosen for, and its store is mutable so a row can add a key after a connection opened.
+   */
+  const keyStore = (keys: Record<string, string>, global?: string): { asked: (string | undefined)[]; keyFor: EncryptionKeyLookup; keys: Record<string, string> } => {
+
+    const asked: (string | undefined)[] = [];
+
+    return { asked, keyFor: (mac?: string): string | undefined => {
+
+      asked.push(mac);
+
+      return ((mac === undefined) ? undefined : keys[mac]) ?? global;
+    }, keys };
+  };
+
+  // A connected opener whose device-info record names the given MAC, or none, with its whole initial state already pushed so the capture resolves at once.
+  const opener = (macAddress?: string): TestEspHomeClient => new TestEspHomeClient({ deviceInfo: { esphomeVersion: "2025.4.0", macAddress, projectName: "ratgdo.esp32" },
+    entities: [], snapshot: new Map() });
+
+  // Open a discovered device's connection for MAC, through the given factory and key store.
+  const discover = async (openClient: ReturnType<typeof makeFakeOpenClient>, keyFor: EncryptionKeyLookup) => {
+
+    const log = capturingLog();
+    const result = await openConnection({ expected: [], host: "192.0.2.10", keyFor, log, mac: MAC, openClient, shutdownSignal: new AbortController().signal });
+
+    return { entries: log.entries, result };
+  };
+
+  // Open a listed address's connection, through the given factory and key store.
+  const dialAddress = async (openClient: ReturnType<typeof makeFakeOpenClient>, keyFor: EncryptionKeyLookup) => {
+
+    const log = capturingLog();
+    const result = await openManualConnection({ host: "192.0.2.10", keyFor, log, openClient, shutdownSignal: new AbortController().signal, timeoutSeconds: 0.05 });
+
+    return { entries: log.entries, result };
+  };
+
+  test("a discovered connection keyed at its MAC answers its key to a hello announcing that MAC in the wire's colon form", async () => {
+
+    const { keyFor } = keyStore({ [MAC]: "device-key" }, "global-key");
+    const openClient = makeFakeOpenClient(opener(MAC_COLON));
+    const { result } = await discover(openClient, keyFor);
+
+    assert.ok(result.ok, "the device connects");
+    assert.equal(resolverOf(openClient.calls[0])({ macAddress: MAC_COLON }), "device-key",
+      "the hello's colon spelling and the connection's identity form name one device, so the resolver answers that device's own key");
+  });
+
+  test("a discovered connection refuses a hello announcing another MAC before any key is chosen for it", async () => {
+
+    const client = opener(OTHER_COLON);
+    const store = keyStore({ [MAC]: "device-key" }, "global-key");
+    const { entries, result } = await discover(makeFakeOpenClient(openThroughHello({ client, hello: { macAddress: OTHER_COLON } })), store.keyFor);
+
+    assert.ok(!result.ok, "the connection is refused, so no client is handed back");
+    assert.equal(result.reason, "identity-mismatch", "the refusal is its own reason");
+    assert.ok(!store.asked.includes(OTHER), "the lookup is never read for the MAC the hello announced, so no key is chosen for the device that answered");
+    assert.equal(logCount(entries, "error", REFUSAL + OTHER + " answered, but this connection is for " + MAC + "."), 1,
+      "the refusal is logged once, naming the device that answered and the device the connection is for");
+  });
+
+  test("a discovered connection whose MAC holds no key opens plaintext-first, with no resolver", async () => {
+
+    const openClient = makeFakeOpenClient(opener(MAC_COLON));
+    const { result } = await discover(openClient, keyStore({}).keyFor);
+
+    assert.ok(result.ok, "a keyless device connects");
+    assert.equal(openClient.calls[0]?.psk, null, "the client is handed no resolver, so it tries plaintext first as it always has for a keyless device");
+  });
+
+  test("an address connection keys for the MAC its hello announces, else the global key, and warns about firmware that announces none", async () => {
+
+    /* The device's side of the handshake, played by hand: the resolver is handed the hello, what it answers is recorded, and the device then refuses that key. The
+     * refusal is what triggers the firmware warning, and it keeps admission out of this row, which is about key choice alone.
+     */
+    const answered: Nullable<string>[] = [];
+    const refusing = (hello: NoiseServerHello): ReturnType<typeof makeFakeOpenClient> => makeFakeOpenClient(async (options) => {
+
+      answered.push(resolverOf(options)(hello));
+
+      throw new EncryptionKeyInvalidError("bad key");
+    });
+
+    const announcing = await dialAddress(refusing({ macAddress: MAC_COLON }), keyStore({ [MAC]: "device-key" }, "global-key").keyFor);
+
+    assert.equal(answered[0], "device-key", "a hello announcing a MAC is offered the key stored for that MAC");
+    assert.ok(!announcing.result.ok && (announcing.result.reason === "encryption-invalid"), "the refused key classifies as a key fault");
+    assert.equal(logCount(announcing.entries, "warn", FIRMWARE_WARNING), 0, "a device that announced its MAC is not told its firmware cannot");
+
+    const silent = await dialAddress(refusing({}), keyStore({ [MAC]: "device-key" }, "global-key").keyFor);
+
+    assert.equal(answered[1], "global-key", "a hello naming no MAC is offered the global key");
+    assert.deepEqual(silent.entries.map((entry) => entry.level), [ "error", "warn" ], "the key fault is logged first, and the firmware warning follows it");
+    assert.equal(logCount(silent.entries, "warn", FIRMWARE_WARNING), 1, "the warning names the limit and the fix");
+  });
+
+  test("a connection keyed for a MAC refuses a device whose device-info record names another", async () => {
+
+    const client = opener(OTHER_COLON);
+    const { entries, result } = await discover(makeFakeOpenClient(openThroughHello({ client, hello: {} })), keyStore({ [MAC]: "device-key" }).keyFor);
+
+    assert.ok(!result.ok, "the connection is refused");
+    assert.equal(result.reason, "identity-mismatch", "an authenticated device that is not the one the key was chosen for is the same refusal as a foreign hello");
+    assert.equal(logCount(entries, "error", REFUSAL + OTHER + " answered, but this connection is for " + MAC + "."), 1,
+      "the refusal is logged once, naming both MACs");
+    assert.equal(client.disposeCount, 1, "and the client it opened is disposed, once");
+  });
+
+  test("a connection keyed for a MAC admits a device whose device-info record names that MAC in the wire's colon form", async () => {
+
+    const client = opener(MAC_COLON);
+    const { result } = await discover(makeFakeOpenClient(openThroughHello({ client, hello: {} })), keyStore({ [MAC]: "device-key" }).keyFor);
+
+    assert.ok(result.ok, "the device-info record's colon spelling and the keyed-for identity form name one device, so the device is admitted");
+    assert.equal(client.disposeCount, 0, "and its client is handed back live");
+  });
+
+  test("an admitted address connection refuses a later hello announcing another MAC, naming both", async () => {
+
+    const client = opener(MAC_COLON);
+    const openClient = makeFakeOpenClient(openThroughHello({ client, hello: {} }));
+    const { result } = await dialAddress(openClient, keyStore({}, "global-key").keyFor);
+
+    assert.ok(result.ok, "the device is admitted at its first contact");
+    assert.throws(() => resolverOf(openClient.calls[0])({ macAddress: OTHER_COLON }), (error) => (error instanceof DeviceIdentityError) &&
+      (error.message === OTHER + " answered, but this connection is for " + MAC + "."),
+    "a reconnect's hello from another device is refused before a key is chosen, naming the device that answered and the one the connection was admitted as");
+  });
+
+  test("an admitted old-firmware address connection keeps offering the global key after a key is stored for its MAC", async () => {
+
+    const client = opener(MAC_COLON);
+    const store = keyStore({}, "global-key");
+    const openClient = makeFakeOpenClient(openThroughHello({ client, hello: {} }));
+    const { result } = await dialAddress(openClient, store.keyFor);
+
+    assert.ok(result.ok, "the device is admitted on the global key");
+
+    store.keys[MAC] = "device-key";
+
+    assert.equal(resolverOf(openClient.calls[0])({}), "global-key",
+      "a reconnect makes the same key choice its first contact made, so the MAC the connection was admitted as never chooses its key");
+  });
+
+  test("a connection keyed for a MAC refuses a device whose device-info record names no MAC at all", async () => {
+
+    const client = opener();
+    const { entries, result } = await discover(makeFakeOpenClient(openThroughHello({ client, hello: {} })), keyStore({ [MAC]: "device-key" }).keyFor);
+
+    assert.ok(!result.ok, "the connection is refused");
+    assert.equal(result.reason, "identity-mismatch", "a device that reports no MAC cannot be the one the key was chosen for");
+    assert.ok(loggedAt(entries, "error", REFUSAL + "a device reporting no MAC address answered, but this connection is for " + MAC + "."),
+      "the refusal says the device named no MAC");
+  });
+
+  test("a stored key that is empty reads as no key at all", async () => {
+
+    const client = opener(MAC_COLON);
+    const { result } = await dialAddress(makeFakeOpenClient(openThroughHello({ client, hello: { macAddress: MAC_COLON } })), keyStore({ [MAC]: "" }).keyFor);
+
+    assert.ok(!result.ok, "a device that requires a key is refused");
+    assert.equal(result.reason, "encryption-missing", "an empty entry is answered to the client as no key, which it reports as a missing key");
   });
 });
 

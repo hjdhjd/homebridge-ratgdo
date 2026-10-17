@@ -101,9 +101,9 @@ export function manualAddressList(values: readonly string[]): readonly string[] 
  * and `unknown` are both that same class of answer - the connect layer's own documentation treats them as one, and every existing consumer acts on them together -
  * so this predicate keeps them together rather than splitting a distinction no caller makes. A budget the device blew through is the same story from a slower device.
  *
- * Nothing else changes without a person acting. A key the device refuses, an API version this plugin cannot speak, and a device that is not an opener at all all stay
- * exactly as wrong on the thousandth attempt as on the first; shutdown means the plugin is going away. Each of those ends the address's loop until the plugin
- * restarts, which is what keeps a misconfigured address from dialing a device forever.
+ * Nothing else changes without a person acting. A key the device refuses, an API version this plugin cannot speak, a device that is not an opener at all, and a
+ * device answering as a MAC other than the one the connection is for all stay exactly as wrong on the thousandth attempt as on the first; shutdown means the plugin
+ * is going away. Each of those ends the address's loop until the plugin restarts, which is what keeps a misconfigured address from dialing a device forever.
  *
  * @param reason - The classified reason the dial failed.
  *
@@ -121,6 +121,7 @@ export function isRetryableFailure(reason: ManualConnectionFailureReason): boole
 
     case "encryption-invalid":
     case "encryption-missing":
+    case "identity-mismatch":
     case "shutdown":
     case "unrecognized":
     case "unsupported":
@@ -176,8 +177,8 @@ export function governingAddress(current: string | undefined, candidate: string,
  * way out of also ends the loop, after telling the user what to do about the two failures they can actually fix. Anything else pauses and goes round again.
  *
  * The pause is wakeable, which is what closes the window this loop would otherwise sit in: discovery can configure this very device, at this very address, a second
- * after a failed attempt starts its five-minute pause, and a plain delay would leave the loop dialing a device that is already connected. The platform wakes the
- * pause at its admit chokepoint, the loop re-reads isServed, and it ends.
+ * after a failed attempt starts the pause between attempts, and a plain delay would leave the loop dialing a device that is already connected. The platform wakes
+ * the pause at its admit chokepoint, the loop re-reads isServed, and it ends.
  *
  * The lifetime is the pause's, not this function's: `wait` rejects with the shutdown signal's own reason, and that rejection unwinds the loop for the supervisor
  * above to swallow. There is nothing here to clean up on the way out, because the loop never holds a client - the dial hands every client it opens to the platform,
@@ -215,9 +216,9 @@ export async function runManualAddress({ address, dial, isServed, log, pause, re
 
     if(!isRetryableFailure(outcome.reason)) {
 
-      /* The two failures a user can fix from the settings page get a line naming where. A key that reaches a manually addressed device has to be stored against the
-       * address, because the device has no MAC we know yet, and the Add Device card is the one place that writes both together - so a user who typed the key onto
-       * the device's own row in the sidebar would otherwise see this failure repeat with no hint about why the key they just set was not used.
+      /* The two failures a user can fix from the settings page get a line naming where. A device that has never connected has no row in the sidebar yet, so there is
+       * nowhere else to set its key; the Add Device card learns the device's MAC by testing this address, and stores the key at that MAC, where this address's
+       * connection reads it.
        */
       if((outcome.reason === "encryption-invalid") || (outcome.reason === "encryption-missing")) {
 

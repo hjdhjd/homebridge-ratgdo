@@ -5,14 +5,13 @@
  * feature-option consumer (the FeatureOptions engine, the WebUI, the docs renderer) depends on.
  */
 import type { FeatureCategoryEntry, FeatureOptionEntry } from "homebridge-plugin-utils";
-import { FeatureOptions, scopeSafeId } from "homebridge-plugin-utils";
 import { describe, test } from "node:test";
-import { describeCategoryScope, describeOptionScope, featureOptionCategories, featureOptions, manualAddressScope, normalizeConfig } from "./options.ts";
+import { describeCategoryScope, describeOptionScope, featureOptionCategories, featureOptions, normalizeConfig } from "./options.ts";
+import { FeatureOptions } from "homebridge-plugin-utils";
 import type { PlatformConfig } from "homebridge";
 import type { RatgdoOptionMeta } from "./options.ts";
 import { RatgdoVariant } from "./types.ts";
 import assert from "node:assert/strict";
-import { manualAddressList } from "./manual.ts";
 
 /* normalizeConfig accepts a Homebridge PlatformConfig (an open index-signature shape sourced from user JSON). We build plain objects and cast them at the
  * call boundary to PlatformConfig, exactly as the production boundary receives them, so each test exercises the real typeof / Array.isArray narrowing rather
@@ -400,9 +399,8 @@ describe("the feature-option catalog", () => {
   });
 });
 
-/* The manual-address option and the identity a device reached at one resolves its options at, driven against a REAL engine over the REAL catalog. The engine is what
- * these assertions are really about: the address identity is an id the engine has never seen the shape of before, and the whole design rests on it treating that id
- * as opaque and walking to the global entry when it finds nothing there.
+/* The manual-address option, driven against a REAL engine over the REAL catalog: the list entry the catalog declares, and the list the engine reads back from it,
+ * which is the one read both the platform and the settings page's live-status feed take their listed addresses from.
  */
 describe("manual device addresses", () => {
 
@@ -426,95 +424,6 @@ describe("manual device addresses", () => {
       assert.deepEqual(engineFor([]).valueList({ option: "Device.Address" }), [], "an install that listed no address has no addresses to dial");
       assert.deepEqual(engineFor(["Enable.Device.Address=garage.local, 10.0.0.20"]).valueList({ option: "Device.Address" }), [ "garage.local", "10.0.0.20" ],
         "a stored list reads back as its entries, trimmed and in the user's order");
-    });
-  });
-
-  describe("manualAddressScope", () => {
-
-    /* The three address shapes a user can type, and what each becomes as an engine id. The periods are what matter: the engine's stored form is an option name, a
-     * period, and an id, so an id carrying periods of its own would be read back as some other option entirely.
-     */
-    const rows: { address: string; scope: string; why: string }[] = [
-
-      { address: "172.16.0.131", scope: "172-16-0-131", why: "an IPv4 address has each period replaced, so its entry cannot be mistaken for a longer option name" },
-      { address: "garage.local", scope: "garage-local", why: "a hostname's dots are replaced the same way" },
-      { address: "fd00::1", scope: "fd00::1", why: "an IPv6 literal carries no periods and passes through untouched, colons and all" }
-    ];
-
-    for(const { address, scope, why } of rows) {
-
-      test(address + " scopes to " + scope, () => {
-
-        assert.equal(manualAddressScope(address), scope, why);
-        assert.equal(manualAddressScope(address), scopeSafeId(address), "the scope is the framework's own id rule and nothing added on top of it");
-      });
-    }
-
-    test("gives the bracketed and bare spellings of one literal the same id, because it is fed an already-canonical address", () => {
-
-      /* This function is deliberately scopeSafeId and nothing else - it takes an address that has ALREADY been canonicalized, which is why it needs no bracket rule
-       * of its own. The proof that the pairing works is this: run both spellings through the canonical form first, as every caller does, and the two land on one id.
-       * Asserting it without that step would assert the opposite, since scopeSafeId replaces only periods and equals signs and leaves a bracket exactly where it is.
-       */
-      const [bracketed] = manualAddressList(["[2001:DB8::5]"]);
-      const [bare] = manualAddressList(["2001:db8::5"]);
-
-      assert.ok(bracketed && bare, "both spellings canonicalize to a list entry");
-      assert.equal(manualAddressScope(bracketed), manualAddressScope(bare), "the two spellings reach one identity, so a key stored under one is found under the other");
-      assert.equal(manualAddressScope(bracketed), "2001:db8::5", "and that identity is the bare literal, which carries no periods for scopeSafeId to replace");
-    });
-
-    test("is the framework's id rule alone, with no canonicalization of its own", () => {
-
-      // The pairing only holds if the canonicalization stays upstream. A bracketed address handed straight here keeps its brackets, which is what this asserts - the
-      // fix belongs in the list, not in the scope.
-      assert.equal(manualAddressScope("[2001:db8::5]"), "[2001:db8::5]", "an un-canonicalized address is passed through, brackets and all");
-    });
-  });
-
-  describe("the key a manual dial reads", () => {
-
-    /* The precedence the manual dial depends on, driven through the REAL engine rather than described. The address entry is stored at the address identity and the
-     * global entry at no identity at all, and the read asks for the address identity in the DEVICE argument - so this asserts that the engine treats an id it has
-     * never seen the shape of as an opaque device id, finds the entry stored there, and walks to the global entry when it finds none.
-     */
-    const address = "172.16.0.131";
-    const scope = manualAddressScope(address);
-
-    test("the address entry wins over the global key", () => {
-
-      const engine = engineFor([ "Enable.Device.Encryption.Key." + scope + "=address-key", "Enable.Device.Encryption.Key=global-key" ]);
-
-      assert.equal(engine.value("Device.Encryption.Key", scope), "address-key", "a key stored against this address is the key this address dials with");
-    });
-
-    test("the global key answers for an address with no entry of its own", () => {
-
-      const engine = engineFor(["Enable.Device.Encryption.Key=global-key"]);
-
-      assert.equal(engine.value("Device.Encryption.Key", manualAddressScope("10.0.0.20")), "global-key",
-        "an install with one key for every device needs no per-address entry, so the lookup walks past the address to the global level");
-    });
-
-    test("an address with no entry and no global key resolves nothing", () => {
-
-      assert.equal(engineFor([]).value("Device.Encryption.Key", scope), null, "an unencrypted device is dialed with no key rather than an empty one");
-    });
-
-    test("a key stored at one address does not leak to another", () => {
-
-      const engine = engineFor(["Enable.Device.Encryption.Key." + scope + "=address-key"]);
-
-      assert.equal(engine.value("Device.Encryption.Key", manualAddressScope("garage.local")), null,
-        "each listed address resolves its own key, so one encrypted device's key never reaches a second device the user listed");
-    });
-
-    test("the hostname and IPv4 forms of one device are separate identities", () => {
-
-      const engine = engineFor([ "Enable.Device.Encryption.Key." + scope + "=by-address", "Enable.Device.Encryption.Key.garage-local=by-name" ]);
-
-      assert.equal(engine.value("Device.Encryption.Key", scope), "by-address", "the address entry answers for the address");
-      assert.equal(engine.value("Device.Encryption.Key", manualAddressScope("garage.local")), "by-name", "and the hostname entry answers for the hostname");
     });
   });
 });

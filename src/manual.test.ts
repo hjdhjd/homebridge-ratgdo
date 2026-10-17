@@ -2,7 +2,7 @@
  *
  * manual.test.ts: The manual-address concern net - the canonical address list, the retryable-failure classification, the governance rule that settles two addresses
  * reaching one device, and the connect loop itself. The loop is pure over its ports, so every rule it follows is driven here directly: the dial, the readiness test,
- * and the log are all supplied by the test, and the pause runs on a TestClock so a five-minute retry interval is asserted in virtual time rather than waited out.
+ * and the log are all supplied by the test, and the pause runs on a TestClock so the pause between attempts is asserted in virtual time rather than waited out.
  */
 import { TestClock, capturingLog, expectAt, loggedAt, settle } from "homebridge-plugin-utils/testing";
 import { canonicalManualAddress, governingAddress, isRetryableFailure, isZonedAddress, manualAddressList, runManualAddress } from "./manual.ts";
@@ -118,6 +118,7 @@ describe("isRetryableFailure", () => {
 
     "encryption-invalid": false,
     "encryption-missing": false,
+    "identity-mismatch": false,
     "permanent": true,
     "shutdown": false,
     "timeout": true,
@@ -240,6 +241,7 @@ describe("runManualAddress", () => {
 
     { guidance: true, reason: "encryption-invalid" },
     { guidance: true, reason: "encryption-missing" },
+    { guidance: false, reason: "identity-mismatch" },
     { guidance: false, reason: "shutdown" },
     { guidance: false, reason: "unrecognized" },
     { guidance: false, reason: "unsupported" }
@@ -279,10 +281,10 @@ describe("runManualAddress", () => {
 
   test("a repeating failure is reported once and then quieted, and a new failure is reported again", async () => {
 
-    /* Risk 3, as its own row. The script is timeout, timeout, encryption-invalid: the first timeout is news and reaches the user, the second is the same news and
-     * goes to debug, and the encryption failure that follows is NEW news and must reach the user at error even though it arrived on the heels of a quieted run.
-     * An implementation that decided the demotion from the previous attempt's reason - the only way to decide it without holding the line - demotes exactly that
-     * third report, which is the one that matters.
+    /* The script is timeout, timeout, encryption-invalid: the first timeout is news and reaches the user, the second is the same news and goes to debug, and the
+     * encryption failure that follows is NEW news and must reach the user at error even though it arrived on the heels of a quieted run. An implementation that
+     * decided the demotion from the previous attempt's reason - the only way to decide it without holding the line - demotes exactly that third report, which is the
+     * one that matters.
      */
     const rig = harness([ { ok: false, reason: "timeout" }, { ok: false, reason: "timeout" }, { ok: false, reason: "encryption-invalid" } ]);
 
@@ -329,7 +331,7 @@ describe("runManualAddress", () => {
 
   test("a wake ends the pause at once and the loop re-reads whether the address is served", async () => {
 
-    // The window the wakeable pause exists to close: something configures this device a moment after a failed attempt started its five-minute pause.
+    // The window the wakeable pause exists to close: something configures this device a moment after a failed attempt started the pause between attempts.
     let served = false;
     const rig = harness([{ ok: false, reason: "timeout" }], { served: (): boolean => served });
 

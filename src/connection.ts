@@ -12,17 +12,19 @@
  * failure taxonomy, every diagnostic, and the single teardown of a client no caller will receive; each entry point supplies only the step that answers what to wait
  * for on the connected client. Keeping the taxonomy in one body is what keeps the two paths from classifying the same fault differently.
  *
- * Feature-option resolution stays at the platform: the caller resolves the device's encryption key and passes the concrete `psk` in, so this module's only external
- * dependency is the client-factory port. That keeps the boundary single-purpose and the functions trivially testable.
+ * The caller supplies where encryption keys are stored, as a lookup; this module decides which MAC a key is chosen for, and refuses a device that is not the one its
+ * connection is for. Every connection the plugin and its settings page open passes through here, so holding the rule in this one core is what keeps the paths from
+ * keying a device, or admitting one, differently. The lookup and the client-factory port are the module's only external dependencies, which keeps the functions
+ * testable without a live device or a feature-option engine.
  */
 import { EncryptionKeyInvalidError, EncryptionKeyMissingError, EncryptionRequiredError, NegotiationFailedError, PermanentError, openEspHomeClient } from "esphome-client";
-import type { EntityId, EspHomeClient, TelemetryEvent } from "esphome-client";
+import type { EntityId, EspHomeClient, NoiseServerHello, PskResolver, TelemetryEvent } from "esphome-client";
 import type { HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
+import { classifyDeviceInfo, normalizeMac } from "./discovery.ts";
 import { presentEntityIds, ratgdoInitialStateEntityIds } from "./entities.ts";
 import type { DiscoveredRatgdo } from "./discovery.ts";
 import { RATGDO_INITIAL_STATE_TIMEOUT } from "./settings.ts";
 import type { RatgdoDevice } from "./types.ts";
-import { classifyDeviceInfo } from "./discovery.ts";
 import util from "node:util";
 import { waitWithSignal } from "homebridge-plugin-utils";
 
@@ -31,6 +33,28 @@ import { waitWithSignal } from "homebridge-plugin-utils";
  * a fake that resolves a synthetic client or rejects with a typed error.
  */
 export type OpenEspHomeClient = typeof openEspHomeClient;
+
+/* Where a caller's encryption keys are stored, as the connect core reads them: the key stored for a device, called with the MAC in the plugin's identity form, or with
+ * no MAC for the global key. An empty, null, or undefined answer means no key. The core calls it with the MAC the device announced in its server hello, else the MAC
+ * the connection was dialed for, else with none - the choice is the core's, so every caller keys every device by one rule and only says where keys are kept.
+ */
+export type EncryptionKeyLookup = (mac?: string) => Nullable<string | undefined>;
+
+/* The refusal of a device that is not the one its connection is for: a server hello announcing another MAC, or an encrypted connection whose device-info record names
+ * a MAC other than the one its key was chosen for. It is a PermanentError, so esphome-client neither retries the construction nor continues a reconnect loop past it - a
+ * device answering as another MAC does not become the right device on the next attempt - and the connect core classifies it once, as `identity-mismatch`.
+ *
+ * @param identity.expected - The MAC the connection is for, in the plugin's identity form.
+ * @param identity.reported - The MAC the device announced or reported, in the same form, or an empty string when it named none.
+ */
+export class DeviceIdentityError extends PermanentError {
+
+  public constructor({ expected, reported }: { expected: string; reported: string }) {
+
+    super(((reported.length > 0) ? reported : "a device reporting no MAC address") + " answered, but this connection is for " + expected + ".",
+      "IDENTITY_MISMATCH");
+  }
+}
 
 /* The success payload of `openConnection`: the live, connected client plus the initial-state snapshot `captureInitialState` waited for. It is carried by the `ok: true`
  * arm of the `ConnectionOutcome` union; the failure arms carry a typed `ConnectionFailureReason` instead, so a caller branches on `outcome.ok` and, on failure, acts on
@@ -44,12 +68,13 @@ export interface ConnectionResult {
 
 /* The classification of every way `openConnection` can fail. `shutdown` is not a fault - the platform is tearing down - and a caller acts on it by standing down
  * silently; `encryption-invalid` marks a configured key that does not match the device and `encryption-missing` marks a device that requires an API key that was not
- * supplied; `permanent` and `unknown` mark a device that is unreachable or failed for an unclassified reason; `timeout` marks a device that opened the connection but did
- * not push its initial state in the budget; `unsupported` marks a device announcing an ESPHome API version outside the range this plugin's client speaks, which no
- * amount of retrying changes - only a firmware or plugin update does. This is the typed sentinel a second consumer branches on in place of scraping the log line each
- * branch emits.
+ * supplied; `identity-mismatch` marks a device that announced or authenticated as a MAC other than the one its connection is for; `permanent` and `unknown` mark a
+ * device that is unreachable or failed for an unclassified reason; `timeout` marks a device that opened the connection but did not push its initial state in the
+ * budget; `unsupported` marks a device announcing an ESPHome API version outside the range this plugin's client speaks, which no amount of retrying changes - only a
+ * firmware or plugin update does. This is the typed sentinel a second consumer branches on in place of scraping the log line each branch emits.
  */
-export type ConnectionFailureReason = "encryption-invalid" | "encryption-missing" | "permanent" | "shutdown" | "timeout" | "unknown" | "unsupported";
+export type ConnectionFailureReason = "encryption-invalid" | "encryption-missing" | "identity-mismatch" | "permanent" | "shutdown" | "timeout" | "unknown" |
+  "unsupported";
 
 /* `openConnection`'s outcome, a discriminated union on `ok`: `ok: true` carries the connected client and its captured initial state, `ok: false` carries the classified
  * failure reason. Every failure branch has already logged its diagnostic and disposed the partially-constructed client, so a caller reads the outcome purely to decide
@@ -91,14 +116,16 @@ export interface CaptureInitialStateOptions {
   timeoutSeconds?: number;
 }
 
-/* Options for `openConnection`. The factory port (`openClient`) defaults to the real `openEspHomeClient`; the caller passes a resolved `psk` (already looked up from
- * feature options) so this module never touches the feature-option engine. `timeoutSeconds` threads straight through to `captureInitialState`.
+/* Options for `openConnection`. The factory port (`openClient`) defaults to the real `openEspHomeClient`; the caller passes a lookup over wherever it stores keys, so
+ * this module never touches the feature-option engine and the caller never decides which MAC a key is chosen for. `timeoutSeconds` threads straight through to
+ * `captureInitialState`.
  *
  * @property expected       - The initial-state wait-list, forwarded to `captureInitialState`.
  * @property host           - The device's hostname or IP address.
+ * @property keyFor         - Where the caller's encryption keys are stored. See EncryptionKeyLookup.
  * @property log            - The static-prefix logging adapter the client uses for connect-internal messages.
+ * @property mac            - The MAC discovery named, in the plugin's identity form: the device this connection is for.
  * @property openClient     - The injectable client-factory port. Defaults to the real `openEspHomeClient`.
- * @property psk            - The resolved base64 pre-shared key for Noise encryption, or null/undefined for an unencrypted device.
  * @property shutdownSignal - The platform-wide shutdown signal. Cancels the client-factory call and is forwarded to `captureInitialState`.
  * @property timeoutSeconds - Per-call state-capture budget, in seconds. Defaults to `RATGDO_INITIAL_STATE_TIMEOUT`.
  */
@@ -106,17 +133,22 @@ export interface OpenConnectionOptions {
 
   expected: readonly EntityId[];
   host: string;
+  keyFor: EncryptionKeyLookup;
   log: HomebridgePluginLogging;
+  mac: string;
   openClient?: OpenEspHomeClient;
-  psk?: Nullable<string>;
   shutdownSignal: AbortSignal;
   timeoutSeconds?: number;
 }
 
-/* Options for `openManualConnection`, which is `OpenConnectionOptions` without the wait-list: the caller cannot declare which entities matter until the connected
- * device has said which variant it is, so this call derives the wait-list for itself out of the identity it classifies.
+/* Options for `openManualConnection`, which is `OpenConnectionOptions` without the wait-list and without the MAC: the caller cannot declare which entities matter until
+ * the connected device has said which variant it is, so this call derives the wait-list for itself out of the identity it classifies, and an address names no device,
+ * so the connection is for no MAC until one answers.
  */
-export type OpenManualConnectionOptions = Omit<OpenConnectionOptions, "expected">;
+export type OpenManualConnectionOptions = Omit<OpenConnectionOptions, "expected" | "mac">;
+
+// What the connect core takes: the address dial's options, widened by the MAC a discovered device's connection is for. Both entry points' options satisfy it.
+type OpenAndCaptureOptions = OpenManualConnectionOptions & Partial<Pick<OpenConnectionOptions, "mac">>;
 
 /* What a caller's wait-list step answers once the client is connected: the entities to wait for and whatever else that caller derived from the same client, or a
  * refusal of what answered. The refusal arm is generic and defaults to nothing, so an entry point that cannot refuse - the discovered path, which knows its device
@@ -203,19 +235,36 @@ export async function openManualConnection(options: OpenManualConnectionOptions)
  *
  * The catch's error-narrowing strategy mirrors the abort-source taxonomy that captureInitialState produces. Shutdown is checked first because it is not a failure -
  * the platform is going away and any in-flight connect should tear down silently. TimeoutError DOMException is the dedicated state-capture-budget-exhausted case
- * (AbortSignal.timeout always uses that name; AbortError would be the wrong token to test). Encryption and PermanentError each get a dedicated branch so the user
- * sees a focused diagnostic instead of a wrapped stack trace. Everything else falls through to the generic else with the unfiltered util.inspect output.
+ * (AbortSignal.timeout always uses that name; AbortError would be the wrong token to test). The identity refusal, encryption, and PermanentError each get a dedicated
+ * branch so the user sees a focused diagnostic instead of a wrapped stack trace. Everything else falls through to the generic else with the unfiltered util.inspect
+ * output.
  *
  * Every failure - a thrown one and a refused one alike - leaves through the single tail below rather than returning from where it was decided, which is what makes
  * the dispose one statement instead of one per branch.
+ *
+ * The key rule lives here too, and it answers which key a connection offers separately from which device the connection will accept. The two are held apart on
+ * purpose, because a single MAC doing both jobs would let what a connection learns about its device change the key it offers.
+ *
+ * Key choice is a pure function of what is known before the handshake: the MAC the device's server hello announces, else the MAC the connection was dialed for, else
+ * no MAC at all, which reads the global key. The client calls its resolver on every connection attempt, reconnects included, so a first contact and every reconnect
+ * choose alike, and nothing the connection learns afterward - admission included - ever moves that choice. The resolver records the MAC it keyed for, which is what
+ * admission and the firmware warning read. A connection dialed for a MAC whose lookup answers no key gets no resolver at all and opens plaintext first, as a keyless
+ * device always has: a resolver would make the client try the encrypted handshake first on every connect and reconnect, and it could only answer no key.
+ *
+ * Identity is what a connection is FOR: the MAC it was dialed for, or once admitted the MAC its device reported. It feeds only the refusals. A hello announcing another
+ * MAC is refused inside the resolver, before the lookup is read, so no key is ever offered to it; and once the open resolves, a connection whose key was chosen for a
+ * MAC admits its device only when the device-info record names that same MAC, an absent one included as a mismatch. Admission compares nothing on a connection keyed
+ * for no MAC or on a plaintext one, whose device's MAC is its own unauthenticated word. A connection that is for no MAC and passes admission is for the MAC its device
+ * reported from then on, so a reconnect whose hello announces another MAC is refused - while the key it offers stays the one its first contact chose. Every refusal
+ * is the same error, so the catch classifies them once.
  *
  * @param options      - The connect options minus the wait-list.
  * @param resolveWaitList - The caller's step, run on the connected client before anything is captured.
  *
  * @returns The connected client and the step's identity, or the classified failure reason.
  */
-async function openAndCapture<TIdentity, TRefusal = never>({ host, log, openClient = openEspHomeClient, psk, shutdownSignal,
-  timeoutSeconds = RATGDO_INITIAL_STATE_TIMEOUT }: OpenManualConnectionOptions,
+async function openAndCapture<TIdentity, TRefusal = never>({ host, keyFor, log, mac, openClient = openEspHomeClient, shutdownSignal,
+  timeoutSeconds = RATGDO_INITIAL_STATE_TIMEOUT }: OpenAndCaptureOptions,
 resolveWaitList: (client: EspHomeClient) => WaitListOutcome<TIdentity, TRefusal>): Promise<CaptureOutcome<TIdentity, TRefusal>> {
 
   /* Client is a plain, manually-disposed variable rather than a `using` declaration. A `using` binding runs its disposal on any scope exit, including the
@@ -224,6 +273,30 @@ resolveWaitList: (client: EspHomeClient) => WaitListOutcome<TIdentity, TRefusal>
    */
   let client: EspHomeClient | undefined;
   let reason: ConnectionFailureReason | TRefusal;
+
+  // The MAC this connection is for, which only the refusals read.
+  let belongsTo = mac;
+
+  // The MAC the resolver's latest call keyed for: a MAC, null for the global key, and undefined while the resolver has never run, as on a plaintext connection.
+  let keyedFor: Nullable<string> | undefined;
+
+  const resolver: PskResolver = (hello: NoiseServerHello): Nullable<string> => {
+
+    const announced = (hello.macAddress === undefined) ? undefined : normalizeMac(hello.macAddress);
+
+    if((belongsTo !== undefined) && (announced !== undefined) && (announced !== belongsTo)) {
+
+      throw new DeviceIdentityError({ expected: belongsTo, reported: announced });
+    }
+
+    const chosen = announced ?? mac;
+
+    keyedFor = chosen ?? null;
+
+    const key = keyFor(chosen);
+
+    return key?.length ? key : null;
+  };
 
   try {
 
@@ -237,9 +310,20 @@ resolveWaitList: (client: EspHomeClient) => WaitListOutcome<TIdentity, TRefusal>
       clientId: "homebridge-ratgdo",
       host: host,
       logger: log,
-      psk: psk,
+      psk: ((mac !== undefined) && !keyFor(mac)?.length) ? null : resolver,
       signal: shutdownSignal
     });
+
+    // Admission, ahead of the caller's step so a refused device is never classified or captured. It throws rather than returning, so its refusal leaves through
+    // the catch below exactly as the resolver's does.
+    const reported = normalizeMac(client.deviceInfo()?.macAddress ?? "");
+
+    if((typeof keyedFor === "string") && (reported !== keyedFor)) {
+
+      throw new DeviceIdentityError({ expected: keyedFor, reported });
+    }
+
+    belongsTo ??= (reported.length > 0) ? reported : undefined;
 
     const waitList = resolveWaitList(client);
 
@@ -259,9 +343,23 @@ resolveWaitList: (client: EspHomeClient) => WaitListOutcome<TIdentity, TRefusal>
     if(shutdownSignal.aborted) {
 
       reason = "shutdown";
+    } else if(error instanceof DeviceIdentityError) {
+
+      // The identity refusal, from the resolver or from admission alike. It sits ahead of the PermanentError branch below because DeviceIdentityError extends it and
+      // the first matching branch wins. The message names both MACs, which is what the user needs to find the stale or reassigned address behind it.
+      log.error("The wrong device answered, so the connection is refused: %s", error.message);
+      reason = "identity-mismatch";
     } else if(isEncryptionError(error)) {
 
       log.error("Encryption configuration error - check the device's API encryption key: %s", error.message);
+
+      // A key chosen for no MAC means the device's firmware announced none, and that limit is worth naming beside the key fault: no key stored for this device can
+      // ever be offered to it. A connection that works on the global key never reaches here, so the warning never repeats for a working device.
+      if(keyedFor === null) {
+
+        log.warn("This device can use only the global encryption key, because its firmware does not announce its MAC address. " +
+          "Update it to ESPHome 2025.4.0 or newer to give it a key of its own.");
+      }
 
       // Split the encryption fault so a caller acts on which kind it is without re-inspecting the error: a mismatched key (EncryptionKeyInvalidError) reads as
       // "encryption-invalid", while an absent-but-required key (EncryptionKeyMissingError or EncryptionRequiredError) reads as "encryption-missing".

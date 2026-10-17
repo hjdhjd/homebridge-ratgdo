@@ -9,11 +9,12 @@
  * omitting the key. An equality read cannot tell those apart, and the session's shallow-merge commit treats them oppositely, so presence is asserted with
  * Object.hasOwn and absence with its negation - never with a comparison against undefined.
  */
-import { FeatureOptions, formatValueList, mqttConnectionSettings, scopeSafeId } from "homebridge-plugin-utils";
+import { FeatureOptions, formatValueList, mqttConnectionSettings } from "homebridge-plugin-utils";
 import { describe, test } from "node:test";
-import { featureOptionCategories, featureOptions, manualAddressScope } from "./options.ts";
+import { featureOptionCategories, featureOptions } from "./options.ts";
 import { makeRatgdoConfig, canonicalManualAddress as pageCanonical, isZonedAddress as pageIsZoned } from "../homebridge-ui/public/ratgdo-config.mjs";
 import { manualAddressList, canonicalManualAddress as runtimeCanonical, isZonedAddress as runtimeIsZoned } from "./manual.ts";
+import type { Nullable } from "homebridge-plugin-utils";
 import { RATGDO_MQTT_TOPIC } from "./settings.ts";
 import assert from "node:assert/strict";
 
@@ -25,8 +26,8 @@ const OPTION_URL = "mqtt://127.0.0.1:1883";
 // alone.
 const UNRELATED_ENTRY = "Disable.Light.1234567890AB";
 
-// The interpreter under test, built the way the webUI builds it: the real engine class, the real served catalog, and the engine's own list and identifier helpers.
-const config = makeRatgdoConfig({ FeatureOptions, catalog: { categories: featureOptionCategories, options: featureOptions }, formatValueList, scopeSafeId });
+// The interpreter under test, built the way the webUI builds it: the real engine class, the real served catalog, and the engine's own list formatter.
+const config = makeRatgdoConfig({ FeatureOptions, catalog: { categories: featureOptionCategories, options: featureOptions }, formatValueList });
 
 // Every entry in an options array that addresses a given option, case-insensitively, in either the enabled or the disabled form.
 function entriesFor(options: string[] | undefined, option: string): string[] {
@@ -236,15 +237,15 @@ describe("the ratgdo webUI configuration migration", () => {
 
 /* The manual-device reads and writes behind the Add Device card, driven against the REAL engine over the REAL catalog.
  *
- * The keystone of this section is that the card and the runtime address ONE entry. The page composes a key write here, and the plugin reads that key back through
- * manualAddressScope before it dials - so every stored-string row below reads the composed entry with the runtime's own scope function rather than with a string the
- * test wrote down, which is what would fail if either side drifted.
+ * The keystone of this section is that the card and the runtime address ONE entry. The page composes a key write here at the MAC the card's test learned, and every
+ * connection to that device reads its key at that MAC - so every stored-key row below reads the composed entry back through the real engine at the device's MAC,
+ * which is what would fail if the card wrote anywhere else.
  */
 /* The one vector table, run against BOTH halves of the canonical-address rule.
  *
  * The rule is written twice on purpose: the page's copy lives in an import-free browser module and the plugin's lives in a Node module a browser cannot load. Nothing
  * in the language binds the two together, so THIS is what does - every vector is run through both halves and asserted to agree, and then asserted to be the expected
- * form. A drift between the two shows up here rather than as a key the page stores at an identity the plugin never looks at.
+ * form. A drift between the two shows up here rather than as one address the page and the plugin spell two different ways.
  */
 describe("the canonical manual address, on both sides of the wire", () => {
 
@@ -283,35 +284,28 @@ describe("the canonical manual address, on both sides of the wire", () => {
     assert.equal(runtimeIsZoned("fd00::1"), false, "and an ordinary unique-local literal is not");
   });
 
-  test("gives the page and the runtime the same scope id for every vector", () => {
-
-    /* The consequence that actually matters. A key the card writes is read back by the plugin through manualAddressScope, so if the two halves canonicalized
-     * differently the page would store a key at an identity the plugin never asks for - and an encrypted device would refuse every connection with the key sitting
-     * right there in the configuration.
-     */
-    for(const [input] of vectors) {
-
-      assert.equal(scopeSafeId(pageCanonical(input)), manualAddressScope(runtimeCanonical(input)),
-        "the page and the plugin name the same identity for " + JSON.stringify(input));
-    }
-  });
-
-  test("collapses a bracketed and a bare spelling to one list entry and one identity", () => {
+  test("collapses a bracketed and a bare spelling to one list entry", () => {
 
     const listed = manualAddressList([ "[2001:DB8::5]", "2001:db8::5" ]);
 
     assert.deepEqual([...listed], ["2001:db8::5"], "the runtime lists one address where a user wrote two spellings of it");
-    assert.equal(manualAddressScope(pageCanonical("[2001:DB8::5]")), manualAddressScope(pageCanonical("2001:db8::5")),
-      "and the page names one identity for the two spellings, so one stored key serves both");
+    assert.equal(pageCanonical("[2001:DB8::5]"), pageCanonical("2001:db8::5"), "and the page spells the two as that one address too");
   });
 });
 
 describe("the ratgdo webUI manual-device composition", () => {
 
-  // The three address shapes that reach the engine's stored form differently: an IPv4 address and a hostname each carry periods the stored form gives meaning to,
-  // while an IPv6 literal's colons pass through untouched. Every row that cares about storage drives all three.
+  // The address shapes a user can type - an IPv4 address, a hostname, and an IPv6 literal. Whichever of them the card tested, the key is stored at the MAC of the
+  // device that answered, so the row that cares about storage drives every one.
   const ADDRESSES = [ "10.0.0.20", "garage.local", "fd00::1" ];
   const KEY = "c2VjcmV0LWtleQ==";
+
+  // The MAC the card's test learned, in the plugin's identity form.
+  const MAC = "AABBCCDDEEFF";
+
+  // The key the real engine resolves at the device's MAC in a composed patch, which is exactly what every connection to that device reads.
+  const keyAtMac = (options: string[] | undefined): Nullable<string | undefined> => new FeatureOptions(featureOptionCategories, featureOptions,
+    options ?? []).value("Device.Encryption.Key", MAC);
 
   // The entry addressing an option at a given id, read out of a composed patch. Reading by prefix rather than by a written-out string is what lets the row assert the
   // WHOLE entry it found, including the value, without restating the engine's own spelling of the name.
@@ -350,12 +344,12 @@ describe("the ratgdo webUI manual-device composition", () => {
 
     test("appends to an empty list and to a populated one, leaving every other entry alone", () => {
 
-      const fresh = config.withManualDevice({}, { address: "10.0.0.20" });
+      const fresh = config.withManualDevice({}, { address: "10.0.0.20", mac: MAC });
 
       assert.ok(fresh, "an address for a configuration that lists none produces a patch");
       assert.deepEqual(entriesFor(fresh.options, "Device.Address"), ["Enable.Device.Address=10.0.0.20"], "the first address composes the list entry");
 
-      const populated = config.withManualDevice({ options: [ "Enable.Device.Address=10.0.0.20", UNRELATED_ENTRY ] }, { address: "garage.local" });
+      const populated = config.withManualDevice({ options: [ "Enable.Device.Address=10.0.0.20", UNRELATED_ENTRY ] }, { address: "garage.local", mac: MAC });
 
       assert.ok(populated, "a second address produces a patch");
       assert.deepEqual(entriesFor(populated.options, "Device.Address"), ["Enable.Device.Address=10.0.0.20,garage.local"],
@@ -367,7 +361,7 @@ describe("the ratgdo webUI manual-device composition", () => {
 
       for(const address of [ "", "   " ]) {
 
-        assert.equal(config.withManualDevice({}, { address }), null,
+        assert.equal(config.withManualDevice({}, { address, mac: MAC }), null,
           "an address of " + JSON.stringify(address) + " is the user having typed nothing, so nothing is composed");
       }
 
@@ -380,27 +374,23 @@ describe("the ratgdo webUI manual-device composition", () => {
       assert.equal(untyped({}), null, "an address the page never supplied is the user having typed nothing too");
       assert.equal(untyped({ address: 42 }), null, "and an address that is not text at all composes nothing rather than being coerced");
 
-      const patch = config.withManualDevice({}, { address: "  10.0.0.20  " });
+      const patch = config.withManualDevice({}, { address: "  10.0.0.20  ", mac: MAC });
 
       assert.ok(patch, "a padded address is still an address");
       assert.deepEqual(entriesFor(patch.options, "Device.Address"), ["Enable.Device.Address=10.0.0.20"], "and it is stored trimmed");
     });
 
-    test("stores a typed key at the address identity the runtime reads it back at, for every address shape", () => {
+    test("stores a typed key at the tested device's MAC, for every address shape", () => {
 
-      // Risk 5, from the page's side: the entry this composes is read by manualAddressScope plus the real engine, so a drift between the two spellings fails here.
+      // The entry this composes is read back by the real engine at the device's MAC, so a key written anywhere else fails here, whatever address was typed.
       for(const address of ADDRESSES) {
 
-        const patch = config.withManualDevice({}, { address, key: KEY });
+        const patch = config.withManualDevice({}, { address, key: KEY, mac: MAC });
 
         assert.ok(patch, "the address " + address + " composes a patch");
-
-        const scope = manualAddressScope(address);
-
-        assert.equal(entryAt(patch.options, "Device.Encryption.Key", scope), "Enable.Device.Encryption.Key." + scope + "=" + KEY,
-          "the key for " + address + " is stored at the identity the runtime's own scope function names");
-        assert.equal(new FeatureOptions(featureOptionCategories, featureOptions, patch.options).value("Device.Encryption.Key", scope), KEY,
-          "and the real engine resolves it back at that identity, which is exactly what the manual dial does before it connects");
+        assert.equal(entryAt(patch.options, "Device.Encryption.Key", MAC), "Enable.Device.Encryption.Key." + MAC + "=" + KEY,
+          "the key typed beside " + address + " is stored at the MAC of the device that answered there");
+        assert.equal(keyAtMac(patch.options), KEY, "and the real engine resolves it back at that MAC, which is exactly where every connection to the device reads it");
       }
     });
 
@@ -409,17 +399,18 @@ describe("the ratgdo webUI manual-device composition", () => {
       /* This is how a user fixes a key they got wrong, so the row asserts BOTH halves: the list is untouched (no duplicate entry) and the key entry is the only
        * thing that moved.
        */
-      const patch = config.withManualDevice({ options: [ "Enable.Device.Address=10.0.0.20", "Enable.Device.Encryption.Key.10-0-0-20=old-key" ] },
-        { address: "10.0.0.20", key: KEY });
+      const patch = config.withManualDevice({ options: [ "Enable.Device.Address=10.0.0.20", "Enable.Device.Encryption.Key." + MAC + "=old-key" ] },
+        { address: "10.0.0.20", key: KEY, mac: MAC });
 
       assert.ok(patch, "a listed address with a new key still produces a patch");
       assert.deepEqual(entriesFor(patch.options, "Device.Address"), ["Enable.Device.Address=10.0.0.20"], "the address is not listed a second time");
-      assert.equal(entryAt(patch.options, "Device.Encryption.Key", "10-0-0-20"), "Enable.Device.Encryption.Key.10-0-0-20=" + KEY, "and the key entry is rewritten");
+      assert.equal(entryAt(patch.options, "Device.Encryption.Key", MAC), "Enable.Device.Encryption.Key." + MAC + "=" + KEY,
+        "and the key entry at the device's MAC is rewritten");
     });
 
     test("matches an already-listed address without regard to case, since a hostname and an IPv6 literal are both case-insensitive", () => {
 
-      const patch = config.withManualDevice({ options: ["Enable.Device.Address=Garage.Local"] }, { address: "garage.local", key: KEY });
+      const patch = config.withManualDevice({ options: ["Enable.Device.Address=Garage.Local"] }, { address: "garage.local", key: KEY, mac: MAC });
 
       assert.ok(patch, "the key still composes");
       assert.deepEqual(entriesFor(patch.options, "Device.Address"), ["Enable.Device.Address=Garage.Local"],
@@ -428,29 +419,29 @@ describe("the ratgdo webUI manual-device composition", () => {
 
     test("answers null when neither the address nor the key would move", () => {
 
-      assert.equal(config.withManualDevice({ options: ["Enable.Device.Address=10.0.0.20"] }, { address: "10.0.0.20" }), null,
+      assert.equal(config.withManualDevice({ options: ["Enable.Device.Address=10.0.0.20"] }, { address: "10.0.0.20", mac: MAC }), null,
         "a listed address with no key typed changes nothing, so there is nothing to commit");
-      assert.equal(config.withManualDevice({ options: [ "Enable.Device.Address=10.0.0.20", "Enable.Device.Encryption.Key.10-0-0-20=" + KEY ] },
-        { address: "10.0.0.20", key: KEY }), null, "re-confirming the key already stored changes nothing either");
+      assert.equal(config.withManualDevice({ options: [ "Enable.Device.Address=10.0.0.20", "Enable.Device.Encryption.Key." + MAC + "=" + KEY ] },
+        { address: "10.0.0.20", key: KEY, mac: MAC }), null, "re-confirming the key already stored at the device's MAC changes nothing either");
     });
 
-    test("writes no address entry for a key the engine already resolves globally", () => {
+    test("writes no key entry for a key the engine already resolves globally", () => {
 
-      // The engine walks the address entry and then the global one, so a device whose key is inherited needs no entry of its own - writing one would manufacture
+      // The engine walks the device's entry and then the global one, so a device whose key is inherited needs no entry of its own - writing one would manufacture
       // configuration that says nothing the configuration did not already say.
       const patch = config.withManualDevice({ options: [ "Enable.Device.Address=10.0.0.20", "Enable.Device.Encryption.Key=" + KEY ] },
-        { address: "10.0.0.20", key: KEY });
+        { address: "10.0.0.20", key: KEY, mac: MAC });
 
-      assert.equal(patch, null, "a key equal to the global one composes no address-scoped entry, and with nothing else to do the whole patch is null");
+      assert.equal(patch, null, "a key equal to the global one composes no entry at the device's MAC, and with nothing else to do the whole patch is null");
     });
 
     test("never clears a stored key when the user leaves the field blank", () => {
 
-      const stored = [ "Enable.Device.Address=10.0.0.20", "Enable.Device.Encryption.Key.10-0-0-20=" + KEY ];
+      const stored = [ "Enable.Device.Address=10.0.0.20", "Enable.Device.Encryption.Key." + MAC + "=" + KEY ];
 
       for(const key of [ "", undefined ]) {
 
-        assert.equal(config.withManualDevice({ options: stored }, { address: "10.0.0.20", key }), null,
+        assert.equal(config.withManualDevice({ options: stored }, { address: "10.0.0.20", key, mac: MAC }), null,
           "a blank key field says nothing about the key rather than asking to delete it, so nothing is composed");
       }
     });
@@ -460,41 +451,60 @@ describe("the ratgdo webUI manual-device composition", () => {
       /* The already-listed decision runs on canonical forms on BOTH sides of the comparison - the typed address and every entry already in the list - so a user who
        * lists "2001:db8::5" and later types "[2001:db8::5]" is told it is already there rather than given a second list entry for one device.
        */
-      assert.equal(config.withManualDevice({ options: ["Enable.Device.Address=2001:db8::5"] }, { address: "[2001:DB8::5]" }), null,
+      assert.equal(config.withManualDevice({ options: ["Enable.Device.Address=2001:db8::5"] }, { address: "[2001:DB8::5]", mac: MAC }), null,
         "the bracketed spelling of a listed address changes nothing");
-      assert.equal(config.withManualDevice({ options: ["Enable.Device.Address=[2001:db8::5]"] }, { address: "2001:db8::5" }), null,
+      assert.equal(config.withManualDevice({ options: ["Enable.Device.Address=[2001:db8::5]"] }, { address: "2001:db8::5", mac: MAC }), null,
         "and so does the bare spelling of a bracketed listed entry, since both sides of the comparison are canonicalized");
     });
 
-    test("writes the canonical form into the list and stores the key at that identity", () => {
+    test("writes the canonical form into the list and stores the key at the device's MAC", () => {
 
-      const patch = config.withManualDevice({}, { address: "[2001:DB8::5]", key: KEY });
+      const patch = config.withManualDevice({}, { address: "[2001:DB8::5]", key: KEY, mac: MAC });
 
       assert.ok(patch, "a bracketed address still composes a patch");
       assert.deepEqual(entriesFor(patch.options, "Device.Address"), ["Enable.Device.Address=2001:db8::5"],
         "what is written is the bare literal, which is what the plugin dials and what Node's own parser reads as an address");
-      assert.equal(entryAt(patch.options, "Device.Encryption.Key", "2001:db8::5"), "Enable.Device.Encryption.Key.2001:db8::5=" + KEY,
-        "and the key is stored at the canonical identity, which is the one the plugin reads before it dials");
+      assert.equal(entryAt(patch.options, "Device.Encryption.Key", MAC), "Enable.Device.Encryption.Key." + MAC + "=" + KEY,
+        "and the key is stored at the device's MAC, whatever spelling of its address was typed");
+    });
+
+    test("writes a typed key at the device's MAC, skips one already resolved there or globally, and reads the global key", () => {
+
+      /* The whole key rule the card composes by, against the real engine: a key goes to the MAC the card's test learned, a key the engine already resolves there -
+       * stored for that MAC or inherited from the global key - writes nothing, and the global key the card compares a MAC-silent device against reads back as
+       * exactly what the engine answers with no device named.
+       */
+      const written = config.withManualDevice({}, { address: "10.0.0.20", key: KEY, mac: MAC });
+
+      assert.equal(keyAtMac(written?.options), KEY, "a typed key is written where the engine resolves it at the device's MAC");
+      assert.equal(config.withManualDevice({ options: [ "Enable.Device.Address=10.0.0.20", "Enable.Device.Encryption.Key." + MAC + "=" + KEY ] },
+        { address: "10.0.0.20", key: KEY, mac: MAC }), null, "a key already stored at the device's MAC writes nothing");
+      assert.equal(config.withManualDevice({ options: [ "Enable.Device.Address=10.0.0.20", "Enable.Device.Encryption.Key=" + KEY ] },
+        { address: "10.0.0.20", key: KEY, mac: MAC }), null, "and neither does a key the device inherits globally");
+      assert.equal(config.globalKey({ options: [ "Enable.Device.Encryption.Key=" + KEY, "Enable.Device.Encryption.Key." + MAC + "=other" ] }), KEY,
+        "the global key reads the global entry alone, not a device's own");
+      assert.equal(config.globalKey({ options: ["Enable.Device.Encryption.Key="] }), undefined, "an empty global entry is no global key");
+      assert.equal(config.globalKey({}), undefined, "and a configuration with no entry at all has none");
     });
 
     test("refuses an address naming a zone outright", () => {
 
       // A zone identifier names the interface a link-local address was heard on and means nothing without that link, so there is nothing to write and nothing that
       // could be dialed. The card renders the refusal; the composer simply has nothing to compose.
-      assert.equal(config.withManualDevice({}, { address: "fe80::1%en0", key: KEY }), null, "a zoned address composes no patch at all, key or no key");
-      assert.equal(config.withManualDevice({ options: ["Enable.Device.Address=10.0.0.20"] }, { address: "[fe80::1%en0]" }), null,
+      assert.equal(config.withManualDevice({}, { address: "fe80::1%en0", key: KEY, mac: MAC }), null, "a zoned address composes no patch at all, key or no key");
+      assert.equal(config.withManualDevice({ options: ["Enable.Device.Address=10.0.0.20"] }, { address: "[fe80::1%en0]", mac: MAC }), null,
         "and stripping its brackets first does not make it dialable");
     });
 
     test("composes the address and its key in ONE patch, never two", () => {
 
-      // A20's whole point: a card-added device always carries its key, and both halves reach disk in a single commit.
-      const patch = config.withManualDevice({}, { address: "garage.local", key: KEY });
+      // A card-added device always carries its key, and both halves reach disk in a single commit.
+      const patch = config.withManualDevice({}, { address: "garage.local", key: KEY, mac: MAC });
 
       assert.ok(patch, "a new address with a key produces a patch");
       assert.deepEqual(entriesFor(patch.options, "Device.Address"), ["Enable.Device.Address=garage.local"], "the one patch carries the list entry");
-      assert.equal(entryAt(patch.options, "Device.Encryption.Key", "garage-local"), "Enable.Device.Encryption.Key.garage-local=" + KEY,
-        "and the same patch carries the key entry, so a save is one write rather than two");
+      assert.equal(entryAt(patch.options, "Device.Encryption.Key", MAC), "Enable.Device.Encryption.Key." + MAC + "=" + KEY,
+        "and the same patch carries the key entry at the device's MAC, so a save is one write rather than two");
     });
   });
 });

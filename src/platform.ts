@@ -6,12 +6,14 @@ import type { API, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, Platf
 import type { Clock, HomebridgePluginLogging, MdnsDiscovery, MdnsDiscoveryEvent, MqttClient, Nullable } from "homebridge-plugin-utils";
 import { CoalescingTask, FeatureOptions, HbpuAbortError, MQTT_AVAILABILITY_OFFLINE, WakeableWait, createMqttClient, debugGatedLog, discoverServices,
   formatErrorMessage, isAdvertisedAt, mqttConnectionSettings, mqttTopic, prefixedLog, sanitizeName, superviseLoop, systemClock } from "homebridge-plugin-utils";
+import { DeviceIdentityError, applyDeviceInfo, isEncryptionError, openConnection, openManualConnection } from "./connection.ts";
 import type { EntityId, EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
 import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_MANUAL_RETRY_INTERVAL, RATGDO_MDNS_SERVICE_TYPE } from "./settings.ts";
-import { applyDeviceInfo, isEncryptionError, openConnection, openManualConnection } from "./connection.ts";
-import { featureOptionCategories, featureOptions, manualAddressScope, normalizeConfig } from "./options.ts";
+import { featureOptionCategories, featureOptions, normalizeConfig } from "./options.ts";
 import { governingAddress, isZonedAddress, manualAddressList, runManualAddress } from "./manual.ts";
+import { normalizeMac, parseRatgdoService } from "./discovery.ts";
 import type { DiscoveredRatgdo } from "./discovery.ts";
+import type { EncryptionKeyLookup } from "./connection.ts";
 import { LogLevel } from "esphome-client";
 import type { ManualDialOutcome } from "./manual.ts";
 import { RatgdoAccessory } from "./device.ts";
@@ -19,7 +21,6 @@ import type { RatgdoDevice } from "./types.ts";
 import type { RatgdoResolvedConfig } from "./options.ts";
 import { mqttTopics } from "./mqtt.ts";
 import { parseBatteryState } from "./protocol/battery.ts";
-import { parseRatgdoService } from "./discovery.ts";
 import { ratgdoInitialStateEntityIds } from "./entities.ts";
 import { translateTelemetry } from "./protocol/telemetry.ts";
 import util from "node:util";
@@ -73,6 +74,8 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   private readonly discoveredDevices: Set<string>;
   public readonly featureOptions: FeatureOptions;
   public readonly hap: HAP;
+  // The one encryption-key lookup every connect this platform opens hands the connection core, which decides which MAC it is read at.
+  private readonly keyFor: EncryptionKeyLookup;
   public readonly log: HomebridgePluginLogging;
   // Every address the user listed, canonical and in the user's own order, read once because a configuration change reaches this plugin only through a restart. The
   // order is what settles which of two addresses reaching one device governs it, so it is carried rather than re-derived per decision.
@@ -112,6 +115,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     };
 
     this.hap = api.hap;
+    this.keyFor = (mac?: string): Nullable<string | undefined> => this.featureOptions.value("Device.Encryption.Key", mac);
     /* Wrap the logger Homebridge handed us in the library's config-gated composition. The plugin offers a debug setting of its own, read live on every call, and the
      * gated channel emits through warn because Homebridge prints its DEBUG lines only when Homebridge's own global debug switch is on...warn is the level that
      * actually reaches the user's log. Wrapping rather than overwriting a method on Homebridge's own instance leaves that object exactly as Homebridge owns it.
@@ -201,7 +205,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     // discoveredDevices means "settled as disabled this run"; this read depends on that, so a writer adding a MAC for any other reason would state it offline here.
     for(const macColon of this.discoveredDevices) {
 
-      macs.add(macColon.replace(/:/g, ""));
+      macs.add(normalizeMac(macColon));
     }
 
     for(const mac of macs) {
@@ -312,8 +316,9 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
    * further dial, so each of them is a success as far as the loop is concerned. Only a connect that produced no usable device comes back as a failure with a reason
    * the loop can act on.
    *
-   * The key is read at the address rather than at the MAC, because the MAC is exactly what this connection exists to learn. The screening runs after the connect for
-   * the same reason: a device the user disabled is disabled by MAC, and nothing here knows the MAC until the device has answered.
+   * An address names no device, so this connection is dialed for no MAC: its key is chosen for the MAC the device announces as it answers, exactly as a discovered
+   * device's key is read at its MAC. The screening runs after the connect for a related reason: a device the user disabled is disabled by MAC, and nothing here
+   * knows the MAC until the device has answered.
    *
    * @param address - The listed address to dial.
    * @param log     - The log this attempt speaks through, which the loop quiets when the same failure is repeating.
@@ -325,8 +330,8 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     const outcome = await openManualConnection({
 
       host: address,
+      keyFor: this.keyFor,
       log: prefixedLog(log, () => address),
-      psk: this.featureOptions.value("Device.Encryption.Key", manualAddressScope(address)),
       shutdownSignal: this.shutdownController.signal
     });
 
@@ -525,8 +530,9 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
         expected,
         host: device.address,
+        keyFor: this.keyFor,
         log: connectLog,
-        psk: this.featureOptions.value("Device.Encryption.Key", device.mac),
+        mac: device.mac,
         shutdownSignal: this.shutdownController.signal
       });
 
@@ -883,8 +889,9 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
       expected: ratgdoInitialStateEntityIds(ratgdo.device.variant),
       host: discovered.address,
+      keyFor: this.keyFor,
       log: prefixedLog(this.log, () => ratgdo.device.name),
-      psk: this.featureOptions.value("Device.Encryption.Key", ratgdo.device.mac),
+      mac: ratgdo.device.mac,
       shutdownSignal: this.shutdownController.signal
     });
 
@@ -1021,10 +1028,16 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
           ratgdo.updateState({ id: "availability", state: "offline" });
 
           // Disconnect cause narrows through the typed error hierarchy. The auto-reconnect supervisor already filters PermanentError subclasses out of the retry
-          // budget, so the encryption-key cases below are diagnostic only - the device will not come back without a configuration fix.
+          // budget, so the encryption-key and wrong-device cases below are diagnostic only - the reconnect loop has ended, and the device will not come back without
+          // a configuration fix or, for a device another one has replaced at its address, a fresh connection.
           if(isEncryptionError(event.cause)) {
 
             ratgdo.log.error("Encryption configuration error - check the device's API encryption key: %s", event.cause.message);
+          }
+
+          if(event.cause instanceof DeviceIdentityError) {
+
+            ratgdo.log.error("The wrong device answered, so the connection is refused: %s", event.cause.message);
           }
 
           return;

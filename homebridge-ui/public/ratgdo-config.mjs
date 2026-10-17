@@ -13,8 +13,8 @@
  * option and marks the property for deletion. Nothing in this plugin's browser code reads a configuration property.
  *
  * The other job is composing the writes the page's own affordances make. A manual device is the one setting a user adds from a card rather than from the options
- * editor, and it lands in TWO places at once - the address on a list option, its key at the address's own identity - so the composition belongs here beside the rest
- * of this plugin's knowledge of where a setting lives, rather than in the page that happens to draw the card.
+ * editor, and it lands in TWO places at once - the address on a list option, and its key at the device's MAC, which the card learned by testing the address - so the
+ * composition belongs here beside the rest of this plugin's knowledge of where a setting lives, rather than in the page that happens to draw the card.
  */
 
 /* Every consolidated setting, as the configuration property that carries it paired with the feature option that supersedes it. This pairing is this module's policy
@@ -40,8 +40,8 @@ const KEY_OPTION = "Device.Encryption.Key";
  *
  * This is the page's half of a rule the plugin's runtime states in src/manual.ts, character for character. It is written twice on purpose rather than by oversight:
  * this module is import-free by design so it can run in a browser, and the runtime's copy is a Node module a browser cannot load. What holds the two together is the
- * shared vector table in the test suite, which runs both halves over the same inputs and asserts they agree - a drift shows up there rather than as a key the page
- * stores somewhere the plugin never looks.
+ * shared vector table in the test suite, which runs both halves over the same inputs and asserts they agree - a drift shows up there rather than as one address the
+ * page and the plugin spell two different ways.
  *
  * The brackets matter because a user typing an IPv6 literal reasonably reaches for the URL spelling, and the bracketed form is not an address to anything
  * downstream: Node's own parser does not read it as an IP literal, so a dial resolves it as a hostname and fails forever. Only an ENCLOSING pair goes, so a stray
@@ -70,18 +70,17 @@ export const canonicalManualAddress = (address) => {
  */
 export const isZonedAddress = (address) => address.includes("%");
 
-/* Build the interpreter over an injected feature-option engine class, the option catalog the plugin's own UI server publishes, and the two engine helpers the
+/* Build the interpreter over an injected feature-option engine class, the option catalog the plugin's own UI server publishes, and the engine's list formatter the
  * composition needs. Injecting all of them is what keeps this module import-free and testable under node against the real engine and the real catalog, rather than
  * against a stand-in that could drift from either.
  *
  * @param injected.FeatureOptions   - The feature-option engine class.
  * @param injected.catalog          - The served catalog, carrying its categories and its options record.
  * @param injected.formatValueList  - The engine's own list formatter, so a list this module writes reads back exactly as the editor's own writes do.
- * @param injected.scopeSafeId      - The engine's own identifier rule, so a key stored at an address is found at that address by the runtime.
  *
  * @returns The interpreter: the legacy-settings migration, and the manual-device reads and writes.
  */
-export const makeRatgdoConfig = ({ FeatureOptions, catalog, formatValueList, scopeSafeId }) => {
+export const makeRatgdoConfig = ({ FeatureOptions, catalog, formatValueList }) => {
 
   // A feature-option engine over the served catalog and the config's own entries. The array is handed in directly rather than copied: the engine's set-option path is
   // a pure transform that composes a fresh array and reassigns its own field, so the array it was given is never written to.
@@ -108,6 +107,20 @@ export const makeRatgdoConfig = ({ FeatureOptions, catalog, formatValueList, sco
   };
 
   return {
+
+    /* The global encryption key, exactly as the plugin's runtime resolves it for a connection keyed for no MAC - the engine's global entry, with an empty one read as
+     * no key at all.
+     *
+     * @param config - The platform configuration entry.
+     *
+     * @returns The global encryption key, or undefined when none is set.
+     */
+    globalKey: (config) => {
+
+      const key = engineFor(config).value(KEY_OPTION);
+
+      return ((typeof key === "string") && key.length) ? key : undefined;
+    },
 
     /* The addresses the user has listed, exactly as the plugin's runtime reads them. It goes through the engine's own list read rather than splitting the stored
      * string here, so the page and the runtime can never disagree about what counts as one entry - the grammar of that list is the engine's, not this module's.
@@ -204,9 +217,9 @@ export const makeRatgdoConfig = ({ FeatureOptions, catalog, formatValueList, sco
      *
      * Two entries can move, and they are deliberately decided apart. The ADDRESS is appended to the list option unless the list already carries it, compared without
      * regard to case because a hostname and an IPv6 literal are both case-insensitive; the list is rewritten through the engine's own formatter, so an entry this
-     * module adds is spelled the way the options editor would have spelled it. The KEY is written at the address's own identity - which is where the runtime reads
-     * it before a manual dial, because a device nobody has connected to has no MAC anyone knows - and only when it differs from what the engine already resolves
-     * there, which keeps a save that merely re-confirms an existing key from manufacturing an entry.
+     * module adds is spelled the way the options editor would have spelled it. The KEY is written at the device's MAC - which the card learned by testing the address,
+     * and which is where every connection to the device reads its key - and only when it differs from what the engine already resolves there, so a key already stored
+     * for that MAC, or one equal to the global encryption key, writes no entry.
      *
      * An already-listed address is accepted rather than refused, and that is the whole point of the second half: it is how a user fixes a key they got wrong, and how
      * a device that was hand-added to the list without one finally gets one. An EMPTY key never clears a stored one - a user who leaves the field blank is saying
@@ -218,13 +231,14 @@ export const makeRatgdoConfig = ({ FeatureOptions, catalog, formatValueList, sco
      * @param config         - The platform configuration entry.
      * @param device.address - The address the user typed.
      * @param device.key     - The key they typed beside it, if any.
+     * @param device.mac     - The MAC the card's test learned, in the plugin's identity form.
      *
      * @returns The patch to commit, or null when there is nothing to do.
      */
-    withManualDevice: (config, { address, key }) => {
+    withManualDevice: (config, { address, key, mac }) => {
 
-      // The address takes its canonical form ONCE, here, and every decision below reads that one value: whether the list already carries it, what is written into
-      // the list, and what identity the key is stored at. Canonicalizing per decision instead would be three chances for them to disagree.
+      // The address takes its canonical form ONCE, here, and every decision about it below reads that one value - whether the list already carries it, and what is
+      // written into the list - so no decision can spell the address differently from another.
       const canonical = canonicalManualAddress(address);
 
       if(!canonical.length || isZonedAddress(canonical)) {
@@ -244,10 +258,10 @@ export const makeRatgdoConfig = ({ FeatureOptions, catalog, formatValueList, sco
       }
 
       // The key is addressed at the SAME identity the runtime reads it at. Resolving through the engine first is what makes an unchanged key a no-op: value() walks
-      // the address entry and then the global one, so a device whose key is already inherited globally gets no address entry of its own.
-      if((typeof key === "string") && key.length && (engine.value(KEY_OPTION, scopeSafeId(canonical)) !== key)) {
+      // the device's entry and then the global one, so a device whose key is already inherited globally gets no entry of its own.
+      if((typeof key === "string") && key.length && (engine.value(KEY_OPTION, mac) !== key)) {
 
-        engine.setOption({ enabled: true, id: scopeSafeId(canonical), option: KEY_OPTION, value: key });
+        engine.setOption({ enabled: true, id: mac, option: KEY_OPTION, value: key });
         composed = true;
       }
 

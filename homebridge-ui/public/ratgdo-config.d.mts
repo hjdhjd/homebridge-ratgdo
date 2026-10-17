@@ -2,7 +2,7 @@
  *
  * ratgdo-config.d.mts: Type declarations for the pure Ratgdo platform-configuration interpreter.
  */
-import type { FeatureCategoryEntry, FeatureOptionEntry, FeatureOptions, formatValueList, scopeSafeId } from "homebridge-plugin-utils";
+import type { FeatureCategoryEntry, FeatureOptionEntry, FeatureOptions, formatValueList } from "homebridge-plugin-utils";
 
 /**
  * The primary platform-configuration entry, as it actually arrives from the Homebridge UI. Every consolidated setting is declared as an unknown-valued optional
@@ -41,17 +41,19 @@ export interface RatgdoConfigPatch {
 }
 
 /**
- * The manual device the Add Device card asks the interpreter to compose a write for: the address the user typed, and the key they typed beside it.
+ * The manual device the Add Device card asks the interpreter to compose a write for: the address the user typed, the key they typed beside it, and the MAC the card's
+ * test learned, in the plugin's identity form, which is where the key is stored.
  */
 export interface RatgdoManualDevice {
 
   address: string;
   key?: string;
+  mac: string;
 }
 
 /**
- * The patch that adds a device by address. It carries only the options array, because both halves of a manual device - the listed address and the key stored at that
- * address's identity - live in it; no configuration property is involved either way.
+ * The patch that adds a device by address. It carries only the options array, because both halves of a manual device - the listed address and the key stored at the
+ * device's MAC - live in it; no configuration property is involved either way.
  */
 export interface RatgdoManualDevicePatch {
 
@@ -63,6 +65,7 @@ export interface RatgdoManualDevicePatch {
  */
 export interface RatgdoConfigInterpreter {
 
+  globalKey(config?: RatgdoLegacyConfig): string | undefined;
   manualAddresses(config?: RatgdoLegacyConfig): readonly string[];
   migrate(config?: RatgdoLegacyConfig): RatgdoConfigPatch | null;
   withManualDevice(config: RatgdoLegacyConfig | undefined, device: RatgdoManualDevice): RatgdoManualDevicePatch | null;
@@ -90,14 +93,13 @@ export declare const canonicalManualAddress: (address: unknown) => string;
 export declare const isZonedAddress: (address: string) => boolean;
 
 /**
- * Build the interpreter over an injected feature-option engine class, the served option catalog, and the two engine helpers the manual-device composition needs.
+ * Build the interpreter over an injected feature-option engine class, the served option catalog, and the engine's list formatter the manual-device composition needs.
  *
  * @param injected.FeatureOptions  - The feature-option engine class.
  * @param injected.catalog         - The served catalog.
  * @param injected.formatValueList - The engine's own list formatter.
- * @param injected.scopeSafeId     - The engine's own identifier rule.
  *
  * @returns The interpreter.
  */
-export declare const makeRatgdoConfig: ({ FeatureOptions, catalog, formatValueList, scopeSafeId }: { FeatureOptions: typeof FeatureOptions;
-  catalog: RatgdoConfigCatalog; formatValueList: typeof formatValueList; scopeSafeId: typeof scopeSafeId; }) => RatgdoConfigInterpreter;
+export declare const makeRatgdoConfig: ({ FeatureOptions, catalog, formatValueList }: { FeatureOptions: typeof FeatureOptions; catalog: RatgdoConfigCatalog;
+  formatValueList: typeof formatValueList; }) => RatgdoConfigInterpreter;
