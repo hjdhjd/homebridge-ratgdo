@@ -2,8 +2,8 @@
  *
  * device.updatestate-motion.test.ts: updateState() motion and obstruction concern net for RatgdoAccessory.
  *
- * updateState() is the central per-telemetry-event router. This file pins the two transient-sensor branches it owns: the "binary_sensor-motion" case (which latches the
- * MotionDetected characteristic, arms a self-clearing timer, and optionally drives a motion-derived occupancy sensor) and the "binary_sensor-obstruction" case (which
+ * updateState() is the central per-telemetry-event router. This file locks in the two transient-sensor branches it owns: the "binary_sensor-motion" case (which latches
+ * the MotionDetected characteristic, arms a self-clearing timer, and optionally drives a motion-derived occupancy sensor) and the "binary_sensor-obstruction" case (which
  * mirrors the wire obstruction state onto the GarageDoorOpener service and gates its log / MQTT side effects on an actual transition). Both branches schedule or read
  * real time, so every timer-dependent assertion drives the platform double's test clock rather than waiting on the wall clock. MQTT is enabled on every build so the
  * publish side effects are observable, and the log capture buffer is asserted against the production log strings verbatim.

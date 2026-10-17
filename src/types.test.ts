@@ -4,7 +4,7 @@
  * entry point in index.ts.
  *
  * RatgdoService and RatgdoVariant are modelled as `as const` objects paired with same-named string-literal unions rather than TypeScript enums (see the rationale in
- * types.ts: enums are non-erasable and clash with the "erasableSyntaxOnly" tsconfig flag). The call-site shape mimics an enum, so these tests pin the
+ * types.ts: enums are non-erasable and clash with the "erasableSyntaxOnly" tsconfig flag). The call-site shape mimics an enum, so these tests lock in the
  * representative member-to-string resolutions and the full key/value contract. Because `as const` is a compile-time-only narrowing, the emitted JavaScript is a plain
  * mutable object - we assert that runtime reality (Object.isFrozen is false) and lean on the exhaustive key/value snapshot as the immutability contract proxy.
  *
@@ -30,7 +30,7 @@ describe("RatgdoService const-object enum", () => {
   test("is not runtime-frozen because `as const` is a compile-time-only narrowing", () => {
 
     // The `as const` assertion narrows the static type to readonly literals, but it emits a plain mutable object - it never calls Object.freeze - so the runtime
-    // object reports as not frozen. We pin that reality here rather than asserting a frozen state the production idiom does not actually provide.
+    // object reports as not frozen. We lock in that reality here rather than asserting a frozen state the production idiom does not actually provide.
     assert.equal(Object.isFrozen(RatgdoService), false, "`as const` narrows types at compile time only, so the emitted RatgdoService object is not runtime-frozen");
   });
 
@@ -85,7 +85,7 @@ describe("plugin registration entry point", () => {
 
     const registerPlatform = mock.fn();
 
-    // The entry point only ever touches api.registerPlatform, so a stub carrying just that mocked method is a faithful minimal Homebridge API for this seam.
+    // The entry point only ever touches api.registerPlatform, so a stub carrying just that mocked method is a faithful minimal Homebridge API for this boundary.
     const api = { registerPlatform } as unknown as API;
 
     registerRatgdoPlatform(api);

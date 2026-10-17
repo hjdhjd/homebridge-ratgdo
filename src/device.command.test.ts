@@ -4,7 +4,7 @@
  * accessory's command() dispatcher to the esphome-client. These tests reach the REAL onSet handlers production installed during configureXxx (via the accessory's
  * services), fire them the way HomeKit would, and assert on what the fake client recorded: each {id, payload} the device resolved through its entity registry. The
  * variant-keyed entity ids the device dispatches against ("light-light", "switch-laser", "lock-lock_remotes", "cover-door", "switch-str_output",
- * "button-pre-close_warning") are read straight from RATGDO_ENTITIES, so the assertions pin the wire-faithful resolution rather than re-deriving it.
+ * "button-pre-close_warning") are read straight from RATGDO_ENTITIES, so the assertions lock in the wire-faithful resolution rather than re-deriving it.
  *
  * Timer-driven command concerns - the command-failure UI revert (RATGDO_UI_REVERT_DELAY) and the Konnected pre-close-warning momentary auto-revert
  * (RATGDO_KONNECTED_PCW_DURATION) - run on the platform double's test clock, so the deferred characteristic write is observed deterministically without a real-time

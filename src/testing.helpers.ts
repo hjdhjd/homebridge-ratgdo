@@ -8,7 +8,7 @@
  *
  *   - A hand-built HAP test-double (the Service / Characteristic marker namespaces, TestService, TestCharacteristic, TestAccessory) that mirrors only the surface the
  *     plugin actually touches. homebridge-plugin-utils' REAL acquireService / validService run unmodified against these doubles, so a REAL RatgdoAccessory is
- *     constructed end to end with no live HAP - the construction-seam casts are confined to buildRatgdoAccessory.
+ *     constructed end to end with no live HAP - the construction-boundary casts are confined to buildRatgdoAccessory.
  *   - A platform double (makeTestPlatform) carrying a REAL FeatureOptions engine (so userOptions thread through the production feature-option logic), a capturing log,
  *     an optional recording MQTT double, and a fake esphome-client.
  *   - A fake esphome-client (TestEspHomeClient) that records command dispatch and lets a test drive lifecycle / telemetry / log subscriptions, plus typed telemetry
@@ -695,8 +695,8 @@ export class TestEspHomeClient implements Disposable {
   }
 }
 
-// Seam-cast a TestEspHomeClient to the EspHomeClient type captureInitialState and openConnection consume directly. The cast lives here in the harness so connection-test
-// bodies that call captureInitialState directly carry no `as unknown` casts of their own; the double implements every method those functions reach.
+// Cast a TestEspHomeClient at the boundary to the EspHomeClient type captureInitialState and openConnection consume directly. The cast lives here in the harness so
+// connection-test bodies that call captureInitialState directly carry no `as unknown` casts of their own; the double implements every method those functions reach.
 export function asEspHomeClient(client: TestEspHomeClient): EspHomeClient {
 
   return client as unknown as EspHomeClient;
@@ -704,7 +704,7 @@ export function asEspHomeClient(client: TestEspHomeClient): EspHomeClient {
 
 /* One recorded factory invocation, narrowed to the open-options fields a connection test asserts on: the static clientId, the host, the resolved psk the platform
  * threads through openConnection, and the logger and cancellation signal it forwards. Recording these is what lets a test prove openConnection forwarded the right
- * values across the injected seam (the headline of the client-factory port), rather than merely that the call returned a result. The logger and the signal are
+ * values across the injected boundary (the headline of the client-factory port), rather than merely that the call returned a result. The logger and the signal are
  * required rather than optional because openConnection forwards its own log argument and the caller's shutdown signal unconditionally, so a recorded invocation
  * always carries both and optionality would misstate the contract.
  */
@@ -726,8 +726,8 @@ export type OpenClientHandler = (options: RecordedOpenOptions, index: number) =>
 /* Build a fake `openEspHomeClient` factory for openConnection and status-feed tests. Pass a TestEspHomeClient to model a successful open (the factory resolves it), an
  * Error to model a failed open (the factory rejects with it - an EncryptionKeyInvalidError, a PermanentError subclass, etc.), or a handler to answer each call on its
  * own terms. The fixed forms are wrapped into a handler at construction, so there is exactly one recording path and one `calls` array however the factory was built.
- * The returned function matches openEspHomeClient's port type through the one construction-seam cast a test needs, so the test body itself stays cast-free, and the
- * `calls` array records the options each invocation received so a test can assert what openConnection forwarded across the seam (every recorded field, the logger
+ * The returned function matches openEspHomeClient's port type through the one construction-boundary cast a test needs, so the test body itself stays cast-free, and the
+ * `calls` array records the options each invocation received so a test can assert what openConnection forwarded across the boundary (every recorded field, the logger
  * adapter included).
  */
 export function makeFakeOpenClient(result: Error | OpenClientHandler | TestEspHomeClient): OpenEspHomeClient & { calls: RecordedOpenOptions[] } {
@@ -758,8 +758,8 @@ export function makeFakeOpenClient(result: Error | OpenClientHandler | TestEspHo
 }
 
 /* Build a single telemetry event in the wire-faithful shape the esphome-client snapshot carries, mirroring esphome-client's own test factory: a { entity, key, type,
- * ...fields } literal cast to TelemetryEvent at this construction seam. The cast is the same one esphome-client's own latest-state-cache tests use - the wire shape is
- * a schema-derived union with all-optional value fields, so the seam cast is the blessed way to synthesize one.
+ * ...fields } literal cast to TelemetryEvent at this construction boundary. The cast is the same one esphome-client's own latest-state-cache tests use - the wire shape
+ * is a schema-derived union with all-optional value fields, so the boundary cast is the blessed way to synthesize one.
  */
 export function makeTelemetry(type: string, objectId: string, fields: Record<string, unknown> = {}): TelemetryEvent {
 
@@ -902,7 +902,8 @@ export function makeRatgdoService(txt: Partial<Record<RatgdoTxtKey, Nullable<str
   return makeService({ addresses, host: "ratgdo-" + label, instance: label, port: 6053, serviceType: RATGDO_MDNS_SERVICE_TYPE.replace(/\.local$/u, ""), strings });
 }
 
-// The platform double's read surface, as the accessory and its configure chain consume it. The construction-seam cast to RatgdoPlatform happens in buildRatgdoAccessory.
+// The platform double's read surface, as the accessory and its configure chain consume it. The construction-boundary cast to RatgdoPlatform happens
+// in buildRatgdoAccessory.
 export interface TestPlatform {
 
   api: { hap: TestHap };
@@ -1019,7 +1020,7 @@ export interface BuildRatgdoAccessoryResult {
   ratgdo: RatgdoAccessory;
 }
 
-/* Construct a REAL RatgdoAccessory against the doubles - the device-test workhorse, analogous to HBPU's per-suite construction helpers. The construction-seam casts
+/* Construct a REAL RatgdoAccessory against the doubles - the device-test workhorse, analogous to HBPU's per-suite construction helpers. The construction-boundary casts
  * (platform, accessory) are the only casts a device test needs; everything the accessory then does runs the real production code against the doubles. Returns the
  * constructed accessory plus every handle a test asserts on: the underlying TestAccessory (to read services / characteristics), the captured log entries, the fake
  * client (to read recorded commands), the clock the accessory's timers arm on (to reach a deadline without waiting), and the recording MQTT double (when enabled).
@@ -1032,7 +1033,7 @@ export function buildRatgdoAccessory(options: BuildRatgdoAccessoryOptions = {}):
   const accessory = options.accessory ?? makeTestAccessory(device.name, platform.hap.uuid.generate(device.mac));
   const initialState = options.initialState ?? ((device.variant === RatgdoVariant.KONNECTED) ? makeKonnectedInitialState() : makeRatgdoInitialState());
 
-  // The construction-seam casts (platform, accessory) bridge the doubles to the production constructor's parameter types - the only casts a device test needs.
+  // The construction-boundary casts (platform, accessory) bridge the doubles to the production constructor's parameter types - the only casts a device test needs.
   const ratgdo = new RatgdoAccessory(platform as unknown as ConstructorParameters<typeof RatgdoAccessory>[0],
     accessory as unknown as ConstructorParameters<typeof RatgdoAccessory>[1], device, initialState);
 

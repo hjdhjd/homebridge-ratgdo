@@ -1105,7 +1105,7 @@ export class RatgdoAccessory implements Disposable {
         motionOccupancyService?.updateCharacteristic(this.hap.Characteristic.StatusActive, isOnline);
         motionService?.updateCharacteristic(this.hap.Characteristic.StatusActive, isOnline);
 
-        // The "Ratgdo connected." log lives in the platform's markOnline (the SSOT for post-connect setup), so connected announcements ride through it on both initial
+        // The "Ratgdo connected." log lives in the platform's markOnline (the SSOT for post-connect setup), so connected announcements go through it on both initial
         // discovery and reconnect. Here we own only the disconnect transition log - the true-to-false flip is the user-visible signal that the device went away.
         const wasOnline = this.status.availability;
 
@@ -1781,7 +1781,7 @@ export class RatgdoAccessory implements Disposable {
     this.status[descriptor.field] = detected;
     this.services[descriptor.service]?.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, detected);
 
-    // Both occupancy kinds share the motion log gate: there is no dedicated door-open logging hint, so the door-open indicator's log rides Log.Motion by design.
+    // Both occupancy kinds share the motion log gate: there is no dedicated door-open logging hint, so the door-open indicator's log goes through Log.Motion by design.
     if(this.hints.logMotion) {
 
       this.log.info("%s %sdetected.", descriptor.label, detected ? "" : "no longer ");

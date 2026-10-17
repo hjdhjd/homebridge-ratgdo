@@ -93,7 +93,7 @@ describe("translateTelemetry", () => {
     test("normalize to an empty-state passthrough that updateState drops", () => {
 
       // A diagnostic sensor (voltage here) is an entity type ratgdo does not model. translateTelemetry preserves the wire id but leaves the state empty, and
-      // updateState has no matching case for it, so it is dropped. This pins the deliberate catch-all rather than special-casing every unconsumed ESPHome type.
+      // updateState has no matching case for it, so it is dropped. This locks in the deliberate catch-all rather than special-casing every unconsumed ESPHome type.
       const event = translateTelemetry(makeTelemetry("sensor", "voltage", { state: 12.5 }));
 
       assert.equal(event.id, "sensor-voltage", "the wire id is preserved for an unmodeled entity type");

@@ -3,8 +3,8 @@
  * testing.helpers.test.ts: Self-test for the shared test harness in testing.helpers.ts.
  *
  * The harness is the foundation every other unit test builds on - the hand-built HAP double, the platform / ESPHome / MQTT doubles, the telemetry factories, and the
- * buildRatgdoAccessory workhorse. A bug here would cascade into misleading pass/fail signals across the whole suite, so this file pins the harness's own contract: the
- * guarantees the real homebridge-plugin-utils service helpers and the production accessory depend on (a marker service seeds its primary characteristic;
+ * buildRatgdoAccessory workhorse. A bug here would cascade into misleading pass/fail signals across the whole suite, so this file locks in the harness's own contract:
+ * the guarantees the real homebridge-plugin-utils service helpers and the production accessory depend on (a marker service seeds its primary characteristic;
  * getCharacteristic returns a stable instance; triggerSet runs the handler then caches; on/emit/dispose drive and detach; the telemetry factories key the snapshot the
  * way the device reads it; makeTestPlatform wires a REAL FeatureOptions engine). It exercises the harness directly rather than through a production accessory.
  */
@@ -20,8 +20,8 @@ import assert from "node:assert/strict";
 import { txtEntries } from "homebridge-plugin-utils";
 
 /* The telemetry-event fields these tests assert on. The factories return a TelemetryEvent (a schema-derived union with all-optional value fields); we view one as this
- * narrow declared-property shape at the test seam so the assertions read fields by dot access without tripping noPropertyAccessFromIndexSignature, and without an `any`
- * cast - the same construction-seam viewing esphome-client's own tests use when synthesizing wire events.
+ * narrow declared-property shape at the test boundary so the assertions read fields by dot access without tripping noPropertyAccessFromIndexSignature, and without an
+ * `any` cast - the same construction-boundary viewing esphome-client's own tests use when synthesizing wire events.
  */
 interface EventFields {
 
@@ -441,7 +441,7 @@ describe("asEspHomeClient and makeFakeOpenClient", () => {
 
     const client = new TestEspHomeClient();
 
-    assert.equal(asEspHomeClient(client), client, "the seam cast returns the same instance, viewed as the production EspHomeClient type");
+    assert.equal(asEspHomeClient(client), client, "the boundary cast returns the same instance, viewed as the production EspHomeClient type");
   });
 
   test("makeFakeOpenClient resolves the supplied client, modeling a successful open", async () => {
@@ -468,7 +468,7 @@ describe("asEspHomeClient and makeFakeOpenClient", () => {
 
     assert.equal(open.calls.length, 1, "every invocation is recorded");
     assert.equal(open.calls[0]?.host, "192.0.2.10", "the recorded options carry the host openConnection forwards");
-    assert.equal(open.calls[0]?.psk, "k", "the recorded options carry the psk, so a test can assert the resolved key threads through the seam unchanged");
+    assert.equal(open.calls[0]?.psk, "k", "the recorded options carry the psk, so a test can assert the resolved key threads through the boundary unchanged");
   });
 
   test("makeFakeOpenClient answers each call through a handler, passing that call's options and its zero-based index", async () => {
@@ -498,7 +498,7 @@ describe("telemetry factories and initial-state builders", () => {
     const event = eventFields(makeTelemetry("light", "light", { state: true }));
 
     assert.equal(event.type, "light", "the type tag is carried");
-    assert.equal(event.entity, "light", "the object id rides on the entity field");
+    assert.equal(event.entity, "light", "the object id lives on the entity field");
     assert.equal(event.key, 0, "the wire key defaults to 0");
     assert.equal(event.state, true, "extra fields are spread onto the event");
   });
