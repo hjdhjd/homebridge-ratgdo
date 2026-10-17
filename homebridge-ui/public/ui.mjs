@@ -7,8 +7,8 @@ import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE, STATUS_WARM_ROUTE } from ".
 import { canonicalManualAddress, isZonedAddress, makeRatgdoConfig } from "./ratgdo-config.mjs";
 import { createActionGuard, withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
 import { PluginConfigSession } from "homebridge-plugin-utils/pluginConfigSession.mjs";
-import { STATUS_EVENT } from "homebridge-plugin-utils/webui-status.js";
-import { createSaveFlow } from "homebridge-plugin-utils/webUi-saveFlow.mjs";
+import { STATUS_EVENT } from "homebridge-plugin-utils/webui/status.js";
+import { createSaveFlow } from "homebridge-plugin-utils/webui/saveflow.js";
 import { webUi } from "homebridge-plugin-utils/webUi.mjs";
 
 // The motion-latch fallback duration, in seconds, for the placeholder skeleton only. The authoritative snapshot rows carry the server's RATGDO_MOTION_DURATION on their

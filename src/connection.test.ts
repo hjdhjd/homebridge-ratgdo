@@ -105,8 +105,7 @@ describe("captureInitialState", () => {
 
     await assert.rejects(
       captureInitialState({ client: asEspHomeClient(client), expected: [ coverId, lightId ], shutdownSignal: liveSignal(), timeoutSeconds: 0.02 }),
-      (error) => (error instanceof DOMException) && (error.name === "TimeoutError"),
-      "an unsatisfied wait rejects with the AbortSignal.timeout TimeoutError DOMException");
+      { constructor: DOMException, name: "TimeoutError" });
   });
 
   test("shutdown: rejects with the shutdown reason at the synchronous gate when the signal is already aborted", async () => {
@@ -591,9 +590,8 @@ describe("the key rule and the identity checks", () => {
     const { result } = await dialAddress(openClient, keyStore({}, "global-key").keyFor);
 
     assert.ok(result.ok, "the device is admitted at its first contact");
-    assert.throws(() => resolverOf(openClient.calls[0])({ macAddress: OTHER_COLON }), (error) => (error instanceof DeviceIdentityError) &&
-      (error.message === OTHER + " answered, but this connection is for " + MAC + "."),
-    "a reconnect's hello from another device is refused before a key is chosen, naming the device that answered and the one the connection was admitted as");
+    assert.throws(() => resolverOf(openClient.calls[0])({ macAddress: OTHER_COLON }),
+      { constructor: DeviceIdentityError, message: OTHER + " answered, but this connection is for " + MAC + "." });
   });
 
   test("an admitted old-firmware address connection keeps offering the global key after a key is stored for its MAC", async () => {

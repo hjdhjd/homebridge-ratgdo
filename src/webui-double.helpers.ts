@@ -10,7 +10,7 @@
  * The fixtures sit beside the double because both describe one imagined install - a host holding a configuration and an option catalog, a sidebar holding devices -
  * and a test that varies one of them wants the rest to follow from the same description.
  */
-import type { FeatureCategoryEntry, FeatureOptionEntry, Nullable } from "homebridge-plugin-utils";
+import type { CommitConfigResult, FeatureCategoryEntry, FeatureOptionEntry, Nullable } from "homebridge-plugin-utils";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 
 /* The shared route module, read the way every browser module is read from TypeScript here: through a specifier held in a variable, so the import resolves at runtime
@@ -108,32 +108,26 @@ export interface FeatureOptionsParams {
   };
 }
 
-/* What a coordinated configuration write became, as the framework's own `commitConfig` reports it. `committed` and `staged` both mean the configuration changed -
- * `staged` reached the host's memory and not the disk - while `failed` means nothing changed, and `unchanged` means the composer answered null, so nothing was
- * written: its change was already in place, or it refused the change against the configuration as it stands.
- */
-export type CommitResult = { kind: "committed" } | { error: unknown; kind: "failed" } | { error: unknown; kind: "staged" } | { kind: "unchanged" };
-
 /* One recorded `commitConfig` call: the patch the page's composer produced against the fixture's primary entry, and what the double answered. Recording the composed
  * patch rather than the composer itself is what lets a test assert WHAT would be written without running the write twice.
  */
 export interface RecordedCommit {
 
   patch: unknown;
-  result: CommitResult;
+  result: CommitConfigResult;
 }
 
 // The feature-options facade the page reaches through `ui.featureOptions`.
 export interface FeatureOptionsDouble {
 
   catalog: () => Promise<FakeCatalog>;
-  commitConfig: (compose: (platform: FakeConfigEntry) => Nullable<Record<string, unknown>>, options?: { rename?: unknown }) => Promise<CommitResult>;
+  commitConfig: (compose: (platform: FakeConfigEntry) => Nullable<Record<string, unknown>>, options?: { rename?: unknown }) => Promise<CommitConfigResult>;
   commits: RecordedCommit[];
   editedConfig: FakeConfigEntry[];
   getHomebridgeDevices: () => Promise<DeviceListResult>;
   // What the next commitConfig call answers. A test sets it to drive the staged and failed arms the page renders differently. `unchanged` is never driven through it,
   // because that answer comes from a composer returning null.
-  nextCommit: CommitResult;
+  nextCommit: CommitConfigResult;
   statusPanel: StatusPanelDouble;
   takeover: (element: FakeElement) => { release: () => void; signal: AbortSignal };
 }
@@ -183,7 +177,8 @@ export interface FakeHost {
  *
  * `disabled` follows that rule: it stands only on the form controls, and an element of any other tag carries no such member, so reading it off a `div` answers
  * undefined as a browser does. The library's save flow accepts a control by its boolean `disabled`, so a card that handed it a `div` must fail here as it fails in a
- * browser.
+ * browser. `value` follows it too: it stands only on the controls a form reads a value from, so a card that read its address off the field's wrapper gets undefined
+ * here, as it would in a browser, rather than an empty string that reads as a field left blank.
  *
  * `children` is a frozen view rather than the live array for that same reason: the real thing is an HTMLCollection whose `length` is a getter, so `children.length = 0`
  * throws in a browser and has to throw here too. The tree is mutated through `append`, `prepend`, `before`, `remove`, and `replaceChildren`, exactly as it is in a
@@ -208,8 +203,15 @@ export interface FakeElement {
   setAttribute: (name: string, value: string) => void;
   tagName: string;
   textContent: string;
-  value: string;
+  value?: string;
 }
+
+// A fake element of a tag that carries `value`, which is how a row holds a field it types into and reads back.
+export type FakeValueControl = FakeElement & { value: string };
+
+// Whether an element the page built is a control that holds a value. A row asks this of a field before driving it, so a card that built the field as any other
+// element fails where the row opens the card.
+export const isValueControl = (element: Nullable<FakeElement>): element is FakeValueControl => typeof element?.value === "string";
 
 /* The fake document the page reads off the global scope. Every member is one the real document has, so a page reaching for anything else throws here rather than in a
  * browser - the same rule FakeElement follows, for the same reason. The test-facing search lives on the harness handle instead of on this object, because a
@@ -417,6 +419,9 @@ const childrenOf = (element: FakeElement): FakeElement[] => liveChildren.get(ele
 // The tags of the form controls, the only elements whose fake carries `disabled`, under the rule FakeElement states.
 const FORM_CONTROL_TAGS: ReadonlySet<string> = new Set([ "button", "fieldset", "input", "optgroup", "option", "select", "textarea" ]);
 
+// The tags of the controls a form reads a value from, the only elements whose fake carries `value`, under the same rule.
+const VALUE_CONTROL_TAGS: ReadonlySet<string> = new Set([ "button", "input", "option", "select", "textarea" ]);
+
 export const makeDocument = (): FakeDom => {
 
   const seeded = new Map<string, FakeElement>();
@@ -532,7 +537,7 @@ export const makeDocument = (): FakeDom => {
       },
       tagName: tag,
       textContent: "",
-      value: ""
+      ...VALUE_CONTROL_TAGS.has(tag) ? { value: "" } : {}
     };
 
     liveChildren.set(element, kids);
@@ -736,7 +741,7 @@ export class webUi {
        * framework's does: nothing is merged and nothing is recorded, because `commits` lists the writes the framework opened and that answer opens none. The
        * framework's optional second argument, the rename a write declares, has no parameter here, since the card's save declares no rename.
        */
-      commitConfig: async (compose): Promise<CommitResult> => {
+      commitConfig: async (compose): Promise<CommitConfigResult> => {
 
         const primary = this.featureOptions.editedConfig[0];
 

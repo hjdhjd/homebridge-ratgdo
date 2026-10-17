@@ -30,7 +30,7 @@ export const LIBRARY_UI_DIR = new URL("../node_modules/homebridge-plugin-utils/d
  * export entries: `homebridge-plugin-utils/testing` resolves through the package's own exports map and must keep doing so, while `.../featureOptions.js` has no export
  * entry at all and only resolves here.
  */
-const LIBRARY_BROWSER_MODULE = /^homebridge-plugin-utils\/([\w.-]+\.m?js)$/;
+const LIBRARY_BROWSER_MODULE = /^homebridge-plugin-utils\/([\w./-]+\.m?js)$/;
 
 /* Route the page's framework specifiers. The one module the page must not really construct is its webUi shell: constructing it would mount views into a document that
  * does not exist. Every other browser module resolves to the file the package ships, so the page runs against the real feature-option engine and the real configuration

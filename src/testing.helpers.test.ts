@@ -527,18 +527,24 @@ describe("asEspHomeClient and makeFakeOpenClient", () => {
     await assert.rejects(() => makeFakeOpenClient(openThroughHello({ client, hello }))({ host: "192.0.2.10", psk: () => {
 
       throw fault;
-    } }), (error) => (error instanceof ConnectionError) && (error.code === "CONNECT_FAILED") && (error.cause === fault),
-    "any other exception rejects as a connection failure carrying it as its cause, as the library wraps one");
+    } }), (error: unknown) => {
+
+      assert.ok(error instanceof ConnectionError, "any other exception rejects as a connection failure, as the library wraps one");
+      assert.equal(error.code, "CONNECT_FAILED", "under the connect-failed code");
+      assert.equal(error.cause, fault, "carrying the exception as its cause");
+
+      return true;
+    });
 
     for(const answer of [ null, "" ]) {
 
       // eslint-disable-next-line no-await-in-loop
       await assert.rejects(() => makeFakeOpenClient(openThroughHello({ client, hello }))({ host: "192.0.2.10", psk: () => answer }),
-        (error) => error instanceof EncryptionKeyMissingError, "a resolver answering " + JSON.stringify(answer) + " fails as a missing key");
+        EncryptionKeyMissingError, "a resolver answering " + JSON.stringify(answer) + " fails as a missing key");
     }
 
     await assert.rejects(() => makeFakeOpenClient(openThroughHello({ client, hello }))({ host: "192.0.2.10", psk: null }),
-      (error) => error instanceof EncryptionRequiredError, "and an invocation carrying no resolver fails the way an encrypted device answers a plaintext client");
+      EncryptionRequiredError, "and an invocation carrying no resolver fails the way an encrypted device answers a plaintext client");
   });
 
   test("makeFakeOpenClient answers each call through a handler, passing that call's options and its zero-based index", async () => {

@@ -9,12 +9,13 @@
  * is therefore the page's behavior rather than a restatement of it - the host's request log, the listener records each fake keeps for what the page registered on
  * it, the double's counters, and the fake document's state.
  */
-import type { CommitResult, DeviceListResult, FakeCatalog, FakeConfigEntry, FakeDevice, FakeElement, RecordedLog } from "./webui-double.helpers.ts";
+import type { DeviceListResult, FakeCatalog, FakeConfigEntry, FakeDevice, FakeElement, FakeValueControl, RecordedLog } from "./webui-double.helpers.ts";
 import { LIBRARY_UI_DIR, loadUi } from "./webui.helpers.ts";
-import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE, STATUS_WARM_ROUTE, defaultConfig, defaultDevices, fire, webUi } from "./webui-double.helpers.ts";
+import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE, STATUS_WARM_ROUTE, defaultConfig, defaultDevices, fire, isValueControl, webUi } from "./webui-double.helpers.ts";
 import { describe, test } from "node:test";
 import { expectAt, settle } from "homebridge-plugin-utils/testing";
 import { featureOptionCategories, featureOptions } from "./options.ts";
+import type { CommitConfigResult } from "homebridge-plugin-utils";
 import type { LoadedUi } from "./webui.helpers.ts";
 import { RATGDO_VARIANT_LABELS } from "./types.ts";
 import assert from "node:assert/strict";
@@ -655,7 +656,8 @@ describe("the ratgdo settings page's Add Device card", () => {
    * tree would read an empty string whether or not a retired action had painted into the card - and a row asserting that nothing was painted would pass against a
    * card that was painted.
    */
-  const openCard = (page: LoadedUi): { address: FakeElement; key: FakeElement; region: FakeElement; save: FakeElement; test: FakeElement; verdict: FakeElement } => {
+  const openCard = (page: LoadedUi): { address: FakeValueControl; key: FakeValueControl; region: FakeElement; save: FakeElement; test: FakeElement;
+    verdict: FakeElement; } => {
 
     fire(byText(page, "Add Device"), "click");
 
@@ -664,7 +666,8 @@ describe("the ratgdo settings page's Add Device card", () => {
     const verdict = page.findElement((element) => (element.attributes["role"] === "status"));
     const region = address?.parentElement;
 
-    assert.ok(address && key && verdict && region, "the open card stands in the page with its address and key fields and its verdict line");
+    assert.ok(isValueControl(address) && isValueControl(key) && verdict && region,
+      "the open card stands in the page with its address and key fields, each a control that holds a value, and its verdict line");
 
     return { address, key, region, save: byText(page, "Save"), test: byText(page, "Test Connection"), verdict };
   };
@@ -1611,7 +1614,7 @@ describe("the ratgdo settings page's Add Device card", () => {
       const original = page.double.featureOptions.commitConfig;
 
       // The commit is held open so the card can be reopened after the write has started, then released.
-      page.double.featureOptions.commitConfig = async (compose): Promise<CommitResult> => {
+      page.double.featureOptions.commitConfig = async (compose): Promise<CommitConfigResult> => {
 
         started = true;
 
@@ -1660,7 +1663,7 @@ describe("the ratgdo settings page's Add Device card", () => {
       const original = page.double.featureOptions.commitConfig;
 
       // The commit is held open so the card can be closed across it, then released.
-      page.double.featureOptions.commitConfig = async (compose): Promise<CommitResult> => {
+      page.double.featureOptions.commitConfig = async (compose): Promise<CommitConfigResult> => {
 
         await held.promise;
 
@@ -1708,7 +1711,7 @@ describe("the ratgdo settings page's Add Device card", () => {
       const original = page.double.featureOptions.commitConfig;
 
       // The commit is held open so the address field can be edited across it, then released.
-      page.double.featureOptions.commitConfig = async (compose): Promise<CommitResult> => {
+      page.double.featureOptions.commitConfig = async (compose): Promise<CommitConfigResult> => {
 
         started = true;
 
@@ -1756,7 +1759,7 @@ describe("the ratgdo settings page's Add Device card", () => {
       const original = page.double.featureOptions.commitConfig;
 
       // The commit is held open so the address field can be edited across it, then released into a failure.
-      page.double.featureOptions.commitConfig = async (compose): Promise<CommitResult> => {
+      page.double.featureOptions.commitConfig = async (compose): Promise<CommitConfigResult> => {
 
         started = true;
 
@@ -1933,7 +1936,7 @@ describe("the ratgdo settings page's Add Device card", () => {
       const original = page.double.featureOptions.commitConfig;
 
       // The commit is held open so a second save can be pressed while the first one's write is in flight, then released.
-      page.double.featureOptions.commitConfig = async (compose): Promise<CommitResult> => {
+      page.double.featureOptions.commitConfig = async (compose): Promise<CommitConfigResult> => {
 
         await held.promise;
 
@@ -1985,7 +1988,7 @@ describe("the ratgdo settings page's Add Device card", () => {
       const original = page.double.featureOptions.commitConfig;
 
       // The commit is held open so the card can be read while the save's write is in flight, then released.
-      page.double.featureOptions.commitConfig = async (compose): Promise<CommitResult> => {
+      page.double.featureOptions.commitConfig = async (compose): Promise<CommitConfigResult> => {
 
         await held.promise;
 
@@ -2016,7 +2019,7 @@ describe("the ratgdo settings page's Add Device card", () => {
 
     // The outcomes of a save that write nothing, each arranged as the rows above arrange it: a device refusing the test, an address already listed with no key
     // typed, and a write the host refuses.
-    const unwritten: { commit?: CommitResult; config?: FakeConfigEntry[]; name: string; probe: unknown; verdict: string }[] = [
+    const unwritten: { commit?: CommitConfigResult; config?: FakeConfigEntry[]; name: string; probe: unknown; verdict: string }[] = [
 
       { name: "the device refused", probe: { kind: "error", reason: "auth-missing" },
         verdict: "This device requires its API encryption key. Enter the key from the device's YAML configuration and test again." },
