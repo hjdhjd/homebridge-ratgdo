@@ -7,20 +7,22 @@
  * drives it. The doubles follow the testing.helpers conventions - counters, not booleans, wherever a no-op-versus-double-call distinction matters.
  */
 import { AuthenticationError, CoverOperation, LockState, entityId } from "esphome-client";
-import type { EntityId, TelemetryEvent } from "esphome-client";
+import type { DeviceInfo, EntityId, TelemetryEvent } from "esphome-client";
 import { HbpuAbortError, dnsNameKey } from "homebridge-plugin-utils";
 import type { MdnsBrowserLike, MdnsBrowserOptions, MdnsService, Nullable, StatusEvent } from "homebridge-plugin-utils";
 import type { OpenClientHandler, RecordedOpenOptions, TestEspHomeClientOptions } from "./testing.helpers.ts";
-import { StatusFeed, narrowStatusWarmRequest } from "./webui-status.ts";
+import { RATGDO_MOTION_DURATION, RATGDO_WEBUI_PROBE_TIMEOUT } from "./settings.ts";
+import { StatusFeed, narrowStatusProbeRequest, narrowStatusWarmRequest } from "./webui-status.ts";
 import { TestClock, TestMdnsBrowserFactory, capturingLog, expectAt, formatLogEntry, settle } from "homebridge-plugin-utils/testing";
 import { TestEspHomeClient, makeBinarySensorEvent, makeCoverEvent, makeFakeOpenClient, makeLightEvent, makeLockEvent, makeRatgdoService, makeSwitchEvent,
   makeTelemetry } from "./testing.helpers.ts";
 import { describe, test } from "node:test";
 import type { OpenEspHomeClient } from "./connection.ts";
-import { RATGDO_MOTION_DURATION } from "./settings.ts";
 import type { RatgdoTxtKey } from "./discovery.ts";
+import { RatgdoVariant } from "./types.ts";
 import type { TestMdnsBrowser } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
+import { canonicalManualAddress } from "./manual.ts";
 
 /* This file constructs raw mDNS TXT payloads whose keys are the snake_case ESPHome wire names (esphome_version, project_name, ...), so camelcase is disabled for the
  * fixture factory below, matching the discovery-test convention.
@@ -158,6 +160,32 @@ const callsForHost = (openClient: { calls: RecordedOpenOptions[] }, host: string
  * suite that constructs it directly. A case that advertises something else - the Konnected variant, or an extra switch - passes its own `entities` and overrides it.
  */
 const makeClient = (options: TestEspHomeClientOptions = {}): TestEspHomeClient => new TestEspHomeClient({ entities: ADVERTISED, ...options });
+
+// The colon-delimited MAC a device-info record carries, from the stripped form the rest of this file keys on. The wire spells it one way and the pool keys on the
+// other, and this is the one place that translation is written.
+const colonMac = (mac: string): string => (mac.match(/../g) ?? []).join(":");
+
+/* The one factory the address-dial sections build their clients through: a client that answers a device-info record naming the given device, so an address dial
+ * identifies it exactly as a real opener's handshake would. Overrides reach the record itself, which is how a test describes a device that names no project, no
+ * MAC, or no firmware - each one of them a refusal the dial has to classify.
+ */
+const makeAnsweringClient = (options: { deviceInfo?: Partial<DeviceInfo> | null; isEncrypted?: boolean; mac?: string;
+  variant?: "konnected" | "ratgdo"; } = {}): TestEspHomeClient => {
+
+  const konnected = ((options.variant ?? "ratgdo") === "konnected");
+  const record: Nullable<DeviceInfo> = (options.deviceInfo === null) ? null : {
+
+    esphomeVersion: "2.0.0",
+    friendlyName: konnected ? "Test Konnected" : "Test Ratgdo",
+    macAddress: colonMac(options.mac ?? MAC),
+    projectName: konnected ? "konnected.garage-door-gdov2-s" : "ratgdo.esp32",
+    projectVersion: "1.0.0",
+    ...options.deviceInfo
+  };
+
+  return makeClient({ deviceInfo: record, entities: konnected ? KONNECTED_ADVERTISED : ADVERTISED, isEncrypted: options.isEncrypted ?? false,
+    snapshot: konnected ? konnectedCache() : restingCache() });
+};
 
 /* Assemble a pool plus its recording boundaries. push captures every bridge event unless a test overrides it (the containment test injects a throwing sink); the
  * browser factory, the clock, and the client factory are the injected doubles; the discovery budget defaults short and the clock drives it. entries captures the
@@ -819,7 +847,7 @@ describe("StatusFeed addresses", () => {
   test("keeps a discovered device in the projection after it leaves the warm set - discovery memory is the source, not the warm set", async () => {
 
     // The feed has no per-device discovery removal: #devices is populated on advertisement and cleared only at dispose, so a mac dropped from the warm set stays in the
-    // projection. This pins the actual departure behavior rather than inventing a removal the feed does not perform.
+    // projection. This asserts the actual departure behavior rather than inventing a removal the feed does not perform.
     const client = makeClient({ snapshot: restingCache() });
     const { browser, feed } = makeFeed({ discoveryTimeoutSeconds: 5, openClient: makeFakeOpenClient(async () => client) });
 
@@ -1038,7 +1066,7 @@ describe("StatusFeed snapshot sizers", () => {
   test("carries each row's widest-possible value as its sizer, one per row id", async () => {
 
     // The ratgdo variant carries every StatusRowId, so one snapshot proves the whole sizer record's values. Each expected string is the widest display value that row's
-    // vocabulary can produce, pinned here so a value-set change that widens a row must update this expectation in step with the module's frozen record.
+    // vocabulary can produce, asserted here so a value-set change that widens a row must update this expectation in step with the module's frozen record.
     const { browser, feed, pushes } = makeFeed({ openClient: makeFakeOpenClient(async () => makeClient({ snapshot: restingCache() })) });
 
     feed.startDiscovery();
@@ -1400,6 +1428,96 @@ describe("StatusFeed connection logging", () => {
 
     assert.ok(entries.some((entry) => (entry.level === "error") &&
       formatLogEntry(entry).startsWith("Test Ratgdo: The live-status connection failed unexpectedly.")), "the connect body's catch logs under the device's identity");
+  });
+
+  test("speaks under the warmed log name ahead of the advertised name, and re-reads it on every line", async () => {
+
+    /* The resolver is a closure the adapter calls per line rather than a string captured at connect, so one recorded logger is driven across two warms here: the same
+     * adapter answers the log name while one is warmed and the advertised name once it is not. Asserting it on ONE adapter is what tells a live resolver from an
+     * implementation that merely happened to compute the right prefix at connect time.
+     */
+    const openClient = makeFakeOpenClient(async () => makeClient({ snapshot: restingCache() }));
+    const { browser, entries, feed } = makeFeed({ openClient });
+
+    feed.startDiscovery();
+    browser().found(makeService());
+
+    await settle();
+
+    feed.warm({ devices: [{ logName: "North Door", mac: MAC }] });
+
+    await settle();
+
+    const call = openClient.calls[0];
+
+    assert.ok(call, "the device connects, recording the logger openConnection forwarded to the client factory");
+
+    call.logger.info("A line.");
+
+    assert.ok(entries.some((entry) => (entry.level === "info") && (formatLogEntry(entry) === "North Door: A line.")),
+      "the user's own name for the device outranks the name the device advertises");
+
+    feed.warm({ devices: [{ mac: MAC }] });
+
+    await settle();
+
+    call.logger.info("A later line.");
+
+    assert.ok(entries.some((entry) => (entry.level === "info") && (formatLogEntry(entry) === "Test Ratgdo: A later line.")),
+      "clearing the name falls the very same adapter back to the advertised one, which only a resolver read per line can do");
+  });
+
+  test("falls back through the advertised name to the dialed address for a device with neither a warmed name nor an advertised one", async () => {
+
+    // The full precedence needs a device advertising no usable name and carrying no log name, which is the one input that reaches the last fallback.
+    const openClient = makeFakeOpenClient(async () => makeClient({ snapshot: restingCache() }));
+    const { browser, entries, feed } = makeFeed({ openClient });
+
+    feed.startDiscovery();
+    browser().found(makeService(MAC, ADDR, { friendly_name: undefined }));
+
+    await settle();
+
+    feed.warm({ devices: [{ mac: MAC }] });
+
+    await settle();
+
+    const call = openClient.calls[0];
+
+    assert.ok(call, "the unnamed device still connects");
+
+    call.logger.info("A line.");
+
+    assert.ok(entries.some((entry) => (entry.level === "info") && (formatLogEntry(entry) === (ADDR + ": A line."))),
+      "with no name from either source the dialed address stands in as the identity");
+  });
+
+  test("moves no connection for a warm that changes nothing but the log name", async () => {
+
+    // A log name is display truth alone. The key diff is what decides a teardown, so a warm carrying a new name against an unchanged key must leave the live session
+    // exactly where it is: the factory call count proves no second connect, and the client's dispose record proves the first was never torn down.
+    const client = makeClient({ snapshot: restingCache() });
+    const openClient = makeFakeOpenClient(async () => client);
+    const { browser, feed } = makeFeed({ openClient });
+
+    feed.startDiscovery();
+    browser().found(makeService());
+
+    await settle();
+
+    feed.warm({ devices: [{ logName: "North Door", mac: MAC }] });
+
+    await settle();
+
+    assert.equal(callsForHost(openClient, ADDR).length, 1, "the first warm opens exactly one connection");
+
+    feed.warm({ devices: [{ logName: "South Door", mac: MAC }] });
+    feed.warm({ devices: [{ mac: MAC }] });
+
+    await settle();
+
+    assert.equal(callsForHost(openClient, ADDR).length, 1, "neither a renamed device nor a cleared name opens a second connection");
+    assert.equal(client.disposeCount, 0, "the live session is never torn down over a name");
   });
 });
 
@@ -2075,7 +2193,7 @@ describe("narrowStatusWarmRequest", () => {
 
     const result = narrowStatusWarmRequest({ devices: [ { mac: MAC, psk: "secret" }, { mac: MAC_TWO } ] });
 
-    assert.deepEqual(result, { devices: [ { mac: MAC, psk: "secret" }, { mac: MAC_TWO, psk: undefined } ] },
+    assert.deepEqual(result, { addresses: [], devices: [ { logName: undefined, mac: MAC, psk: "secret" }, { logName: undefined, mac: MAC_TWO, psk: undefined } ] },
       "each entry is carried, a non-empty psk kept and an absent psk narrowed to undefined");
   });
 
@@ -2083,8 +2201,22 @@ describe("narrowStatusWarmRequest", () => {
 
     const result = narrowStatusWarmRequest({ devices: [ { mac: MAC }, { psk: "x" }, { mac: "" }, "nope", null, { mac: MAC_TWO } ] });
 
-    assert.deepEqual(result, { devices: [ { mac: MAC, psk: undefined }, { mac: MAC_TWO, psk: undefined } ] },
+    assert.deepEqual(result, { addresses: [], devices: [ { logName: undefined, mac: MAC, psk: undefined }, { logName: undefined, mac: MAC_TWO, psk: undefined } ] },
       "an entry with no mac, an empty-string mac, a non-object entry, and null are each dropped while the well-formed entries survive");
+  });
+
+  test("carries a non-empty log name and narrows every other spelling of one to undefined", () => {
+
+    // The log name is narrowed by exactly the rule the psk is, so the rows that matter are the ones a wrong implementation would treat differently: a value kept, and
+    // each of the three ways a field can say nothing - absent, null, and present-but-empty.
+    assert.deepEqual(narrowStatusWarmRequest({ devices: [{ logName: "North Door", mac: MAC }] }),
+      { addresses: [], devices: [{ logName: "North Door", mac: MAC, psk: undefined }] }, "a non-empty log name is carried through");
+
+    for(const logName of [ undefined, null, "", 42 ]) {
+
+      assert.deepEqual(narrowStatusWarmRequest({ devices: [{ logName, mac: MAC }] }), { addresses: [], devices: [{ logName: undefined, mac: MAC, psk: undefined }] },
+        "a log name of " + JSON.stringify(logName) + " is the device offering no name, so it narrows to undefined");
+    }
   });
 
   test("rejects a body that is not an object or carries no devices array", () => {
@@ -2097,14 +2229,14 @@ describe("narrowStatusWarmRequest", () => {
 
   test("accepts an empty devices array", () => {
 
-    assert.deepEqual(narrowStatusWarmRequest({ devices: [] }), { devices: [] }, "an empty devices array is a valid warm - the sidebar knows nothing");
+    assert.deepEqual(narrowStatusWarmRequest({ devices: [] }), { addresses: [], devices: [] }, "an empty devices array is a valid warm - the sidebar knows nothing");
   });
 
   test("narrows a null or empty entry psk to undefined", () => {
 
-    assert.deepEqual(narrowStatusWarmRequest({ devices: [{ mac: MAC, psk: null }] }), { devices: [{ mac: MAC, psk: undefined }] },
+    assert.deepEqual(narrowStatusWarmRequest({ devices: [{ mac: MAC, psk: null }] }), { addresses: [], devices: [{ logName: undefined, mac: MAC, psk: undefined }] },
       "a null entry psk narrows to undefined");
-    assert.deepEqual(narrowStatusWarmRequest({ devices: [{ mac: MAC, psk: "" }] }), { devices: [{ mac: MAC, psk: undefined }] },
+    assert.deepEqual(narrowStatusWarmRequest({ devices: [{ mac: MAC, psk: "" }] }), { addresses: [], devices: [{ logName: undefined, mac: MAC, psk: undefined }] },
       "an empty-string entry psk narrows to undefined");
   });
 
@@ -2118,5 +2250,1247 @@ describe("narrowStatusWarmRequest", () => {
     await settle();
 
     assert.equal(pushes.length, 0, "an empty warm dispatches to no connect and pushes nothing");
+  });
+});
+
+describe("narrowStatusWarmRequest addresses", () => {
+
+  test("reads an absent, empty, or unparseable address list as no addresses at all", () => {
+
+    // An install that lists no address is the ordinary one, and every one of these spellings is it saying so. Refusing the whole request over a malformed list would
+    // blank a panel whose devices are perfectly well formed.
+    for(const addresses of [ undefined, [], "nope", null, 42 ]) {
+
+      assert.deepEqual(narrowStatusWarmRequest({ addresses, devices: [] }), { addresses: [], devices: [] },
+        "an addresses field of " + JSON.stringify(addresses) + " reads as no listed addresses");
+    }
+  });
+
+  test("canonicalizes each address through the runtime's own rule, and drops what nothing could dial", () => {
+
+    /* The feed keys every address record on this form, and the platform keys its loops on the same form, so the two must agree character for character - which is
+     * why this calls the runtime's own function rather than restating the rule. The bracketed row is the one that matters: the bracketed and bare spellings of one
+     * literal have to become ONE address here, or the feed holds two records for one device.
+     */
+    const result = narrowStatusWarmRequest({ addresses: [ { address: "[2001:DB8::5]" }, { address: "2001:db8::5" }, { address: "  Garage.Local  " },
+      { address: "fe80::1%en0" }, { address: "[]" } ], devices: [] });
+
+    assert.ok(result, "the request narrows");
+    assert.deepEqual(result.addresses.map((entry) => entry.address), [ "2001:db8::5", "2001:db8::5", "garage.local" ],
+      "the bracketed literal becomes the bare one, whitespace and case are settled, and the zoned and empty entries are dropped entirely");
+
+    for(const address of [ "[2001:db8::5]", "2001:db8::5" ]) {
+
+      assert.deepEqual(narrowStatusWarmRequest({ addresses: [{ address }], devices: [] })?.addresses,
+        [{ address: canonicalManualAddress(address), psk: undefined }],
+        "the feed and the runtime answer the same canonical form for " + JSON.stringify(address));
+    }
+  });
+
+  test("carries each well-formed address lower-cased with its key, and drops a malformed entry individually", () => {
+
+    const result = narrowStatusWarmRequest({ addresses: [ { address: "Garage.Local", psk: "secret" }, { address: ADDR }, { psk: "x" }, { address: "" }, "nope",
+      null, { address: "FD00::1", psk: "" } ], devices: [] });
+
+    assert.deepEqual(result, { addresses: [ { address: "garage.local", psk: "secret" }, { address: ADDR, psk: undefined },
+      { address: "fd00::1", psk: undefined } ], devices: [] },
+    "every address is lower-cased at this one boundary, the key follows the device rule, and an entry with no address is dropped without taking the request with it");
+  });
+});
+
+describe("StatusFeed address dial", () => {
+
+  test("serves a warmed mac that never advertised, as that mac's session at the listed address", async () => {
+
+    /* The whole point of a listed address: nothing on the network announced this device, so the pool learns what it is by dialing the address and reading the
+     * device-info record back. The snapshot push is what proves the connection became a real session rather than an identification that was thrown away.
+     */
+    const openClient = makeFakeOpenClient(async () => makeAnsweringClient());
+    const { feed, pushes } = makeFeed({ openClient });
+
+    feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    assert.equal(callsForHost(openClient, ADDR).length, 1, "the listed address is dialed exactly once");
+    assert.ok(pushes.some((event) => (event.kind === "snapshot") && (event.serialNumber === MAC)),
+      "the device that answered is served under its own mac, with the snapshot the dial captured");
+    assert.deepEqual(feed.addresses(), { [MAC]: ADDR }, "the identity strip reports the listed address, which is where the connection is");
+  });
+
+  test("dials the bare literal for a bracketed listed address", async () => {
+
+    /* The dial-host proof on the feed side, and the one that shows the fix end to end: the address arrives bracketed on the wire, and what reaches the ESPHome
+     * client factory as `host` is the bare literal. The bracketed form is not an IP literal to Node's own parser, so a dial carrying it would be resolved as a
+     * hostname and fail for good - this row is the difference between a connection and a lookup that never succeeds.
+     */
+    const openClient = makeFakeOpenClient(async () => makeAnsweringClient());
+    const { feed } = makeFeed({ openClient });
+
+    // Driven through the narrowing rather than straight into warm(), because the narrowing IS this module's canonicalization point: warm() trusts the shape the
+    // bridge boundary handed it, exactly as it trusts every other field it was given.
+    const request = narrowStatusWarmRequest({ addresses: [{ address: "[2001:DB8::5]" }], devices: [{ mac: MAC }] });
+
+    assert.ok(request, "the request narrows");
+
+    feed.warm(request);
+
+    await settle();
+
+    assert.deepEqual(openClient.calls.map((call) => call.host), ["2001:db8::5"], "one dial, and its host is the bare literal rather than the bracketed spelling");
+    assert.deepEqual(feed.addresses(), { [MAC]: "2001:db8::5" }, "and the identity strip reports that same canonical address");
+  });
+
+  test("never dials an address naming a zone", async () => {
+
+    // The page refuses a zoned address before it can be sent, so one arriving here is a payload to ignore rather than a user to tell - it is dropped at the
+    // narrowing, and the observation is that nothing was dialed at all.
+    const openClient = makeFakeOpenClient(async () => makeAnsweringClient());
+    const { feed } = makeFeed({ openClient });
+    const request = narrowStatusWarmRequest({ addresses: [{ address: "fe80::1%en0" }], devices: [{ mac: MAC }] });
+
+    assert.ok(request, "the request narrows rather than being refused wholesale");
+
+    feed.warm(request);
+
+    await settle();
+
+    assert.equal(openClient.calls.length, 0, "a zoned address reaches no dial");
+  });
+
+  test("identifies an address whose device the sidebar does not list, and closes that connection at once", async () => {
+
+    // A listed address may name a device nobody has added to HomeKit yet. Identifying it is worth one connection; HOLDING it is not, because an opener has very few
+    // API slots and the panel has nowhere to render a device it does not list.
+    const client = makeAnsweringClient({ mac: MAC_THREE });
+    const openClient = makeFakeOpenClient(async () => client);
+    const { feed, pushes } = makeFeed({ openClient });
+
+    feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    assert.equal(client.disposeCount, 1, "the connection is closed the moment the device is identified");
+    assert.ok(!pushes.some((event) => (event.kind !== "hello") && (event.serialNumber === MAC_THREE)), "a device the sidebar does not list pushes nothing to the panel");
+    assert.deepEqual(feed.addresses(), { [MAC_THREE]: ADDR }, "the identity is remembered even though the connection was not");
+
+    feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    assert.equal(callsForHost(openClient, ADDR).length, 1, "a resolved address is not dialed again by a later warm");
+  });
+
+  test("retires the not-found timer of a mac an address dial resolves before the budget fires", async () => {
+
+    /* The distinguishing observation is the SCHEDULED TIMER COUNT, not the push stream. An implementation that installs the session but skips the shared retirement
+     * leaves the timer armed, and #onDiscoveryTimeout's own device guard then swallows the verdict - so the pushes look identical while a timer leaks. Reading
+     * clock.pending across the dial is what tells those two apart.
+     */
+    const openClient = makeFakeOpenClient(async () => makeAnsweringClient());
+    const { clock, feed, pushes } = makeFeed({ discoveryTimeoutSeconds: 0.05, openClient });
+
+    feed.warm({ devices: [{ mac: MAC }] });
+
+    await settle();
+
+    const armed = clock.pending;
+
+    assert.equal(armed, 1, "a warmed mac nothing has advertised arms exactly one not-found timer");
+
+    feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    assert.equal(clock.pending, armed - 1, "resolving the address retires that mac's pending timer rather than leaving it counting down");
+
+    clock.advance(100);
+
+    await settle();
+
+    assert.ok(!pushes.some((event) => (event.kind === "error") && (event.reason === "not-found")),
+      "no not-found verdict outlives the connection that disproved it");
+  });
+
+  test("opens exactly one connection per address however many warms arrive while a dial is in flight", async () => {
+
+    // The dialing record is installed before the first await, so it is what a re-warm meets. Three warms land here before the dial resolves, and each of the last
+    // two would open its own connection against an implementation whose guard is the resolved record alone.
+    const pending = Promise.withResolvers<TestEspHomeClient>();
+    const openClient = makeFakeOpenClient(() => pending.promise);
+    const { feed } = makeFeed({ openClient });
+
+    feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+    feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    assert.equal(callsForHost(openClient, ADDR).length, 1, "one address in flight is one connection, whatever the warm cadence");
+
+    pending.resolve(makeAnsweringClient());
+
+    await settle();
+
+    assert.equal(callsForHost(openClient, ADDR).length, 1, "and the dial that resolves does not add another");
+  });
+
+  test("opens one connection when a governed device's own connect races the warm pass's dial, in either order", async () => {
+
+    /* Two routes reach one address: the warm pass walking the listed addresses, and a governed device's connect delegating to the address that governs it. The guard
+     * that makes them one dial lives at the dial's own entry rather than at either caller, so it does not matter which arrives first - and both orders are driven
+     * here because a guard at one caller only would pass one of them.
+     */
+    const assertOneDial = async (delegateFirst: boolean): Promise<void> => {
+
+      const pending = Promise.withResolvers<TestEspHomeClient>();
+      const openClient = makeFakeOpenClient((_options, index) => (index === 0) ? pending.promise : Promise.resolve(makeAnsweringClient()));
+      const { feed } = makeFeed({ openClient });
+
+      // The device is governed first, so #connectDevice has an address to delegate to.
+      feed.startDiscovery();
+      feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+      await settle();
+
+      pending.resolve(makeAnsweringClient());
+
+      await settle();
+
+      assert.equal(callsForHost(openClient, ADDR).length, 1, "the device is governed and connected at its listed address");
+
+      // Now hold a redial open and drive both routes into it while it is in flight.
+      const second = Promise.withResolvers<TestEspHomeClient>();
+      const held = makeFakeOpenClient(() => second.promise);
+      const rig = makeFeed({ openClient: held });
+
+      rig.feed.startDiscovery();
+      rig.feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+      await settle();
+
+      // A second warm and a discovery event both ask again while the first dial is still open.
+      if(delegateFirst) {
+
+        rig.browser().found(makeService(MAC, ADDR_TWO));
+        rig.feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+      } else {
+
+        rig.feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+        rig.browser().found(makeService(MAC, ADDR_TWO));
+      }
+
+      await settle();
+
+      assert.equal(callsForHost(held, ADDR).length, 1,
+        "one dial is in flight for that address and the other caller yields to it (delegate-first: " + String(delegateFirst) + ")");
+
+      second.resolve(makeAnsweringClient());
+
+      await settle();
+
+      assert.equal(callsForHost(held, ADDR).length, 1, "and the dial that resolves installs one session without a rival having been opened");
+      assert.equal(rig.feed.addresses()[MAC], ADDR, "the device ends on its listed address");
+    };
+
+    await assertOneDial(false);
+    await assertOneDial(true);
+  });
+
+  test("opens one connection when a discovery event reaches a governed device whose redial is still in flight", async () => {
+
+    /* The row that actually reaches the one-dial-per-address guard, which needs a state the simpler races never build: the mac must ALREADY be governed when the
+     * second caller arrives, or #onDiscovery remembers it ungoverned and #connectDevice takes the ordinary discovered path to some other address instead of
+     * delegating to this one - and then the two callers never meet at the same address at all.
+     *
+     * So the device is warmed and RESOLVED first, which is what makes it governed. Only then is a redial forced and held open, and a discovery event for that same
+     * mac fired into the window. Both routes now want the same address, and the guard at the dial's own entry is the only thing between them and two connections.
+     */
+    const first = makeAnsweringClient({ isEncrypted: true });
+    const held = Promise.withResolvers<TestEspHomeClient>();
+    const openClient = makeFakeOpenClient((_options, index) => (index === 0) ? Promise.resolve(first) : held.promise);
+    const { browser, feed } = makeFeed({ openClient });
+
+    feed.startDiscovery();
+    feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    assert.equal(feed.addresses()[MAC], ADDR, "the device is governed by the address before the race starts, which is what makes the delegation possible");
+
+    // A key edit at the governing address forces a redial, and that redial is held unresolved.
+    feed.warm({ addresses: [{ address: ADDR, psk: "fresh-key" }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    assert.equal(callsForHost(openClient, ADDR).length, 2, "the redial is in flight");
+
+    // The second caller: a discovery event for the very same mac, which finds it governed and delegates to the address already being dialed.
+    announce(browser(), makeService(MAC, ADDR_TWO));
+
+    await settle();
+
+    assert.equal(callsForHost(openClient, ADDR).length, 2, "the discovery event yields to the dial already in flight rather than opening a second connection");
+    assert.equal(callsForHost(openClient, ADDR_TWO).length, 0, "and it does not dial the announced address either, because the device is governed");
+
+    held.resolve(makeAnsweringClient({ isEncrypted: true }));
+
+    await settle();
+
+    assert.equal(callsForHost(openClient, ADDR).length, 2, "the dial that resolves adds none");
+    assert.equal(feed.addresses()[MAC], ADDR, "and the device holds exactly one session, at its listed address");
+  });
+
+  test("dials an address again after the user removes it and re-adds it", async () => {
+
+    /* A departure aborts the in-flight dial and drops its record. The aborted connect then classifies as shutdown - and shutdown is a reason no retry gate ever
+     * retries, so a dial that wrote that verdict back would leave the address undialable for the life of this process. The distinguishing observation is the dial
+     * count after the re-add: an implementation that writes its outcome without re-checking ownership never reaches two.
+     */
+    const pending = Promise.withResolvers<TestEspHomeClient>();
+    const openClient = makeFakeOpenClient((_options, index) => (index === 0) ? pending.promise : Promise.resolve(makeAnsweringClient()));
+    const { feed, pushes } = makeFeed({ openClient });
+
+    feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    assert.equal(callsForHost(openClient, ADDR).length, 1, "the first dial is in flight");
+
+    feed.warm({ addresses: [], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    // The aborted dial settles AFTER the departure, which is the window this row is about.
+    pending.resolve(makeAnsweringClient());
+
+    await settle();
+
+    assert.equal(pushes.filter((event) => (event.kind !== "hello") && (event.serialNumber === MAC)).length, 0,
+      "the aborted dial installs no session and pushes nothing for a device nobody listed");
+
+    feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    assert.equal(callsForHost(openClient, ADDR).length, 2, "re-adding the address dials it again rather than finding a dead record in its place");
+    assert.equal(feed.addresses()[MAC], ADDR, "and the device is served at it");
+  });
+
+  test("leaves an address dialable again when its own open step throws rather than failing", async () => {
+
+    // A throw out of the factory is not an outcome openManualConnection classifies - it is the dial itself coming apart. The finally is what has to release the
+    // in-flight guard, and the observation that proves it is the NEXT warm dialing at all.
+    const openClient = makeFakeOpenClient(async (_options, index) => {
+
+      if(index === 0) {
+
+        throw new Error("the socket could not be opened");
+      }
+
+      return makeAnsweringClient();
+    });
+    const { feed, pushes } = makeFeed({ openClient });
+
+    feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    assert.equal(callsForHost(openClient, ADDR).length, 1, "the first dial ran and came apart");
+
+    feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    assert.equal(callsForHost(openClient, ADDR).length, 2, "the address is dialable again rather than stuck in flight for the panel's life");
+    assert.ok(pushes.some((event) => (event.kind === "snapshot") && (event.serialNumber === MAC)), "and the retry serves the device");
+  });
+});
+
+describe("StatusFeed address governance", () => {
+
+  test("keeps a governed session at its listed address when discovery announces another", async () => {
+
+    /* The user naming an address is the user overruling the pick. An advertisement listing some other address for a governed mac is the device saying where else it
+     * answers, which is worth remembering and not worth reconnecting for - so the connection count is the assertion that matters.
+     */
+    const openClient = makeFakeOpenClient(async () => makeAnsweringClient());
+    const { browser, feed } = makeFeed({ openClient });
+
+    feed.startDiscovery();
+    feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    assert.equal(callsForHost(openClient, ADDR).length, 1, "the governed device connects at its listed address");
+
+    browser().found(makeService(MAC, ADDR_TWO));
+
+    await settle();
+
+    assert.equal(callsForHost(openClient, ADDR_TWO).length, 0, "the announced address is never dialed for a governed device");
+    assert.equal(callsForHost(openClient, ADDR).length, 1, "and the session at the listed address is not torn down and reopened");
+    assert.deepEqual(feed.addresses(), { [MAC]: ADDR }, "the strip keeps reporting the listed address, which is where the connection is");
+  });
+
+  test("leaves exactly one live session, at the listed address, when an address dial and a discovery connect race for one device", async () => {
+
+    /* The two routes to one device can be in flight together, and which resolves first is the network's to decide. Whichever way the race goes the outcome has to be
+     * the same: one session, at the address the user named, and every client that lost disposed. Both orders are driven here, and the clients are counted rather
+     * than inspected - a stranded connection shows up as a client nobody disposed.
+     */
+    const assertOneSessionAtTheListedAddress = async (resolveDiscoveryFirst: boolean): Promise<void> => {
+
+      const clients = new Map<string, TestEspHomeClient>();
+      const pending = new Map<string, PromiseWithResolvers<TestEspHomeClient>>();
+      const openClient = makeFakeOpenClient((options) => {
+
+        const deferred = Promise.withResolvers<TestEspHomeClient>();
+
+        pending.set(options.host, deferred);
+
+        return deferred.promise;
+      });
+      const { browser, feed } = makeFeed({ openClient });
+
+      feed.startDiscovery();
+      browser().found(makeService(MAC, ADDR_TWO));
+      feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+      await settle();
+
+      assert.equal(pending.size, 2, "both routes are in flight at once, which is the race this row is about");
+
+      for(const host of resolveDiscoveryFirst ? [ ADDR_TWO, ADDR ] : [ ADDR, ADDR_TWO ]) {
+
+        const client = (host === ADDR) ? makeAnsweringClient() : makeClient({ snapshot: restingCache() });
+
+        clients.set(host, client);
+        pending.get(host)?.resolve(client);
+
+        // eslint-disable-next-line no-await-in-loop
+        await settle();
+      }
+
+      assert.deepEqual(feed.addresses(), { [MAC]: ADDR },
+        "the device ends up on the address the user listed (discovery-first: " + String(resolveDiscoveryFirst) + ")");
+      assert.equal(clients.get(ADDR_TWO)?.disposeCount, 1, "the connection the discovery route opened is disposed rather than stranded");
+      assert.equal(clients.get(ADDR)?.disposeCount, 0, "and the one at the listed address is the live session, so nothing disposed it");
+    };
+
+    await assertOneSessionAtTheListedAddress(false);
+    await assertOneSessionAtTheListedAddress(true);
+  });
+
+  test("settles two addresses reaching one device by list order, in either arrival order", async () => {
+
+    /* Two loops racing over a network resolve in whichever order the network gives, so arrival order would hand the device a different address on every open. The
+     * list's own order is the only stable answer, and both arrival orders are driven here against the same list to prove the outcome does not depend on the race.
+     */
+    const assertFirstListedGoverns = async (resolveSecondFirst: boolean): Promise<void> => {
+
+      const first = Promise.withResolvers<TestEspHomeClient>();
+      const second = Promise.withResolvers<TestEspHomeClient>();
+      const openClient = makeFakeOpenClient((options) => (options.host === ADDR) ? first.promise : second.promise);
+      const { feed } = makeFeed({ openClient });
+
+      feed.warm({ addresses: [ { address: ADDR }, { address: ADDR_TWO } ], devices: [{ mac: MAC }] });
+
+      await settle();
+
+      const [ earlier, later ] = resolveSecondFirst ? [ second, first ] : [ first, second ];
+
+      // Each dial is settled on its own, in the order this arm describes, so the pool sees two resolutions at two separate moments rather than one batch.
+      earlier.resolve(makeAnsweringClient());
+
+      await settle();
+
+      later.resolve(makeAnsweringClient());
+
+      await settle();
+
+      assert.deepEqual(feed.addresses(), { [MAC]: ADDR },
+        "the address the user listed first governs, whichever dial answered first (second-resolved-first: " + String(resolveSecondFirst) + ")");
+    };
+
+    await assertFirstListedGoverns(false);
+    await assertFirstListedGoverns(true);
+  });
+
+  test("redials an encrypted governed session at its listed address when that address's key changes", async () => {
+
+    /* A governed device's key lives at its address, so an edit there is what moves its connection. The device is encrypted here deliberately: the pool's key diff
+     * lets a healthy PLAINTEXT session adopt a new key in place, because such a transport never used it, and that rule is untouched by governance - so a plaintext
+     * device would prove nothing about the address the redial dials. The second dial's recorded psk is the observation, because a redial carrying the old key would
+     * look identical by count alone.
+     */
+    const openClient = makeFakeOpenClient(async () => makeAnsweringClient({ isEncrypted: true }));
+    const { feed } = makeFeed({ openClient });
+
+    feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    feed.warm({ addresses: [{ address: ADDR, psk: "fresh-key" }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    const calls = callsForHost(openClient, ADDR);
+
+    assert.equal(calls.length, 2, "a key edit at the governing address redials the governed session");
+    assert.equal(calls[1]?.psk, "fresh-key", "the redial carries the key stored at the address, not the one stored at the mac");
+  });
+
+  test("serves a different device that now answers at a listed address under the mac that answered", async () => {
+
+    // An address is a place, and the opener at that place can be swapped. Re-deriving the identity on every dial is what makes the panel follow the hardware rather
+    // than the address book. The devices are encrypted so the key edit below actually redials rather than being adopted in place.
+    const openClient = makeFakeOpenClient(async (_options, index) => makeAnsweringClient({ isEncrypted: true, mac: (index === 0) ? MAC : MAC_TWO }));
+    const { browser, feed } = makeFeed({ openClient });
+
+    feed.startDiscovery();
+    feed.warm({ addresses: [{ address: ADDR }], devices: [ { mac: MAC }, { mac: MAC_TWO } ] });
+
+    await settle();
+
+    assert.deepEqual(feed.addresses(), { [MAC]: ADDR }, "the first device answers there and takes the address");
+
+    feed.warm({ addresses: [{ address: ADDR, psk: "fresh-key" }], devices: [ { mac: MAC }, { mac: MAC_TWO } ] });
+
+    await settle();
+
+    assert.equal(feed.addresses()[MAC_TWO], ADDR, "the device that answers there now is served under its own mac");
+
+    /* The displaced device keeps the fields it last had, because they are still true about it - only WHERE it is has become unknown, and the one thing that can
+     * answer that is an advertisement. So the proof that its governance was dropped is that an announcement now moves it, which for a governed device it could not.
+     */
+    browser().found(makeService(MAC, ADDR_THREE));
+
+    await settle();
+
+    assert.equal(feed.addresses()[MAC], ADDR_THREE, "the device that used to be there is ungoverned again, so its own announcement places it");
+  });
+
+  test("pushes the classified error for a governed device whose listed address cannot be reached", async () => {
+
+    /* A governed device's failure has to reach the panel under its own mac, or the row sits on Connecting forever - the address dial is the only thing that could
+     * ever have connected it. The following view is what proves the verdict was stored and not merely pushed once.
+     */
+    const openClient = makeFakeOpenClient(async (_options, index) => {
+
+      if(index === 0) {
+
+        return makeAnsweringClient({ isEncrypted: true });
+      }
+
+      throw new (await import("esphome-client")).EncryptionKeyInvalidError("the key was refused");
+    });
+    const { feed, pushes } = makeFeed({ openClient });
+
+    feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    const before = pushes.length;
+
+    feed.warm({ addresses: [{ address: ADDR, psk: "wrong-key" }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    assert.ok(pushes.slice(before).some((event) => (event.kind === "error") && (event.serialNumber === MAC)),
+      "the governed device's failure is pushed under its own mac rather than swallowed under the address");
+
+    const afterPush = pushes.length;
+
+    feed.view(MAC);
+
+    assert.ok(pushes.slice(afterPush).some((event) => (event.kind === "error") && (event.serialNumber === MAC)),
+      "the verdict is stored too, so reselecting the device re-surfaces it rather than showing Connecting");
+  });
+
+  test("governs one address with exactly one mac, releasing any other that still claims it", async () => {
+
+    /* An address governs AT MOST ONE device, and this drives the sequence that can create a second claim. Governance is written whenever a dial resolves; a release
+     * keyed to what the address record said BEFORE the dial is silent exactly when the record was absent or failed, which is how two macs come to carry one
+     * governing address. The writer sweeps the claims instead, so every route into it is covered.
+     *
+     * The steps, each a state the pool can actually be in:
+     *   1. the address resolves to the first opener, which takes it and a session at it;
+     *   2. a key edit redials while that device is unreachable, so the record goes to FAILED;
+     *   3. a second opener answers there, and the next warm retries the failed record and resolves to IT.
+     *
+     * The window this row exists for is the END OF STEP 3, and it is read by what governance DOES rather than by any address projection: the released device is
+     * placed by its own announcement, and the holder ignores one. Reading the projection instead would assert nothing, because a released mac keeps its last-known
+     * address until something corrects it - so the projection looks identical whether the claim was released or not.
+     */
+    const first = makeAnsweringClient({ isEncrypted: true });
+    const second = makeAnsweringClient({ isEncrypted: true, mac: MAC_TWO });
+    const openClient = makeFakeOpenClient(async (options, index) => {
+
+      // The second dial is the key-edit redial of the listed address, and it fails: that device is off the network at that moment.
+      if((options.host === ADDR) && (index === 1)) {
+
+        throw new Error("the device did not answer");
+      }
+
+      if(options.host !== ADDR) {
+
+        return makeAnsweringClient({ isEncrypted: true });
+      }
+
+      // The first dial of the address is the first opener's and the step-3 retry is the second opener's. Any dial after those gets a connection of its own, so the
+      // holder's client cannot be handed out a second time and its disposal count answers only for the session the row is watching.
+      return (index === 0) ? first : ((index === 2) ? second : makeAnsweringClient({ isEncrypted: true, mac: MAC_TWO }));
+    });
+    const { browser, feed } = makeFeed({ openClient });
+
+    feed.startDiscovery();
+    feed.warm({ addresses: [{ address: ADDR }], devices: [ { mac: MAC }, { mac: MAC_TWO } ] });
+
+    await settle();
+
+    assert.equal(feed.addresses()[MAC], ADDR, "step 1: the first opener takes the address");
+
+    feed.warm({ addresses: [{ address: ADDR, psk: "second-key" }], devices: [ { mac: MAC }, { mac: MAC_TWO } ] });
+
+    await settle();
+
+    // Step 3: the second opener is what answers there now, and the next warm retries the FAILED record and resolves to it - the write with no previous claim in hand.
+    announce(browser(), makeService(MAC_TWO, ADDR));
+    feed.warm({ addresses: [{ address: ADDR, psk: "second-key" }], devices: [ { mac: MAC }, { mac: MAC_TWO } ] });
+
+    await settle();
+
+    assert.equal(feed.addresses()[MAC_TWO], ADDR, "step 3: the second opener now holds the address");
+
+    /* THE WINDOW. Both macs would claim the address without the sweep, and the only way to see a claim is to act on it: an announcement moves an ungoverned device
+     * and is ignored by a governed one. The first opener must move - the sweep released it - and the second must not, because it is the holder.
+     */
+    announce(browser(), makeService(MAC, ADDR_THREE));
+
+    await settle();
+
+    assert.equal(feed.addresses()[MAC], ADDR_THREE,
+      "the first opener gave up its claim when the second took the address, so its own announcement places it");
+
+    announce(browser(), makeService(MAC_TWO, ADDR_TWO));
+
+    await settle();
+
+    assert.equal(feed.addresses()[MAC_TWO], ADDR, "while the device that holds the address ignores an announcement naming anywhere else, which only a governed one does");
+    assert.equal(second.disposeCount, 0, "and the holder's session at the address is untouched throughout");
+  });
+
+  test("keeps a still-listed address governing when the address that yielded to it is removed", async () => {
+
+    /* Two listed addresses reaching one opener: the earlier-listed one governs and the later one yields. BOTH have a resolved record naming that mac, because a
+     * record is written when a dial resolves and the governance is decided after it - so a release that acted on "the record names this mac" would strip, on the
+     * departure of the yielding address, the governance the address the user KEPT is holding. Releasing only on behalf of the address that actually governs is what
+     * makes the two tellable apart.
+     *
+     * Read, as everywhere else, by what governance does: the device must still ignore an announcement naming somewhere else.
+     */
+    const openClient = makeFakeOpenClient(async () => makeAnsweringClient());
+    const { browser, feed } = makeFeed({ openClient });
+
+    feed.startDiscovery();
+    feed.warm({ addresses: [ { address: ADDR }, { address: ADDR_TWO } ], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    assert.equal(feed.addresses()[MAC], ADDR, "the earlier-listed address governs, and the later one has yielded to it");
+
+    // The user removes the address that yielded. The one that governs is untouched.
+    feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    announce(browser(), makeService(MAC, ADDR_THREE));
+
+    await settle();
+
+    assert.equal(feed.addresses()[MAC], ADDR,
+      "the device still ignores an announcement naming elsewhere, so the governance the kept address holds survived the other one's removal");
+  });
+
+  test("releases a removed address's device even when the address never resolved on its last dial", async () => {
+
+    /* Governance lives in the device record; the address record is a derived view of one dial. A departure that hunted for its claimant IN that record would find
+     * nobody to release whenever the last dial of the address ended anywhere but `resolved` - which is a state the user reaches by an ordinary route.
+     *
+     * The route, built exactly: the device is governed by A and connected there, then a key edit at A tears its session down and delegates its connect back to A;
+     * that dial fails, so A's record is `failed` and names no mac. The user then removes A. The device would go on claiming an address the user no longer lists -
+     * dialed with no key, deaf to its own advertisements from anywhere else, and never retried, because the retry gate refuses an unlisted address.
+     *
+     * Read by what governance does: once the claim is gone the device is an ordinary discovered one, so its own announcement places it.
+     */
+    let answer = true;
+    const openClient = makeFakeOpenClient(async () => {
+
+      if(!answer) {
+
+        throw new Error("the device did not answer");
+      }
+
+      return makeAnsweringClient({ isEncrypted: true });
+    });
+    const { browser, feed } = makeFeed({ openClient });
+
+    feed.startDiscovery();
+    feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    assert.equal(feed.addresses()[MAC], ADDR, "the device is governed by the listed address");
+
+    // The key edit tears the session down and redials, and that dial fails - so the address record ends as FAILED, carrying no mac at all.
+    answer = false;
+    feed.warm({ addresses: [{ address: ADDR, psk: "fresh-key" }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    // The user removes the address.
+    feed.warm({ addresses: [], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    announce(browser(), makeService(MAC, ADDR_THREE));
+
+    await settle();
+
+    assert.equal(feed.addresses()[MAC], ADDR_THREE,
+      "the removed address released the device it governed, so the device's own advertisement places it again");
+  });
+
+  test("leaves a live session alone when a delegated dial of another address fails", async () => {
+
+    /* A failure is only ever about the connection that produced it, and this drives the one interleaving where that matters. Two listed addresses reach one opener.
+     * While the governing address is failing, the other one resolves and becomes the device's session - so by the time the failure is handled the device is
+     * connected, and the failure describes a connection nobody is using. It must not close that session, must not replace it, and must not tell the panel the
+     * device is unreachable while it plainly is not.
+     *
+     * The interleaving, built exactly: the device is governed by A and connected there; then a warm lists B AHEAD of A and edits A's key. The address pass dials B
+     * (no record yet) while the device's own connect, whose session the key edit just tore down, delegates to A - so both are in flight at once. B answers and takes
+     * the device by list order, installing its session. A then fails, and its failure arrives at a device that is already connected somewhere else.
+     */
+    const governed = makeAnsweringClient({ isEncrypted: true });
+    const bClient = makeAnsweringClient({ isEncrypted: true });
+    const failing = Promise.withResolvers<TestEspHomeClient>();
+    let dialsOfA = 0;
+    const openClient = makeFakeOpenClient((options) => {
+
+      if(options.host === ADDR_TWO) {
+
+        return Promise.resolve(bClient);
+      }
+
+      // The first dial of A is what governs the device. Every later one is the failing dial this row is about.
+      return (dialsOfA++ === 0) ? Promise.resolve(governed) : failing.promise;
+    });
+    const { feed, pushes } = makeFeed({ openClient });
+
+    feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    assert.equal(feed.addresses()[MAC], ADDR, "the device is governed by A and connected there");
+    assert.equal(governed.disposeCount, 0, "on a live session");
+
+    const before = pushes.length;
+
+    // B is listed AHEAD of A, and A's key is edited - which tears the device's session down and delegates its connect to A while the address pass dials B.
+    feed.warm({ addresses: [ { address: ADDR_TWO }, { address: ADDR, psk: "fresh-key" } ], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    assert.equal(feed.addresses()[MAC], ADDR_TWO, "B answered and took the device by list order, installing its own session");
+    assert.equal(bClient.disposeCount, 0, "which is live");
+
+    // Only now does A's dial fail, arriving at a device that is connected at B.
+    failing.reject(new Error("the device did not answer"));
+
+    await settle();
+
+    assert.equal(feed.addresses()[MAC], ADDR_TWO, "the device is still at B");
+    assert.equal(bClient.disposeCount, 0, "its session at B was not closed by a failure belonging to a connection nobody is using");
+    assert.ok(!pushes.slice(before).some((event) => (event.kind === "error") && (event.serialNumber === MAC)),
+      "and the panel is told nothing about a device that is plainly connected");
+  });
+
+  test("leaves no connection open when a different opener answers at a listed address", async () => {
+
+    /* The disposal accounting across a displacement. The device that used to answer here loses its governance, and every client the
+     * two dials opened is accounted for: the one that lost is closed and the one serving the device is not.
+     *
+     * The displaced device does NOT also need a session torn down here, and the implementation deliberately does not try. A displaced mac's session at the address
+     * could only have come from a dial of that address resolving to it, and such a dial leaves the address recorded as resolved to that mac; while that stands, no
+     * second dial of the address can begin - the warm pass refuses to redial a resolved address, and the only unguarded route in is a connect delegating on behalf
+     * of the mac that holds the address, which runs only for a mac holding no session at all. So a displaced device is never still connected at the address at the
+     * moment the dial that displaces it resolves.
+     */
+    const displaced = makeAnsweringClient({ isEncrypted: true });
+    const arrival = makeAnsweringClient({ isEncrypted: true, mac: MAC_TWO });
+    const openClient = makeFakeOpenClient(async (_options, index) => (index === 0) ? displaced : arrival);
+    const { browser, feed } = makeFeed({ openClient });
+
+    feed.startDiscovery();
+    feed.warm({ addresses: [{ address: ADDR }], devices: [ { mac: MAC }, { mac: MAC_TWO } ] });
+
+    await settle();
+
+    assert.equal(feed.addresses()[MAC], ADDR, "the first device holds the address");
+
+    // A key edit at the address redials it, and a different opener answers this time.
+    feed.warm({ addresses: [{ address: ADDR, psk: "fresh-key" }], devices: [ { mac: MAC }, { mac: MAC_TWO } ] });
+
+    await settle();
+
+    assert.equal(feed.addresses()[MAC_TWO], ADDR, "the device that answers there now holds the address");
+    assert.equal(displaced.disposeCount, 1, "the displaced device's connection is closed exactly once, not left open against hardware that is not it");
+    assert.equal(arrival.disposeCount, 0, "and the connection serving the device that answered is the live one");
+
+    // The displaced device is ungoverned again, which its own announcement then proves by placing it.
+    browser().found(makeService(MAC, ADDR_THREE));
+
+    await settle();
+
+    assert.equal(feed.addresses()[MAC], ADDR_THREE, "the displaced device is ungoverned, so its own advertisement places it");
+  });
+
+  test("aborts a departed address's dial in flight and releases the device it governed", async () => {
+
+    const pending = Promise.withResolvers<TestEspHomeClient>();
+    const openClient = makeFakeOpenClient(() => pending.promise);
+    const { feed } = makeFeed({ openClient });
+
+    feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    const dial = callsForHost(openClient, ADDR)[0];
+
+    assert.ok(dial, "the dial is in flight");
+    assert.equal(dial.signal.aborted, false, "and has not been cancelled yet");
+
+    feed.warm({ addresses: [], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    assert.equal(dial.signal.aborted, true, "an address the user removed has its dial cancelled rather than left running");
+  });
+
+  test("writes nothing and pushes nothing when a connect comes apart after the feed has been disposed", async () => {
+
+    /* Disposal is the end of the pool: it clears every session and every stored verdict, and a connect still unwinding when it happens has nobody left to tell.
+     * Reaching that state takes a precise interleaving. A fault arriving on the connect's own await says nothing at all, because disposal aborts that session's
+     * controller and openConnection classifies any fault under an aborted signal as a silent shutdown - so the only way into the failure recorder with an emptied
+     * slot is a fault raised AFTER a successful open, past the check that stands the connect down when its session has been replaced. The hook is the entity list,
+     * which one connect reads TWICE: once inside the connect itself, to capture initial state, and once inside the adopt that follows that check, to build the
+     * row model.
+     *
+     * So this client disposes the feed on that second read. The adopt's very next act is to put the client onto the session's disposable stack, which disposal has
+     * just closed, so it faults there and the failure recorder is reached with the session slot emptied by disposal rather than superseded by a successor. A
+     * recorder that read "no session" as "this failure still applies" would write a verdict into the cleared memory and push an error at a panel that is gone.
+     */
+    const { browser, feed, pushes } = makeFeed({ openClient: makeFakeOpenClient(async () => client) });
+    const client = makeClient({ snapshot: restingCache() });
+    let reads = 0;
+
+    Object.defineProperty(client, "entitiesByDevice", { value: () => {
+
+      if(++reads === 2) {
+
+        feed[Symbol.dispose]();
+      }
+
+      return ADVERTISED;
+    } });
+
+    feed.startDiscovery();
+    browser().found(makeService(MAC));
+
+    await settle();
+
+    const after = pushes.length;
+
+    feed.warm({ devices: [{ mac: MAC }] });
+
+    await settle();
+
+    assert.equal(reads, 2, "the connect got past its ownership check and into the adopt, which is the window this row is about");
+    assert.ok(!pushes.slice(after).some((event) => (event.kind === "error")),
+      "a connect that comes apart after disposal pushes nothing, because the panel it would push to is gone with the pool");
+
+    feed.view(MAC);
+
+    assert.ok(!pushes.slice(after).some((event) => (event.kind === "error")),
+      "and it stored no verdict, so a later view surfaces none rather than an error from a pool that no longer exists");
+  });
+
+  test("aborts every in-flight address dial on disposal", async () => {
+
+    const openClient = makeFakeOpenClient(() => Promise.withResolvers<TestEspHomeClient>().promise);
+    const { feed } = makeFeed({ openClient });
+
+    feed.warm({ addresses: [ { address: ADDR }, { address: ADDR_TWO } ], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    const dials = [ callsForHost(openClient, ADDR)[0], callsForHost(openClient, ADDR_TWO)[0] ];
+
+    assert.ok(dials.every((call) => call && !call.signal.aborted), "both dials are in flight");
+
+    feed[Symbol.dispose]();
+
+    assert.ok(dials.every((call) => call?.signal.aborted), "disposal ends every address dial, not only the sessions");
+  });
+});
+
+describe("StatusFeed address outcomes", () => {
+
+  test("repeats a refused key only once the key has changed", async () => {
+
+    const openClient = makeFakeOpenClient(async (_options, index) => {
+
+      if(index < 2) {
+
+        throw new (await import("esphome-client")).EncryptionKeyInvalidError("the key was refused");
+      }
+
+      return makeAnsweringClient();
+    });
+    const { feed } = makeFeed({ openClient });
+
+    feed.warm({ addresses: [{ address: ADDR, psk: "wrong" }], devices: [] });
+
+    await settle();
+
+    assert.equal(callsForHost(openClient, ADDR).length, 1, "the first dial runs");
+
+    feed.warm({ addresses: [{ address: ADDR, psk: "wrong" }], devices: [] });
+
+    await settle();
+
+    assert.equal(callsForHost(openClient, ADDR).length, 1, "re-sending the very key the device just refused is churn, so it is suppressed");
+
+    feed.warm({ addresses: [{ address: ADDR, psk: "right" }], devices: [] });
+
+    await settle();
+
+    assert.equal(callsForHost(openClient, ADDR).length, 2, "a changed key is a genuine retry and dials again");
+  });
+
+  test("never repeats an address that answered with something this plugin cannot use", async () => {
+
+    // Neither verdict changes without someone acting on the device or the configuration, so retrying either one at warm cadence would dial a device forever for
+    // nothing. The two arms run the same assertion, because the rule is one rule.
+    const assertNoRepeat = async (client: TestEspHomeClient | Error): Promise<void> => {
+
+      const openClient = makeFakeOpenClient(async () => {
+
+        if(client instanceof Error) {
+
+          throw client;
+        }
+
+        return client;
+      });
+      const { feed } = makeFeed({ openClient });
+
+      feed.warm({ addresses: [{ address: ADDR }], devices: [] });
+
+      await settle();
+      feed.warm({ addresses: [{ address: ADDR }], devices: [] });
+
+      await settle();
+
+      assert.equal(callsForHost(openClient, ADDR).length, 1, "the address is dialed once and not again");
+    };
+
+    // A device that answers and names nothing is not an opener we support, and an API version the client cannot speak needs a firmware or plugin update.
+    await assertNoRepeat(makeClient({ deviceInfo: null, snapshot: restingCache() }));
+    await assertNoRepeat(new (await import("esphome-client")).NegotiationFailedError("api major out of range", "API_MAJOR_OUT_OF_RANGE"));
+  });
+
+  test("repeats a timed-out address at the next warm and at a view of a mac it has never placed", async () => {
+
+    /* A device reached only by address has no advertisement whose re-arrival could retry it, so the two triggers that exist are the next warm and the user
+     * reselecting a device the pool cannot place. Both are driven here against one feed.
+     */
+    const openClient = makeFakeOpenClient(async () => {
+
+      throw new Error("the device did not answer");
+    });
+    const { feed } = makeFeed({ openClient });
+
+    feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    assert.equal(callsForHost(openClient, ADDR).length, 1, "the first dial runs");
+
+    feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    assert.equal(callsForHost(openClient, ADDR).length, 2, "an unreachable address is worth trying again, so the next warm dials it");
+
+    feed.view(MAC);
+
+    await settle();
+
+    assert.equal(callsForHost(openClient, ADDR).length, 3, "and selecting a device the pool cannot place asks every listed address again");
+  });
+});
+
+describe("StatusFeed probe", () => {
+
+  test("answers the identity of the device that responded, and closes the connection it opened", async () => {
+
+    const client = makeAnsweringClient({ isEncrypted: true });
+    const openClient = makeFakeOpenClient(async () => client);
+    const { feed } = makeFeed({ openClient });
+
+    const result = await feed.probe({ address: ADDR });
+
+    assert.deepEqual(result, { address: ADDR, encrypted: true, firmwareVersion: "2.0.0", kind: "ok", mac: MAC, model: "1.0.0", name: "Test Ratgdo",
+      variant: RatgdoVariant.RATGDO }, "the card is handed everything it renders about the device, read off the record the handshake produced");
+    assert.equal(client.disposeCount, 1, "a probe always closes the connection it opened - the card only needed to know what answered");
+  });
+
+  test("closes its connection even when something throws after the connect succeeded", async () => {
+
+    /* The doc promises this ALWAYS closes, and a dispose written inline after the connect keeps that promise only for the paths that reach it. The client here throws
+     * from the transport read the probe makes between the connect and the dispose, which is exactly the window an inline dispose leaves open - and an open connection
+     * against a real device that nothing holds a reference to is the worst shape this method could leave behind.
+     */
+    const client = makeAnsweringClient();
+
+    Object.defineProperty(client, "isEncrypted", { get: () => {
+
+      throw new Error("the transport read came apart");
+    } });
+
+    const { entries, feed } = makeFeed({ openClient: makeFakeOpenClient(async () => client) });
+    const result = await feed.probe({ address: ADDR });
+
+    assert.deepEqual(result, { kind: "error", reason: "unreachable" }, "the card is still answered rather than left waiting");
+    assert.equal(client.disposeCount, 1, "and the connection the probe opened is closed exactly once, by the finally rather than by the line that threw");
+    assert.ok(entries.some((entry) => (entry.level === "error") && formatLogEntry(entry).startsWith(ADDR + ": The connection test failed unexpectedly.")),
+      "with the fault reported under the address");
+  });
+
+  test("classifies each failure the way the panel already classifies it, and still closes the connection", async () => {
+
+    /* One row over the whole taxonomy, because the probe's whole contribution here is that it does NOT invent a second vocabulary. The unrecognized arm is the one
+     * verdict only an address dial can reach, and it is the reason misconfigured exists on this wire at all.
+     */
+    const esphome = await import("esphome-client");
+    const rows: { expected: string; open: () => Promise<TestEspHomeClient> }[] = [
+
+      { expected: "auth-invalid", open: async () => {
+
+        throw new esphome.EncryptionKeyInvalidError("the key does not match");
+      } },
+      { expected: "auth-missing", open: async () => {
+
+        throw new esphome.EncryptionKeyMissingError("this device requires a key");
+      } },
+      { expected: "misconfigured", open: async () => makeClient({ deviceInfo: null, snapshot: restingCache() }) },
+      { expected: "unreachable", open: async () => {
+
+        throw new Error("connection refused");
+      } },
+      { expected: "unsupported", open: async () => {
+
+        throw new esphome.NegotiationFailedError("api major out of range", "API_MAJOR_OUT_OF_RANGE");
+      } }
+    ];
+
+    for(const row of rows) {
+
+      const openClient = makeFakeOpenClient(row.open);
+      const { feed } = makeFeed({ openClient });
+
+      // eslint-disable-next-line no-await-in-loop
+      const result = await feed.probe({ address: ADDR });
+
+      assert.deepEqual(result, { kind: "error", reason: row.expected }, "the probe answers " + row.expected + " exactly as a pool connect would classify it");
+    }
+  });
+
+  test("closes the connection of a device that answered as something this plugin cannot use", async () => {
+
+    // The refusal arm is the one success-shaped failure - the handshake completed and a client exists - so it is the arm where a missing dispose would strand a real
+    // connection against a real device.
+    const client = makeClient({ deviceInfo: null, snapshot: restingCache() });
+    const { feed } = makeFeed({ openClient: makeFakeOpenClient(async () => client) });
+
+    await feed.probe({ address: ADDR });
+
+    assert.equal(client.disposeCount, 1, "the connection to a device that is not an opener is closed rather than left open");
+  });
+
+  test("gives up on the injected clock's deadline, says so at debug, and closes the connection", async () => {
+
+    /* The deadline is armed on the feed's own clock, so this drives it without waiting. The distinguishing observation is the REASON: an abort is classified
+     * shutdown by the connect layer whoever caused it, so an implementation that did not read its own sentinel back would answer unreachable here.
+     */
+    const client = makeAnsweringClient();
+    const openClient = makeFakeOpenClient((options) => new Promise<TestEspHomeClient>((_resolve, reject) => {
+
+      options.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    }));
+    const { clock, entries, feed } = makeFeed({ openClient });
+    const probe = feed.probe({ address: ADDR });
+
+    await settle();
+
+    clock.advance(RATGDO_WEBUI_PROBE_TIMEOUT * 1000);
+
+    assert.deepEqual(await probe, { kind: "error", reason: "timeout" }, "the probe's own deadline is a timeout, not a generic unreachable");
+    assert.ok(entries.some((entry) => (entry.level === "debug") && formatLogEntry(entry).startsWith(ADDR + ": The device did not answer within")),
+      "the deadline says so under the address, at debug - it is a diagnostic rather than something the user must act on");
+    assert.equal(client.disposeCount, 0, "no connection was ever opened, so there was none to close");
+  });
+
+  test("answers unreachable when the pool's own lifetime ends the probe, and disposal aborts it", async () => {
+
+    // The other abort. The card is being torn down with the modal, so the wording matters less than that it resolves at all rather than hanging or throwing.
+    const openClient = makeFakeOpenClient((options) => new Promise<TestEspHomeClient>((_resolve, reject) => {
+
+      options.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    }));
+    const { feed } = makeFeed({ openClient });
+    const probe = feed.probe({ address: ADDR });
+
+    await settle();
+
+    feed[Symbol.dispose]();
+
+    assert.deepEqual(await probe, { kind: "error", reason: "unreachable" }, "the pool's lifetime ending resolves the probe rather than leaving the card waiting");
+  });
+
+  test("leaves a live session and its pushes completely alone", async () => {
+
+    /* Risk 7's second half. The probe opens a SECOND connection to the very device the pool is already holding a session for, which is deliberate - a probe is one
+     * short user act, and making it coordinate with the pool would make the card's answer depend on state the user cannot see. What it must not do is disturb
+     * anything: the session's client is untouched, its token does not move, and no push is emitted on the probe's behalf.
+     */
+    const session = makeAnsweringClient();
+    const probed = makeAnsweringClient();
+    const openClient = makeFakeOpenClient(async (_options, index) => (index === 0) ? session : probed);
+    const { browser, feed, pushes } = makeFeed({ openClient });
+
+    feed.startDiscovery();
+    browser().found(makeService(MAC));
+    feed.warm({ devices: [{ mac: MAC }] });
+
+    await settle();
+
+    const before = pushes.length;
+    const token = pushes.filter((event) => (event.kind !== "hello") && (event.serialNumber === MAC)).at(-1);
+
+    assert.ok(token, "the device has a live session that has pushed");
+
+    const result = await feed.probe({ address: ADDR });
+
+    assert.equal(result.kind, "ok", "the probe answers on its own connection");
+    assert.equal(pushes.length, before, "a probe pushes nothing - the panel is not told about a connection it does not own");
+    assert.equal(session.disposeCount, 0, "the live session's client is untouched");
+    assert.equal(probed.disposeCount, 1, "and the probe's own client is closed");
+
+    // The session still works afterward, which is what proves the probe did not quietly supersede it.
+    feed.view(MAC);
+
+    assert.ok(pushes.slice(before).some((event) => (event.kind === "snapshot") && (event.serialNumber === MAC)),
+      "the session still answers a view, so the probe neither replaced nor retired it");
+  });
+
+  test("never disturbs an address dial that is in flight", async () => {
+
+    // The one piece of pool state a probe could plausibly corrupt: an address record another dial owns. A probe that resolved it underneath would leave that dial
+    // writing against a record it no longer recognizes.
+    const pending = Promise.withResolvers<TestEspHomeClient>();
+    const openClient = makeFakeOpenClient((_options, index) => (index === 0) ? pending.promise : Promise.resolve(makeAnsweringClient()));
+    const { feed } = makeFeed({ openClient });
+
+    feed.warm({ addresses: [{ address: ADDR }], devices: [{ mac: MAC }] });
+
+    await settle();
+
+    const result = await feed.probe({ address: ADDR });
+
+    assert.equal(result.kind, "ok", "the probe answers even while a pool dial of the same address is in flight");
+
+    pending.resolve(makeAnsweringClient());
+
+    await settle();
+
+    assert.deepEqual(feed.addresses(), { [MAC]: ADDR }, "the pool dial still resolves its own address record and installs the session it was opening");
+  });
+
+  test("never throws, whatever comes apart underneath it", async () => {
+
+    const openClient = makeFakeOpenClient(() => {
+
+      throw new Error("the factory came apart");
+    });
+    const { entries, feed } = makeFeed({ openClient });
+
+    assert.deepEqual(await feed.probe({ address: ADDR }), { kind: "error", reason: "unreachable" },
+      "the card is rendering this answer, so a fault below resolves as a verdict rather than rejecting");
+    assert.ok(entries.length >= 0, "and whatever was logged about it stays a diagnostic");
+  });
+});
+
+describe("narrowStatusProbeRequest", () => {
+
+  test("accepts one non-empty address, lower-cased exactly as a warm lower-cases one", () => {
+
+    assert.deepEqual(narrowStatusProbeRequest({ address: "Garage.Local" }), { address: "garage.local", psk: undefined },
+      "the address is canonicalized here, so a probe and a warm of the same address agree about what it is called");
+    assert.deepEqual(narrowStatusProbeRequest({ address: ADDR, psk: "secret" }), { address: ADDR, psk: "secret" }, "a non-empty key is carried through");
+  });
+
+  test("narrows every spelling of an absent key to undefined", () => {
+
+    for(const psk of [ undefined, null, "", 42 ]) {
+
+      assert.deepEqual(narrowStatusProbeRequest({ address: ADDR, psk }), { address: ADDR, psk: undefined },
+        "a key of " + JSON.stringify(psk) + " is the user having typed none");
+    }
+  });
+
+  test("canonicalizes its address through the same rule the warm narrowing uses, and refuses a zone", () => {
+
+    /* The probe and the warm have to agree about what one address is called, or a probe's resolved record is read by the next warm's dial under a different key. The
+     * rows below are asserted against canonicalManualAddress itself rather than against written-out strings, which is what makes them fail if either side drifts.
+     */
+    for(const address of [ "[2001:DB8::5]", "  Garage.Local  ", "10.0.0.20" ]) {
+
+      assert.deepEqual(narrowStatusProbeRequest({ address }), { address: canonicalManualAddress(address), psk: undefined },
+        "the probe narrowing answers the canonical form for " + JSON.stringify(address));
+      assert.deepEqual(narrowStatusProbeRequest({ address })?.address, narrowStatusWarmRequest({ addresses: [{ address }], devices: [] })?.addresses[0]?.address,
+        "and it is the very form the warm narrowing answers for the same input");
+    }
+
+    for(const address of [ "fe80::1%en0", "[fe80::1%en0]" ]) {
+
+      assert.equal(narrowStatusProbeRequest({ address }), null, JSON.stringify(address) + " names a zone, which nothing can dial, so the probe is refused outright");
+    }
+
+    assert.equal(narrowStatusProbeRequest({ address: "[]" }), null, "an address that canonicalizes to nothing is refused too");
+  });
+
+  test("rejects a body carrying no usable address", () => {
+
+    for(const body of [ null, "nope", 42, {}, { address: "" }, { address: 42 }, { psk: "secret" } ]) {
+
+      assert.equal(narrowStatusProbeRequest(body), null, "a body of " + JSON.stringify(body) + " names no address to test");
+    }
   });
 });

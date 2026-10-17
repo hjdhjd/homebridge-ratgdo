@@ -1,20 +1,23 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
  * options.test.ts: The "options" concern net for options.ts - the normalizeConfig boundary narrowing that turns Homebridge's open index-signature
- * PlatformConfig into a typed RatgdoOptions, plus a catalog shape audit over featureOptionCategories and featureOptions that pins the structural contract every
+ * PlatformConfig into a typed RatgdoOptions, plus a catalog shape audit over featureOptionCategories and featureOptions that holds the structural contract every
  * feature-option consumer (the FeatureOptions engine, the WebUI, the docs renderer) depends on.
  */
 import type { FeatureCategoryEntry, FeatureOptionEntry } from "homebridge-plugin-utils";
-import { consolidatedFlag, describeCategoryScope, describeOptionScope, featureOptionCategories, featureOptions, normalizeConfig } from "./options.ts";
+import { FeatureOptions, scopeSafeId } from "homebridge-plugin-utils";
+import { consolidatedFlag, describeCategoryScope, describeOptionScope, featureOptionCategories, featureOptions, manualAddressScope,
+  normalizeConfig } from "./options.ts";
 import { describe, test } from "node:test";
-import { FeatureOptions } from "homebridge-plugin-utils";
 import type { PlatformConfig } from "homebridge";
 import type { RatgdoOptionMeta } from "./options.ts";
 import { RatgdoVariant } from "./types.ts";
 import assert from "node:assert/strict";
+import { manualAddressList } from "./manual.ts";
 
-/* normalizeConfig accepts a Homebridge PlatformConfig (an open index-signature shape sourced from user JSON). We build plain objects and cast them at the call seam to
- * PlatformConfig, exactly as the production boundary receives them, so each test exercises the real typeof / Array.isArray narrowing rather than a pre-typed shape.
+/* normalizeConfig accepts a Homebridge PlatformConfig (an open index-signature shape sourced from user JSON). We build plain objects and cast them at the
+ * call boundary to PlatformConfig, exactly as the production boundary receives them, so each test exercises the real typeof / Array.isArray narrowing rather
+ * than a pre-typed shape.
  */
 const asConfig = (shape: Record<string, unknown>): PlatformConfig => shape as unknown as PlatformConfig;
 
@@ -22,8 +25,8 @@ const asConfig = (shape: Record<string, unknown>): PlatformConfig => shape as un
 // no surface for fails here rather than rendering nowhere.
 const SCOPE_VOCABULARY: string[] = [ "device", "global" ];
 
-/* Locate one catalog entry by its category and option name. A miss throws rather than answering undefined, so a pin naming an entry the catalog does not carry fails
- * as a missing entry instead of quietly asserting against nothing.
+/* Locate one catalog entry by its category and option name. A miss throws rather than answering undefined, so an assertion naming an entry the catalog does not
+ * carry fails as a missing entry instead of quietly asserting against nothing.
  */
 function entryFor(category: string, name: string): FeatureOptionEntry<RatgdoOptionMeta> {
 
@@ -281,7 +284,7 @@ describe("the feature-option catalog", () => {
 
     test("the platform-wide entries declare the global level alone", () => {
 
-      for(const [ category, name ] of [ [ "Log", "Debug" ], [ "Mqtt", "Topic" ], [ "Mqtt", "Url" ] ] as [ string, string ][]) {
+      for(const [ category, name ] of [ [ "Device", "Address" ], [ "Log", "Debug" ], [ "Mqtt", "Topic" ], [ "Mqtt", "Url" ] ] as [ string, string ][]) {
 
         assert.deepEqual(entryFor(category, name).scopes, ["global"], category + "." + name + " is a platform-wide fact, so it has exactly one home");
       }
@@ -394,6 +397,125 @@ describe("the feature-option catalog", () => {
 
         assert.ok(vocabulary.includes(variant), entry + " names a variant RatgdoVariant declares, which is the vocabulary the settings page tests a device against");
       }
+    });
+  });
+});
+
+/* The manual-address option and the identity a device reached at one resolves its options at, driven against a REAL engine over the REAL catalog. The engine is what
+ * these assertions are really about: the address identity is an id the engine has never seen the shape of before, and the whole design rests on it treating that id
+ * as opaque and walking to the global entry when it finds nothing there.
+ */
+describe("manual device addresses", () => {
+
+  // A real engine over the real catalog and the supplied entries, built exactly as the platform constructor builds its own.
+  const engineFor = (entries: string[]): FeatureOptions => new FeatureOptions(featureOptionCategories, featureOptions, entries);
+
+  describe("the Device.Address catalog entry", () => {
+
+    test("the catalog builds with a list entry carrying the default every list needs", () => {
+
+      const entry = entryFor("Device", "Address");
+
+      assert.equal(entry.multiple, true, "the option takes a list of addresses rather than one");
+      assert.equal(entry.defaultValue, "", "a list entry declares a default value, which is what the engine's own declaration check requires of one");
+      assert.equal(entry.default, false, "the option is off until a user lists an address, since autodiscovery is how devices are normally found");
+      assert.ok(engineFor([]).exists("Device.Address") || true, "building an engine over the catalog does not throw on the new declaration");
+    });
+
+    test("valueList reads a stored list, and an unset option reads as nothing listed", () => {
+
+      assert.deepEqual(engineFor([]).valueList({ option: "Device.Address" }), [], "an install that listed no address has no addresses to dial");
+      assert.deepEqual(engineFor(["Enable.Device.Address=garage.local, 10.0.0.20"]).valueList({ option: "Device.Address" }), [ "garage.local", "10.0.0.20" ],
+        "a stored list reads back as its entries, trimmed and in the user's order");
+    });
+  });
+
+  describe("manualAddressScope", () => {
+
+    /* The three address shapes a user can type, and what each becomes as an engine id. The periods are what matter: the engine's stored form is an option name, a
+     * period, and an id, so an id carrying periods of its own would be read back as some other option entirely.
+     */
+    const rows: { address: string; scope: string; why: string }[] = [
+
+      { address: "172.16.0.131", scope: "172-16-0-131", why: "an IPv4 address has each period replaced, so its entry cannot be mistaken for a longer option name" },
+      { address: "garage.local", scope: "garage-local", why: "a hostname's dots are replaced the same way" },
+      { address: "fd00::1", scope: "fd00::1", why: "an IPv6 literal carries no periods and passes through untouched, colons and all" }
+    ];
+
+    for(const { address, scope, why } of rows) {
+
+      test(address + " scopes to " + scope, () => {
+
+        assert.equal(manualAddressScope(address), scope, why);
+        assert.equal(manualAddressScope(address), scopeSafeId(address), "the scope is the framework's own id rule and nothing added on top of it");
+      });
+    }
+
+    test("gives the bracketed and bare spellings of one literal the same id, because it is fed an already-canonical address", () => {
+
+      /* This function is deliberately scopeSafeId and nothing else - it takes an address that has ALREADY been canonicalized, which is why it needs no bracket rule
+       * of its own. The proof that the pairing works is this: run both spellings through the canonical form first, as every caller does, and the two land on one id.
+       * Asserting it without that step would assert the opposite, since scopeSafeId replaces only periods and equals signs and leaves a bracket exactly where it is.
+       */
+      const [bracketed] = manualAddressList(["[2001:DB8::5]"]);
+      const [bare] = manualAddressList(["2001:db8::5"]);
+
+      assert.ok(bracketed && bare, "both spellings canonicalize to a list entry");
+      assert.equal(manualAddressScope(bracketed), manualAddressScope(bare), "the two spellings reach one identity, so a key stored under one is found under the other");
+      assert.equal(manualAddressScope(bracketed), "2001:db8::5", "and that identity is the bare literal, which carries no periods for scopeSafeId to replace");
+    });
+
+    test("is the framework's id rule alone, with no canonicalization of its own", () => {
+
+      // The pairing only holds if the canonicalization stays upstream. A bracketed address handed straight here keeps its brackets, which is what this asserts - the
+      // fix belongs in the list, not in the scope.
+      assert.equal(manualAddressScope("[2001:db8::5]"), "[2001:db8::5]", "an un-canonicalized address is passed through, brackets and all");
+    });
+  });
+
+  describe("the key a manual dial reads", () => {
+
+    /* The precedence the manual dial depends on, driven through the REAL engine rather than described. The address entry is stored at the address identity and the
+     * global entry at no identity at all, and the read asks for the address identity in the DEVICE argument - so this asserts that the engine treats an id it has
+     * never seen the shape of as an opaque device id, finds the entry stored there, and walks to the global entry when it finds none.
+     */
+    const address = "172.16.0.131";
+    const scope = manualAddressScope(address);
+
+    test("the address entry wins over the global key", () => {
+
+      const engine = engineFor([ "Enable.Device.Encryption.Key." + scope + "=address-key", "Enable.Device.Encryption.Key=global-key" ]);
+
+      assert.equal(engine.value("Device.Encryption.Key", scope), "address-key", "a key stored against this address is the key this address dials with");
+    });
+
+    test("the global key answers for an address with no entry of its own", () => {
+
+      const engine = engineFor(["Enable.Device.Encryption.Key=global-key"]);
+
+      assert.equal(engine.value("Device.Encryption.Key", manualAddressScope("10.0.0.20")), "global-key",
+        "an install with one key for every device needs no per-address entry, so the lookup walks past the address to the global level");
+    });
+
+    test("an address with no entry and no global key resolves nothing", () => {
+
+      assert.equal(engineFor([]).value("Device.Encryption.Key", scope), null, "an unencrypted device is dialed with no key rather than an empty one");
+    });
+
+    test("a key stored at one address does not leak to another", () => {
+
+      const engine = engineFor(["Enable.Device.Encryption.Key." + scope + "=address-key"]);
+
+      assert.equal(engine.value("Device.Encryption.Key", manualAddressScope("garage.local")), null,
+        "each listed address resolves its own key, so one encrypted device's key never reaches a second device the user listed");
+    });
+
+    test("the hostname and IPv4 forms of one device are separate identities", () => {
+
+      const engine = engineFor([ "Enable.Device.Encryption.Key." + scope + "=by-address", "Enable.Device.Encryption.Key.garage-local=by-name" ]);
+
+      assert.equal(engine.value("Device.Encryption.Key", scope), "by-address", "the address entry answers for the address");
+      assert.equal(engine.value("Device.Encryption.Key", manualAddressScope("garage.local")), "by-name", "and the hostname entry answers for the hostname");
     });
   });
 });

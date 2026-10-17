@@ -31,6 +31,12 @@ export const RATGDO_INITIAL_STATE_TIMEOUT = 5;
 // this long, then the HomeKit toggle flips back to off so the user can trigger it again. Matches the audio length the Konnected firmware emits.
 export const RATGDO_KONNECTED_PCW_DURATION = 5;
 
+// Duration, in seconds, between connect attempts against a listed device address that has not answered. This is the family's cadence: the PowerView plugin retries
+// its manually configured gateways once per discovery cycle, POWERVIEW_DISCOVERY_INTERVAL, which is this same five minutes. A listed address is a device the user
+// says is there, so the retry is patient by design - it covers a device that is powered down, rebooting, or briefly off the network, and a user who wants an answer
+// now reaches for the settings page's own connection test rather than waiting on this.
+export const RATGDO_MANUAL_RETRY_INTERVAL = 300;
+
 // The DNS-SD service type every ESPHome device advertises under, spelled as the fully qualified type name the library's browser takes. Both discovery consumers -
 // the platform and the webUI status feed - browse this one type, so the spelling lives here rather than in either of them.
 export const RATGDO_MDNS_SERVICE_TYPE = "_esphomelib._tcp.local";
@@ -53,4 +59,9 @@ export const RATGDO_UI_REVERT_DELAY = 50;
 // undiscovered, the pool classifies that device not-found and surfaces the verdict to the panel. The settings modal is a foreground, user-initiated context, so a bounded
 // wait keeps the panel responsive rather than waiting indefinitely on a device that is powered down or off the network.
 export const RATGDO_WEBUI_DISCOVERY_TIMEOUT = 10;
+
+// Duration, in seconds, the settings page's Add Device probe waits for a typed address to answer before it calls the attempt a timeout. A user who just typed an
+// address is watching the card, so the budget is short enough to answer them promptly and long enough to cover a device waking on a busy network. The page arms a
+// longer bound of its own around the request, so what a slow device produces is this classified answer rather than the browser giving up first.
+export const RATGDO_WEBUI_PROBE_TIMEOUT = 10;
 

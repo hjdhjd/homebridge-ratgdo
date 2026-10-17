@@ -1,30 +1,32 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * config.test.ts: The webUI's pure platform-configuration migration, exercised against the REAL feature-option engine and the REAL option catalog so the pins bind to
- * the same grammar the plugin's runtime resolves against. Covers every arm of the legacy-settings migration - what migrates, what deletes without migrating, and what
- * declines entirely - plus a round trip proving a migrated configuration runs the platform on the same effective values the legacy one did, and the precedence rows
- * for the broker and prefix the library resolves ratgdo's client from.
+ * config.test.ts: The webUI's pure platform-configuration interpreter, exercised against the REAL feature-option engine and the REAL option catalog so the assertions
+ * bind to the same grammar the plugin's runtime resolves against. Covers every arm of the legacy-settings migration - what migrates, what deletes without migrating,
+ * and what declines entirely - plus a round trip proving a migrated configuration runs the platform on the same effective values the legacy one did, the precedence
+ * rows for the broker and prefix the library resolves ratgdo's client from, and the manual-device reads and writes behind the settings page's Add Device card.
  *
  * One discipline binds every claim about a deleted property: a patch carries a deletion as a PRESENT key whose value is undefined, and carries a non-deletion by
  * omitting the key. An equality read cannot tell those apart, and the session's shallow-merge commit treats them oppositely, so presence is asserted with
  * Object.hasOwn and absence with its negation - never with a comparison against undefined.
  */
-import { FeatureOptions, mqttConnectionSettings } from "homebridge-plugin-utils";
-import { consolidatedFlag, featureOptionCategories, featureOptions } from "./options.ts";
+import { FeatureOptions, formatValueList, mqttConnectionSettings, scopeSafeId } from "homebridge-plugin-utils";
+import { consolidatedFlag, featureOptionCategories, featureOptions, manualAddressScope } from "./options.ts";
 import { describe, test } from "node:test";
+import { makeRatgdoConfig, canonicalManualAddress as pageCanonical, isZonedAddress as pageIsZoned } from "../homebridge-ui/public/ratgdo-config.mjs";
+import { manualAddressList, canonicalManualAddress as runtimeCanonical, isZonedAddress as runtimeIsZoned } from "./manual.ts";
 import { RATGDO_MQTT_TOPIC } from "./settings.ts";
 import assert from "node:assert/strict";
-import { makeRatgdoConfig } from "../homebridge-ui/public/ratgdo-config.mjs";
 
-// The two broker URLs the precedence pins tell apart: one carried by a legacy property, one already configured as an option entry.
+// The two broker URLs the precedence assertions tell apart: one carried by a legacy property, one already configured as an option entry.
 const LEGACY_URL = "mqtt://127.0.0.2:1883";
 const OPTION_URL = "mqtt://127.0.0.1:1883";
 
-// An unrelated entry seeded alongside the ones under test, so every pin that reads the composed array also proves the migration leaves a user's other options alone.
+// An unrelated entry seeded alongside the ones under test, so every assertion that reads the composed array also proves the migration leaves a user's other options
+// alone.
 const UNRELATED_ENTRY = "Disable.Light.1234567890AB";
 
-// The interpreter under test, built the way the webUI builds it: the real engine class and the real served catalog.
-const config = makeRatgdoConfig({ FeatureOptions, catalog: { categories: featureOptionCategories, options: featureOptions } });
+// The interpreter under test, built the way the webUI builds it: the real engine class, the real served catalog, and the engine's own list and identifier helpers.
+const config = makeRatgdoConfig({ FeatureOptions, catalog: { categories: featureOptionCategories, options: featureOptions }, formatValueList, scopeSafeId });
 
 // Every entry in an options array that addresses a given option, case-insensitively, in either the enabled or the disabled form.
 function entriesFor(options: string[] | undefined, option: string): string[] {
@@ -45,7 +47,7 @@ describe("the ratgdo webUI configuration migration", () => {
 
       assert.ok(patch, "a config carrying mqttUrl produces a patch");
       assert.deepEqual(entriesFor(patch.options, "Mqtt.Url"), ["Enable.Mqtt.Url=" + OPTION_URL], "the broker URL composes one entry carrying the exact value");
-      assert.ok(Object.hasOwn(patch, "mqttUrl"), "the property rides the patch as a present key, so the shallow-merge commit deletes it");
+      assert.ok(Object.hasOwn(patch, "mqttUrl"), "the property is carried by the patch as a present key, so the shallow-merge commit deletes it");
       assert.equal(patch.mqttUrl, undefined, "the property is carried as undefined");
     });
 
@@ -56,7 +58,7 @@ describe("the ratgdo webUI configuration migration", () => {
       assert.ok(patch, "a config carrying a custom mqttTopic produces a patch");
       assert.deepEqual(entriesFor(patch.options, "Mqtt.Topic"), ["Enable.Mqtt.Topic=garage"], "the topic composes one entry carrying the exact value");
       assert.ok(patch.options?.includes(UNRELATED_ENTRY), "an unrelated entry survives the migration untouched");
-      assert.ok(Object.hasOwn(patch, "mqttTopic"), "the property rides the patch for deletion");
+      assert.ok(Object.hasOwn(patch, "mqttTopic"), "the property is carried by the patch for deletion");
     });
 
     test("a whitespace-padded legacy value migrates trimmed", () => {
@@ -74,7 +76,7 @@ describe("the ratgdo webUI configuration migration", () => {
 
       assert.ok(patch, "a config carrying debug produces a patch");
       assert.deepEqual(entriesFor(patch.options, "Log.Debug"), ["Enable.Log.Debug"], "a flag composes the valueless enable form, carrying no value");
-      assert.ok(Object.hasOwn(patch, "debug"), "the property rides the patch for deletion");
+      assert.ok(Object.hasOwn(patch, "debug"), "the property is carried by the patch for deletion");
     });
   });
 
@@ -85,7 +87,7 @@ describe("the ratgdo webUI configuration migration", () => {
       const patch = config.migrate({ mqttTopic: "ratgdo" });
 
       assert.ok(patch, "the property is still deleted");
-      assert.ok(Object.hasOwn(patch, "mqttTopic"), "the property rides the patch for deletion");
+      assert.ok(Object.hasOwn(patch, "mqttTopic"), "the property is carried by the patch for deletion");
       assert.ok(!Object.hasOwn(patch, "options"), "a value that only restates the catalog default manufactures no configuration");
     });
 
@@ -109,13 +111,13 @@ describe("the ratgdo webUI configuration migration", () => {
       const off = config.migrate({ debug: false });
 
       assert.ok(off, "the property is still deleted");
-      assert.ok(Object.hasOwn(off, "debug"), "the property rides the patch for deletion");
+      assert.ok(Object.hasOwn(off, "debug"), "the property is carried by the patch for deletion");
       assert.ok(!Object.hasOwn(off, "options"), "off is what the catalog already declares, so no entry is manufactured for it");
 
       const handEdited = config.migrate({ debug: "yes" });
 
       assert.ok(handEdited, "a hand-edited non-boolean still produces a deletion patch");
-      assert.ok(Object.hasOwn(handEdited, "debug"), "the property rides the patch for deletion");
+      assert.ok(Object.hasOwn(handEdited, "debug"), "the property is carried by the patch for deletion");
       assert.ok(!Object.hasOwn(handEdited, "options"), "a value we decline to interpret composes nothing");
     });
 
@@ -124,8 +126,8 @@ describe("the ratgdo webUI configuration migration", () => {
       const patch = config.migrate({ mqttTopic: "", mqttUrl: "" });
 
       assert.ok(patch, "the properties are still deleted");
-      assert.ok(Object.hasOwn(patch, "mqttTopic"), "the topic property rides the patch for deletion");
-      assert.ok(Object.hasOwn(patch, "mqttUrl"), "the URL property rides the patch for deletion");
+      assert.ok(Object.hasOwn(patch, "mqttTopic"), "the topic property is carried by the patch for deletion");
+      assert.ok(Object.hasOwn(patch, "mqttUrl"), "the URL property is carried by the patch for deletion");
       assert.ok(!Object.hasOwn(patch, "options"), "a pure deletion never invents an options array");
     });
   });
@@ -138,7 +140,7 @@ describe("the ratgdo webUI configuration migration", () => {
       const patch = config.migrate({ mqttUrl: LEGACY_URL, options: [ existing, UNRELATED_ENTRY ] });
 
       assert.ok(patch, "the legacy property is still deleted");
-      assert.ok(Object.hasOwn(patch, "mqttUrl"), "the superseded property rides the patch for deletion");
+      assert.ok(Object.hasOwn(patch, "mqttUrl"), "the superseded property is carried by the patch for deletion");
       assert.ok(!Object.hasOwn(patch, "options"), "an existing entry is the user's own choice, so nothing is composed over it");
       assert.deepEqual(entriesFor([ existing, UNRELATED_ENTRY ], "Mqtt.Url"), [existing], "the entry the user configured is the only one addressing the option");
     });
@@ -148,7 +150,7 @@ describe("the ratgdo webUI configuration migration", () => {
       const patch = config.migrate({ mqttUrl: LEGACY_URL, options: ["Disable.Mqtt.Url"] });
 
       assert.ok(patch, "the legacy property is still deleted");
-      assert.ok(Object.hasOwn(patch, "mqttUrl"), "the property rides the patch for deletion");
+      assert.ok(Object.hasOwn(patch, "mqttUrl"), "the property is carried by the patch for deletion");
       assert.ok(!Object.hasOwn(patch, "options"), "a disable is a configured entry, so the legacy value does not overwrite it");
     });
 
@@ -158,7 +160,7 @@ describe("the ratgdo webUI configuration migration", () => {
       const patch = config.migrate({ debug: true, options: [ "Disable.Log.Debug", UNRELATED_ENTRY ] });
 
       assert.ok(patch, "the legacy property is still deleted");
-      assert.ok(Object.hasOwn(patch, "debug"), "the property rides the patch for deletion");
+      assert.ok(Object.hasOwn(patch, "debug"), "the property is carried by the patch for deletion");
       assert.ok(!Object.hasOwn(patch, "options"), "a disable is a configured entry, so the legacy flag does not overwrite it");
     });
   });
@@ -190,7 +192,7 @@ describe("the ratgdo webUI configuration migration", () => {
 
       assert.ok(patch, "a genuinely defined sibling still migrates rather than declining wholesale");
       assert.ok(!Object.hasOwn(patch, "mqttUrl"), "the already-staged key is not re-included, which would be churn");
-      assert.ok(Object.hasOwn(patch, "mqttTopic"), "the defined sibling still rides the patch for deletion");
+      assert.ok(Object.hasOwn(patch, "mqttTopic"), "the defined sibling still is carried by the patch for deletion");
     });
   });
 
@@ -211,7 +213,7 @@ describe("the ratgdo webUI configuration migration", () => {
 
     for(const property of [ "debug", "mqttTopic", "mqttUrl" ]) {
 
-      assert.ok(Object.hasOwn(patch, property), property + " rides the patch for deletion");
+      assert.ok(Object.hasOwn(patch, property), property + " is carried by the patch for deletion");
     }
 
     // Apply the patch the way the session stages it, then resolve each setting on both shapes through the very functions the platform constructor calls.
@@ -228,6 +230,271 @@ describe("the ratgdo webUI configuration migration", () => {
       "the migrated config resolves the same effective broker URL and topic prefix");
     assert.equal(consolidatedFlag(after, "Log.Debug", migrated.debug), consolidatedFlag(before, "Log.Debug", legacy.debug),
       "the migrated config resolves the same effective debug flag");
+  });
+});
+
+/* The manual-device reads and writes behind the Add Device card, driven against the REAL engine over the REAL catalog.
+ *
+ * The keystone of this section is that the card and the runtime address ONE entry. The page composes a key write here, and the plugin reads that key back through
+ * manualAddressScope before it dials - so every stored-string row below reads the composed entry with the runtime's own scope function rather than with a string the
+ * test wrote down, which is what would fail if either side drifted.
+ */
+/* The one vector table, run against BOTH halves of the canonical-address rule.
+ *
+ * The rule is written twice on purpose: the page's copy lives in an import-free browser module and the plugin's lives in a Node module a browser cannot load. Nothing
+ * in the language binds the two together, so THIS is what does - every vector is run through both halves and asserted to agree, and then asserted to be the expected
+ * form. A drift between the two shows up here rather than as a key the page stores at an identity the plugin never looks at.
+ */
+describe("the canonical manual address, on both sides of the wire", () => {
+
+  const vectors: readonly (readonly [string, string, string])[] = [
+
+    [ "[2001:db8::5]", "2001:db8::5", "an enclosing bracket pair is removed" ],
+    [ "2001:db8::5", "2001:db8::5", "the bare form is already canonical, so both spellings meet here" ],
+    [ "Garage.Local", "garage.local", "a hostname is case-insensitive, so its case is settled" ],
+    [ "[2001:DB8::5]", "2001:db8::5", "upper-case hex in a bracketed literal is settled by the same pass" ],
+    [ "  10.0.0.20  ", "10.0.0.20", "surrounding whitespace is not part of an address" ],
+    [ "10.0.0.20", "10.0.0.20", "an IPv4 literal passes through unchanged" ],
+    [ "[", "[", "a lone bracket is not an enclosing pair, so only trim and case apply" ],
+    [ "fe80::1%en0", "fe80::1%en0", "a zone survives canonicalization - refusing it is a separate decision" ]
+  ];
+
+  for(const [ input, expected, why ] of vectors) {
+
+    test(JSON.stringify(input) + " canonicalizes identically on both sides", () => {
+
+      assert.equal(runtimeCanonical(input), expected, "the plugin's own rule answers " + JSON.stringify(expected) + ": " + why);
+      assert.equal(pageCanonical(input), expected, "and the page's rule answers the same, which is the whole point of asserting them together");
+    });
+  }
+
+  test("agrees on which addresses name a zone", () => {
+
+    for(const [input] of vectors) {
+
+      const canonical = runtimeCanonical(input);
+
+      assert.equal(pageIsZoned(canonical), runtimeIsZoned(canonical),
+        "both sides read " + JSON.stringify(canonical) + " the same way, so the card refuses exactly what the runtime would refuse");
+    }
+
+    assert.equal(runtimeIsZoned("fe80::1%en0"), true, "a zoned literal is refused");
+    assert.equal(runtimeIsZoned("fd00::1"), false, "and an ordinary unique-local literal is not");
+  });
+
+  test("gives the page and the runtime the same scope id for every vector", () => {
+
+    /* The consequence that actually matters. A key the card writes is read back by the plugin through manualAddressScope, so if the two halves canonicalized
+     * differently the page would store a key at an identity the plugin never asks for - and an encrypted device would refuse every connection with the key sitting
+     * right there in the configuration.
+     */
+    for(const [input] of vectors) {
+
+      assert.equal(scopeSafeId(pageCanonical(input)), manualAddressScope(runtimeCanonical(input)),
+        "the page and the plugin name the same identity for " + JSON.stringify(input));
+    }
+  });
+
+  test("collapses a bracketed and a bare spelling to one list entry and one identity", () => {
+
+    const listed = manualAddressList([ "[2001:DB8::5]", "2001:db8::5" ]);
+
+    assert.deepEqual([...listed], ["2001:db8::5"], "the runtime lists one address where a user wrote two spellings of it");
+    assert.equal(manualAddressScope(pageCanonical("[2001:DB8::5]")), manualAddressScope(pageCanonical("2001:db8::5")),
+      "and the page names one identity for the two spellings, so one stored key serves both");
+  });
+});
+
+describe("the ratgdo webUI manual-device composition", () => {
+
+  // The three address shapes that reach the engine's stored form differently: an IPv4 address and a hostname each carry periods the stored form gives meaning to,
+  // while an IPv6 literal's colons pass through untouched. Every row that cares about storage drives all three.
+  const ADDRESSES = [ "10.0.0.20", "garage.local", "fd00::1" ];
+  const KEY = "c2VjcmV0LWtleQ==";
+
+  // The entry addressing an option at a given id, read out of a composed patch. Reading by prefix rather than by a written-out string is what lets the row assert the
+  // WHOLE entry it found, including the value, without restating the engine's own spelling of the name.
+  const entryAt = (options: string[] | undefined, option: string, id: string): string | undefined => {
+
+    const prefix = ("Enable." + option + "." + id).toLowerCase() + "=";
+
+    return (options ?? []).find((entry) => entry.toLowerCase().startsWith(prefix));
+  };
+
+  describe("reading the listed addresses", () => {
+
+    test("reads exactly what the runtime's own list read reads, messy stored list and all", () => {
+
+      /* The page and the runtime must agree about what counts as one entry, so this row drives a deliberately messy stored list - padding, an empty element, a
+       * duplicate - through BOTH readers and compares them to each other rather than to a literal. A comparison against a written-out expectation would pass even if
+       * both sides drifted together; comparing the two readers cannot.
+       */
+      const stored = "Enable.Device.Address= 10.0.0.20 ,, garage.local,10.0.0.20 ";
+      const fromInterpreter = config.manualAddresses({ options: [stored] });
+      const fromRuntime = new FeatureOptions(featureOptionCategories, featureOptions, [stored]).valueList({ option: "Device.Address" });
+
+      assert.deepEqual([...fromInterpreter], [...fromRuntime], "the card's read and the plugin's read answer the same list for the same stored string");
+      assert.deepEqual([...fromInterpreter], [ "10.0.0.20", "garage.local", "10.0.0.20" ],
+        "the engine trims each entry and drops the empty one, while duplicates and order are the user's own and survive");
+    });
+
+    test("reads an empty list for a configuration that has never listed an address", () => {
+
+      assert.deepEqual([...config.manualAddresses({})], [], "an install with no options at all lists no addresses");
+      assert.deepEqual([...config.manualAddresses({ options: [UNRELATED_ENTRY] })], [], "an install with unrelated options still lists no addresses");
+    });
+  });
+
+  describe("composing a manual device", () => {
+
+    test("appends to an empty list and to a populated one, leaving every other entry alone", () => {
+
+      const fresh = config.withManualDevice({}, { address: "10.0.0.20" });
+
+      assert.ok(fresh, "an address for a configuration that lists none produces a patch");
+      assert.deepEqual(entriesFor(fresh.options, "Device.Address"), ["Enable.Device.Address=10.0.0.20"], "the first address composes the list entry");
+
+      const populated = config.withManualDevice({ options: [ "Enable.Device.Address=10.0.0.20", UNRELATED_ENTRY ] }, { address: "garage.local" });
+
+      assert.ok(populated, "a second address produces a patch");
+      assert.deepEqual(entriesFor(populated.options, "Device.Address"), ["Enable.Device.Address=10.0.0.20,garage.local"],
+        "the new address is appended in the engine's own canonical spelling rather than replacing the list");
+      assert.ok(populated.options.includes(UNRELATED_ENTRY), "an unrelated entry survives untouched");
+    });
+
+    test("refuses an address that is empty or nothing but whitespace, and trims the one it accepts", () => {
+
+      for(const address of [ "", "   " ]) {
+
+        assert.equal(config.withManualDevice({}, { address }), null,
+          "an address of " + JSON.stringify(address) + " is the user having typed nothing, so nothing is composed");
+      }
+
+      /* The card reads this value straight out of a DOM field, so the guard has to cope with a caller that is not TypeScript at all - which is what the module's own
+       * typeof check is for. Calling through an untyped view of the function is how that arm is exercised without an assertion at the call itself.
+       */
+      const loose = config as unknown as { withManualDevice: (entry: unknown, device: unknown) => unknown };
+      const untyped = (device: { address?: unknown; key?: unknown }): unknown => loose.withManualDevice({}, device);
+
+      assert.equal(untyped({}), null, "an address the page never supplied is the user having typed nothing too");
+      assert.equal(untyped({ address: 42 }), null, "and an address that is not text at all composes nothing rather than being coerced");
+
+      const patch = config.withManualDevice({}, { address: "  10.0.0.20  " });
+
+      assert.ok(patch, "a padded address is still an address");
+      assert.deepEqual(entriesFor(patch.options, "Device.Address"), ["Enable.Device.Address=10.0.0.20"], "and it is stored trimmed");
+    });
+
+    test("stores a typed key at the address identity the runtime reads it back at, for every address shape", () => {
+
+      // Risk 5, from the page's side: the entry this composes is read by manualAddressScope plus the real engine, so a drift between the two spellings fails here.
+      for(const address of ADDRESSES) {
+
+        const patch = config.withManualDevice({}, { address, key: KEY });
+
+        assert.ok(patch, "the address " + address + " composes a patch");
+
+        const scope = manualAddressScope(address);
+
+        assert.equal(entryAt(patch.options, "Device.Encryption.Key", scope), "Enable.Device.Encryption.Key." + scope + "=" + KEY,
+          "the key for " + address + " is stored at the identity the runtime's own scope function names");
+        assert.equal(new FeatureOptions(featureOptionCategories, featureOptions, patch.options).value("Device.Encryption.Key", scope), KEY,
+          "and the real engine resolves it back at that identity, which is exactly what the manual dial does before it connects");
+      }
+    });
+
+    test("accepts an already-listed address and rewrites only its key", () => {
+
+      /* This is how a user fixes a key they got wrong, so the row asserts BOTH halves: the list is untouched (no duplicate entry) and the key entry is the only
+       * thing that moved.
+       */
+      const patch = config.withManualDevice({ options: [ "Enable.Device.Address=10.0.0.20", "Enable.Device.Encryption.Key.10-0-0-20=old-key" ] },
+        { address: "10.0.0.20", key: KEY });
+
+      assert.ok(patch, "a listed address with a new key still produces a patch");
+      assert.deepEqual(entriesFor(patch.options, "Device.Address"), ["Enable.Device.Address=10.0.0.20"], "the address is not listed a second time");
+      assert.equal(entryAt(patch.options, "Device.Encryption.Key", "10-0-0-20"), "Enable.Device.Encryption.Key.10-0-0-20=" + KEY, "and the key entry is rewritten");
+    });
+
+    test("matches an already-listed address without regard to case, since a hostname and an IPv6 literal are both case-insensitive", () => {
+
+      const patch = config.withManualDevice({ options: ["Enable.Device.Address=Garage.Local"] }, { address: "garage.local", key: KEY });
+
+      assert.ok(patch, "the key still composes");
+      assert.deepEqual(entriesFor(patch.options, "Device.Address"), ["Enable.Device.Address=Garage.Local"],
+        "a differing spelling of a listed address adds no second entry, and the user's own spelling is left as they wrote it");
+    });
+
+    test("answers null when neither the address nor the key would move", () => {
+
+      assert.equal(config.withManualDevice({ options: ["Enable.Device.Address=10.0.0.20"] }, { address: "10.0.0.20" }), null,
+        "a listed address with no key typed changes nothing, so there is nothing to commit");
+      assert.equal(config.withManualDevice({ options: [ "Enable.Device.Address=10.0.0.20", "Enable.Device.Encryption.Key.10-0-0-20=" + KEY ] },
+        { address: "10.0.0.20", key: KEY }), null, "re-confirming the key already stored changes nothing either");
+    });
+
+    test("writes no address entry for a key the engine already resolves globally", () => {
+
+      // The engine walks the address entry and then the global one, so a device whose key is inherited needs no entry of its own - writing one would manufacture
+      // configuration that says nothing the configuration did not already say.
+      const patch = config.withManualDevice({ options: [ "Enable.Device.Address=10.0.0.20", "Enable.Device.Encryption.Key=" + KEY ] },
+        { address: "10.0.0.20", key: KEY });
+
+      assert.equal(patch, null, "a key equal to the global one composes no address-scoped entry, and with nothing else to do the whole patch is null");
+    });
+
+    test("never clears a stored key when the user leaves the field blank", () => {
+
+      const stored = [ "Enable.Device.Address=10.0.0.20", "Enable.Device.Encryption.Key.10-0-0-20=" + KEY ];
+
+      for(const key of [ "", undefined ]) {
+
+        assert.equal(config.withManualDevice({ options: stored }, { address: "10.0.0.20", key }), null,
+          "a blank key field says nothing about the key rather than asking to delete it, so nothing is composed");
+      }
+    });
+
+    test("recognizes the bracketed spelling of a listed bare address as already listed", () => {
+
+      /* The already-listed decision runs on canonical forms on BOTH sides of the comparison - the typed address and every entry already in the list - so a user who
+       * lists "2001:db8::5" and later types "[2001:db8::5]" is told it is already there rather than given a second list entry for one device.
+       */
+      assert.equal(config.withManualDevice({ options: ["Enable.Device.Address=2001:db8::5"] }, { address: "[2001:DB8::5]" }), null,
+        "the bracketed spelling of a listed address changes nothing");
+      assert.equal(config.withManualDevice({ options: ["Enable.Device.Address=[2001:db8::5]"] }, { address: "2001:db8::5" }), null,
+        "and so does the bare spelling of a bracketed listed entry, since both sides of the comparison are canonicalized");
+    });
+
+    test("writes the canonical form into the list and stores the key at that identity", () => {
+
+      const patch = config.withManualDevice({}, { address: "[2001:DB8::5]", key: KEY });
+
+      assert.ok(patch, "a bracketed address still composes a patch");
+      assert.deepEqual(entriesFor(patch.options, "Device.Address"), ["Enable.Device.Address=2001:db8::5"],
+        "what is written is the bare literal, which is what the plugin dials and what Node's own parser reads as an address");
+      assert.equal(entryAt(patch.options, "Device.Encryption.Key", "2001:db8::5"), "Enable.Device.Encryption.Key.2001:db8::5=" + KEY,
+        "and the key is stored at the canonical identity, which is the one the plugin reads before it dials");
+    });
+
+    test("refuses an address naming a zone outright", () => {
+
+      // A zone identifier names the interface a link-local address was heard on and means nothing without that link, so there is nothing to write and nothing that
+      // could be dialed. The card renders the refusal; the composer simply has nothing to compose.
+      assert.equal(config.withManualDevice({}, { address: "fe80::1%en0", key: KEY }), null, "a zoned address composes no patch at all, key or no key");
+      assert.equal(config.withManualDevice({ options: ["Enable.Device.Address=10.0.0.20"] }, { address: "[fe80::1%en0]" }), null,
+        "and stripping its brackets first does not make it dialable");
+    });
+
+    test("composes the address and its key in ONE patch, never two", () => {
+
+      // A20's whole point: a card-added device always carries its key, and both halves reach disk in a single commit.
+      const patch = config.withManualDevice({}, { address: "garage.local", key: KEY });
+
+      assert.ok(patch, "a new address with a key produces a patch");
+      assert.deepEqual(entriesFor(patch.options, "Device.Address"), ["Enable.Device.Address=garage.local"], "the one patch carries the list entry");
+      assert.equal(entryAt(patch.options, "Device.Encryption.Key", "garage-local"), "Enable.Device.Encryption.Key.garage-local=" + KEY,
+        "and the same patch carries the key entry, so a save is one write rather than two");
+    });
   });
 });
 

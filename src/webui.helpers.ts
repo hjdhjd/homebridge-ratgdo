@@ -10,8 +10,11 @@
  *
  * The page is imported once per test under a fresh query string, which is what gives each test its own module instance: the page holds its warm-set memory and its
  * debounce handle in module scope, and a second test reading the first test's memory would assert nothing at all.
+ *
+ * The `document` installed here is the recording one, seeded with the mount points Config UI X's own markup carries. That is what lets the suite hold the Add Device
+ * card: the page builds the card through plain DOM calls, and every one of those calls lands in a record a test reads back.
  */
-import type { FakeCatalog, FakeConfigEntry, FakeConsole, FakeDevice, FakeDocument, FakeHost, webUi } from "./webui-double.helpers.ts";
+import type { FakeCatalog, FakeConfigEntry, FakeConsole, FakeDevice, FakeDocument, FakeElement, FakeHost, webUi } from "./webui-double.helpers.ts";
 import { defaultConfig, defaultDevices, makeConsole, makeDocument, makeHost, stageFixture } from "./webui-double.helpers.ts";
 import type { Nullable } from "homebridge-plugin-utils";
 import { registerHooks } from "node:module";
@@ -52,6 +55,7 @@ registerHooks({ resolve: (specifier, context, nextResolve) => {
  * @property config        - The platform configuration the host holds.
  * @property devices       - The devices the sidebar's device source lists.
  * @property failNextShow  - Makes the page's own launch fail before it establishes, which is the only way to reach that state: the page shows itself as it loads.
+ * @property probe         - What the probe route answers, as a function so a test can describe a slow answer, a failing one, or one per call.
  */
 export interface LoadUiOptions {
 
@@ -60,6 +64,7 @@ export interface LoadUiOptions {
   config?: FakeConfigEntry[];
   devices?: FakeDevice[];
   failNextShow?: boolean;
+  probe?: () => Promise<unknown>;
 }
 
 /* One loaded page and the fakes that observed it. Disposable, so a test holds it with `using` and the globals the load installed are restored at the end of the test
@@ -70,6 +75,8 @@ export interface LoadedUi extends Disposable {
   console: FakeConsole;
   document: FakeDocument;
   double: webUi;
+  // The test-facing search over the tree the page built. It lives here rather than on the document, so that the document the page reads carries DOM members only.
+  findElement: (predicate: (element: FakeElement) => boolean) => Nullable<FakeElement>;
   host: FakeHost;
 }
 
@@ -81,12 +88,12 @@ let loads = 0;
  * The load settles once before it returns. The page starts its first warm without awaiting it, so the module's own evaluation finishes while that send is still in
  * flight; letting the queue come to rest here means every test reads a page that has finished booting rather than one caught mid-boot.
  */
-export const loadUi = async ({ addresses = {}, catalog = null, config = defaultConfig(), devices = defaultDevices(),
-  failNextShow = false }: LoadUiOptions = {}): Promise<LoadedUi> => {
+export const loadUi = async ({ addresses = {}, catalog = null, config = defaultConfig(), devices = defaultDevices(), failNextShow = false,
+  probe }: LoadUiOptions = {}): Promise<LoadedUi> => {
 
   const fakeConsole = makeConsole();
-  const fakeDocument = makeDocument();
-  const host = makeHost({ addresses, config });
+  const dom = makeDocument();
+  const host = makeHost({ addresses, config, probe });
 
   // The double the page is about to construct. It arrives through the fixture's own callback, because the page constructs it inside its module body where no caller
   // can reach the instance.
@@ -100,7 +107,7 @@ export const loadUi = async ({ addresses = {}, catalog = null, config = defaultC
   // The globals the page reads. They are installed by descriptor rather than by assignment so the restore below can tell a global that existed before from one this
   // load introduced, and delete the latter instead of leaving an undefined behind.
   const scope = globalThis as unknown as Record<string, unknown>;
-  const installed = { console: fakeConsole, document: fakeDocument, homebridge: host };
+  const installed = { console: fakeConsole, document: dom.document, homebridge: host };
   const prior = new Map(Object.keys(installed).map((key) => [ key, Object.getOwnPropertyDescriptor(scope, key) ]));
 
   Object.assign(scope, installed);
@@ -135,8 +142,9 @@ export const loadUi = async ({ addresses = {}, catalog = null, config = defaultC
       }
     },
     console: fakeConsole,
-    document: fakeDocument,
+    document: dom.document,
     double,
+    findElement: dom.find,
     host
   };
 };

@@ -2,11 +2,11 @@
  *
  * ui.mjs: Homebridge Ratgdo webUI.
  */
-import { STATUS_ADDRESSES_ROUTE, STATUS_WARM_ROUTE } from "./status-routes.mjs";
-import { FeatureOptions } from "homebridge-plugin-utils/featureOptions.js";
+import { FeatureOptions, formatValueList, scopeSafeId } from "homebridge-plugin-utils/featureOptions.js";
+import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE, STATUS_WARM_ROUTE } from "./status-routes.mjs";
+import { canonicalManualAddress, isZonedAddress, makeRatgdoConfig } from "./ratgdo-config.mjs";
 import { PluginConfigSession } from "homebridge-plugin-utils/pluginConfigSession.mjs";
 import { STATUS_EVENT } from "homebridge-plugin-utils/webui-status.js";
-import { makeRatgdoConfig } from "./ratgdo-config.mjs";
 import { webUi } from "homebridge-plugin-utils/webUi.mjs";
 import { withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
 
@@ -21,11 +21,13 @@ const MOTION_LATCH_FALLBACK_SECONDS = 5;
 // sends immediately, because a page that has just established has nothing to coalesce with.
 const WARM_DEBOUNCE_MS = 300;
 
-/* The warm-set recompute state. rememberedKeys is the warm set the server last received, keyed by mac with the value being that mac's effective key (undefined recorded
- * explicitly, so a tracked-keyless device is distinct from an untracked one); a recompute re-sends only when this set would change, a send-suppression optimization over
- * the server's authoritative diff. warmDebounceTimer is the trailing-debounce handle for the hook and belt recompute paths.
+/* The warm-set recompute state. sentSignature is a canonical string of the whole warm payload the server last received, and a recompute re-sends only when the payload
+ * it just computed spells differently - a send-suppression optimization over the server's own authoritative diff. One signature over the whole payload rather than a
+ * per-field memory is what makes "changed" mean any field of any entry changed, so a widening of the payload needs no second comparison written beside the first. Null
+ * means nothing has been sent, which is also the state every forced-resend path returns it to. warmDebounceTimer is the trailing-debounce handle for the hook and belt
+ * recompute paths.
  */
-let rememberedKeys = new Map();
+let sentSignature = null;
 let warmDebounceTimer = null;
 
 /* The identity-strip address cache. deviceAddresses maps each device's mac - device.serialNumber, the same key the status pushes carry - to that device's live discovery
@@ -36,7 +38,7 @@ let deviceAddresses = {};
 let addressRefreshInFlight = false;
 
 /* Fire the warm-route request and feed it to the shared panel's link-lost watchdog as its own liveness probe. The raw request promise is captured so the watch observes
- * it directly: a rejection must reach the watchdog's two-armed hook as a rejection, and the console diagnostic rides a separate chain off the same promise because
+ * it directly: a rejection must reach the watchdog's two-armed hook as a rejection, and the console diagnostic goes through a separate chain off the same promise because
  * composing the watch after the .catch would convert every rejection into a resolution and blind the rejection-is-liveness path. The panel handle is read at call time
  * because it is minted per show() and must never be captured; the optional chaining keeps a pre-show() request honest, since the handle is null before the first show()
  * and an unwatched boot request is covered by the panel's own view probe once a device is viewed. Warm progress itself flows back over push events, not this response.
@@ -54,7 +56,7 @@ const requestRoute = (route, body) => {
 
 /* Refresh the identity-strip address cache from the server's live discovery projection. It fires the addresses route and hands the raw request promise to the shared
  * panel's link-lost watchdog exactly as requestRoute does - the watch observes the raw request so a rejection reaches the watchdog as a rejection, and the console
- * diagnostic rides a separate chain, since composing the watch after a .catch would blind the rejection-is-liveness path. The panel handle is read at call time
+ * diagnostic goes through a separate chain, since composing the watch after a .catch would blind the rejection-is-liveness path. The panel handle is read at call time
  * because it is minted per show() and must never be captured. On resolution the cache is replaced wholesale, since the projection is the server's whole discovery
  * truth for this page session. A single boolean latch coalesces concurrent triggers: a "connecting" burst - every device connects fresh after page load - would
  * otherwise fire one request per device, so a refresh already in flight is not duplicated, and the two-armed settle clears the latch whether the request resolves or
@@ -89,14 +91,31 @@ const refreshAddresses = async () => {
   }
 };
 
+/* Reduce a warm payload to one canonical string, the whole of what the send-suppression comparison reads.
+ *
+ * Two properties make the comparison sound. Each list is sorted by its own identity, so a device list the framework happens to hand back in a different order is not
+ * mistaken for a change; and each entry is a fixed-position tuple with an explicit null for an absent field rather than an object with the field omitted, so no omitted
+ * field can ever collide with a present one - a device named "x" with no key spells differently from a device with no name and the key "x". Together they make
+ * "changed" mean exactly what it says: some field of some entry moved.
+ *
+ * @param {{ addresses?: Object[], devices: Object[] }} payload - The warm payload about to be sent.
+ *
+ * @returns {string} The canonical spelling of that payload.
+ */
+const warmSignature = (payload) => JSON.stringify({
+
+  addresses: [...payload.addresses ?? []].sort((a, b) => a.address.localeCompare(b.address)).map((entry) => [ entry.address, entry.psk ?? null ]),
+  devices: [...payload.devices].sort((a, b) => a.mac.localeCompare(b.mac)).map((entry) => [ entry.mac, entry.psk ?? null, entry.logName ?? null ])
+});
+
 /* Recompute the warm set from the live device list and feature-option edits, and re-send it to the server when it would change. Every warm send funnels through this one
  * function, which gates on config-view establishment and epoch liveness before it sends, so the diff-and-send logic and the integrity conditions that guard it live in
  * exactly one place rather than being restated per trigger; the address-refresh request is a read and is deliberately outside this funnel. The whole body is guarded:
  * a failed lookup logs to the console and keeps the last-sent set rather than throwing out of a callback. The device list comes from the public HBPU device-list source
- * (never a hand-parse of the cached accessories), and each device's effective key comes from one FeatureOptions engine rebuilt from the live editedConfig against the
- * framework's page-lifetime catalog, which it fetches once and shares with every reader, so encryption-key inheritance resolves entirely through the engine. The
- * remembered set records every mac explicitly with undefined meaning "no key", so a keyless tracked device and an untracked one are distinguishable, and the send is
- * suppressed unless a mac is new or a key differs - a redundant warm would be a no-op at the server's authoritative diff, so suppressing it is purely an optimization.
+ * (never a hand-parse of the cached accessories), and each device's effective key and log name come from one FeatureOptions engine rebuilt from the live editedConfig
+ * against the framework's page-lifetime catalog, which it fetches once and shares with every reader, so option inheritance resolves entirely through the engine. The
+ * payload is then reduced to a canonical signature and compared against the last one sent, so the send is suppressed unless some field of some entry moved - a
+ * redundant warm would be a no-op at the server's authoritative diff, so suppressing it is purely an optimization.
  */
 const recomputeWarmSet = async () => {
 
@@ -105,9 +124,9 @@ const recomputeWarmSet = async () => {
     const catalog = await ui.featureOptions.catalog();
     const devices = (await deviceList()).devices ?? [];
 
-    /* The primary config block, read by position, whose absence is the establishment gate. The plugin-config session pins config[0] as the primary platform entry and the
-     * editedConfig getter hands that entry back first on every read, and the array it reads is Ratgdo-only by the host's own construction - the server filters plugin
-     * config by platform tag before it ever reaches the browser - so position is the durable identity for this plugin's block. Matching by the platform tag instead is
+    /* The primary config block, read by position, whose absence is the establishment gate. The plugin-config session holds config[0] fixed as the primary platform
+     * entry and the editedConfig getter hands that entry back first on every read, and the array it reads is Ratgdo-only by the host's own construction - the server
+     * filters plugin config by platform tag before it ever reaches the browser - so position is the durable identity for this block. Matching by the platform tag is
      * fragile against the host UI: its schema-driven Settings form emits only schema-declared keys and strips every undeclared key, the platform tag included, from the
      * in-memory config block, so a tag match can miss against a fully keyed configuration after a Settings-tab visit and compute every encrypted device keyless.
      *
@@ -128,8 +147,18 @@ const recomputeWarmSet = async () => {
     }
 
     const featureOptions = new FeatureOptions(catalog.categories, catalog.options, block.options ?? []);
-    const warm = [];
-    const nextKeys = new Map();
+
+    // One option's effective value at one identity, answered only when it is a non-empty string. Every option this page reads for the warm payload goes through here,
+    // so the rule that an empty entry means "the user set nothing" is stated once for the page rather than once per read. The runtime states the same rule for itself;
+    // browser code cannot import it, so the two are written apart deliberately rather than by oversight.
+    const optionText = (option, id) => {
+
+      const value = featureOptions.value(option, id);
+
+      return ((typeof value === "string") && (value.length > 0)) ? value : undefined;
+    };
+
+    const devicePayload = [];
 
     for(const device of devices) {
 
@@ -140,38 +169,63 @@ const recomputeWarmSet = async () => {
         continue;
       }
 
-      const key = featureOptions.value("Device.Encryption.Key", mac);
-      const psk = ((typeof key === "string") && (key.length > 0)) ? key : undefined;
+      const logName = optionText("Device.LogName", mac);
+      const psk = optionText("Device.Encryption.Key", mac);
       const entry = { mac };
+
+      // Each optional field is attached only when the engine answered one, so the payload on the wire carries exactly what the user configured and the server's
+      // narrowing reads an absent field rather than an explicit undefined that JSON would drop anyway.
+      if(logName !== undefined) {
+
+        entry.logName = logName;
+      }
 
       if(psk !== undefined) {
 
         entry.psk = psk;
       }
 
-      warm.push(entry);
-      nextKeys.set(mac, psk);
+      devicePayload.push(entry);
     }
 
-    // Send-suppression: re-send only when the warm set would change. A size difference covers a device added to or removed from the list; the per-mac scan covers a new
-    // mac or a changed key at constant size. This premise - that an unchanged set needs no re-send - holds only against a living server that still holds the set; every
-    // forced-resend path clears the remembered keys first, so a helper restart or a lost send is healed by the next forced trigger rather than staying suppressed.
-    let changed = (nextKeys.size !== rememberedKeys.size);
+    /* The listed addresses, read once per recompute and canonicalized before anything is done with them. Canonicalizing first is what makes the scope id the page
+     * computes the same one the plugin computes: the runtime canonicalizes its own list before it dials, so a raw entry here would store a key at an identity the
+     * plugin never looks for. Each key is then read at the address's OWN identity, exactly as the runtime reads it before a manual dial - a device named by address
+     * has no mac anyone knows until something connects to it. scopeSafeId is the engine's own answer to an identifier carrying characters its stored form gives
+     * meaning to, and using the library's function rather than a local rewrite is what keeps the page and the runtime writing the same entry.
+     *
+     * A zoned address is dropped rather than sent. The card refuses one before it is ever written, so an entry reaching here names a device nothing can dial, and
+     * sending it would only have the feed drop it again.
+     */
+    const addressPayload = [];
 
-    if(!changed) {
+    for(const entry of featureOptions.valueList({ option: "Device.Address" })) {
 
-      for(const [ mac, psk ] of nextKeys) {
+      const address = canonicalManualAddress(entry);
 
-        if(!rememberedKeys.has(mac) || (rememberedKeys.get(mac) !== psk)) {
+      if(!address.length || isZonedAddress(address)) {
 
-          changed = true;
-
-          break;
-        }
+        continue;
       }
+
+      const psk = optionText("Device.Encryption.Key", scopeSafeId(address));
+      const payloadEntry = { address };
+
+      if(psk !== undefined) {
+
+        payloadEntry.psk = psk;
+      }
+
+      addressPayload.push(payloadEntry);
     }
 
-    if(!changed) {
+    const payload = { addresses: addressPayload, devices: devicePayload };
+    const signature = warmSignature(payload);
+
+    // Send-suppression: re-send only when the payload would spell differently than the one the server already holds. This premise - that an unchanged payload needs no
+    // re-send - holds only against a living server that still holds it; every forced-resend path clears the signature first, so a helper restart or a lost send is
+    // healed by the next forced trigger rather than staying suppressed.
+    if(signature === sentSignature) {
 
       return;
     }
@@ -179,7 +233,7 @@ const recomputeWarmSet = async () => {
     /* The epoch check, the last integrity condition on the send path. The debounce timer and this function's own awaits can outlive the module copy that armed them: a
      * panel reopen mints a successor and aborts this copy's epoch mid-flight, and nothing cancels an armed setTimeout or an in-flight recompute. Testing the epoch here,
      * as the last act before the request, retires the whole zombie class at the one place it becomes observable instead of enumerating a cleanup per resource. Everything
-     * above this line is read-only, so a late-firing recompute that bails here costs nothing beyond its own computation, and the check sits ahead of the remembered-key
+     * above this line is read-only, so a late-firing recompute that bails here costs nothing beyond its own computation, and the check sits ahead of the signature
      * assignment so a refused send leaves the retired copy's module state untouched entirely.
      */
     if(ui.epochSignal.aborted) {
@@ -187,14 +241,14 @@ const recomputeWarmSet = async () => {
       return;
     }
 
-    rememberedKeys = nextKeys;
+    sentSignature = signature;
 
     // Reset the component's per-device stale-push guard. A warm re-send re-elicits the pool's pushes, so the guard's highest-seen floors must clear or the fresh pushes
     // would be dropped against stale tokens; the handle is read at call time because it is minted per show() and must never be captured. Safe by construction: tokens are
     // monotonic within a feed lifetime and the feed's session-identity guard is the real stale-push protection, so clearing the floors cannot admit a superseded push.
     ui.featureOptions.statusPanel?.resetStaleGuards();
 
-    requestRoute(STATUS_WARM_ROUTE, { devices: warm });
+    requestRoute(STATUS_WARM_ROUTE, payload);
   } catch(error) {
 
     // console is the browser panel's diagnostic transport; a failed warm recompute is a diagnostic, and keeping the last-sent set is the safe fallback.
@@ -219,18 +273,18 @@ const scheduleRecompute = () => {
   }, WARM_DEBOUNCE_MS);
 };
 
-/* Force a warm re-send: the recovery chokepoint every restart-recovery path rides. It clears the send-suppression cache before scheduling the debounced recompute,
- * because that cache's premise - a re-send with an unchanged set is a no-op at the server - is false across a helper restart: a fresh server process starts with an empty
- * warm set, so a suppressed re-send would leave it starved. Clearing the remembered keys forces the next recompute to send. Routing through the debounced recompute
- * rather than an immediate one makes the debounce the serializer: a hello landing mid-keystroke coalesces with the typing burst instead of racing it with a
- * half-typed key, concurrent triggers (a hello and a foreground return together) collapse into one send, and the 300ms trailing delay is imperceptible beside the
- * roughly one-second connect floor. One honest bound: the load announcement's warm bypasses this debounce, so a hello arriving during a launch can have its debounced
- * recompute overlap that announcement's async body - both compute against the same live state, and the server's authoritative diff makes the double-send harmless,
- * which is the posture every redundant send in this design takes.
+/* Force a warm re-send: the recovery chokepoint every restart-recovery path goes through. It clears the send-suppression signature before scheduling the debounced
+ * recompute, because that signature's premise - a re-send of an unchanged payload is a no-op at the server - is false across a helper restart: a fresh server process
+ * starts with an empty warm set, so a suppressed re-send would leave it starved. Clearing the signature forces the next recompute to send whatever it computes. Routing
+ * through the debounced recompute rather than an immediate one makes the debounce the serializer: a hello landing mid-keystroke coalesces with the typing burst instead
+ * of racing it with a half-typed key, concurrent triggers (a hello and a foreground return together) collapse into one send, and the 300ms trailing delay is
+ * imperceptible beside the roughly one-second connect floor. One honest bound: the load announcement's warm bypasses this debounce, so a hello arriving during a launch
+ * can have its debounced recompute overlap that announcement's async body - both compute against the same live state, and the server's authoritative diff makes the
+ * double-send harmless, which is the posture every redundant send in this design takes.
  */
 const forceWarmResend = () => {
 
-  rememberedKeys = new Map();
+  sentSignature = null;
   scheduleRecompute();
 };
 
@@ -301,6 +355,392 @@ const validOption = (device, option) => entryAppliesToDevice(device, option);
 // Whether a device's page offers one feature option category, the same rule applied to the section the framework is about to render.
 const validOptionCategory = (device, category) => entryAppliesToDevice(device, category);
 
+/* The bound in seconds on one Test Connection round trip. It deliberately sits ABOVE the server's own probe budget, so what a slow device produces is the server's
+ * classified answer - a timeout the card can explain - rather than this deadline firing first and leaving the card to guess which of the two happened. The page
+ * cannot import the server's constant, so the ordering is stated here and held by the card's own timeout copy naming the device rather than the page.
+ */
+const PROBE_DEADLINE = 15;
+
+// The card's copy for every verdict a probe can answer with. Keyed by the classified reason so the card renders one sentence per reason rather than branching, and
+// worded in the status panel's own voice: what happened, then what to do about it.
+const PROBE_MESSAGES = {
+
+  "auth-invalid": "The device refused that encryption key. Check the key in this device's YAML configuration and try again.",
+  "auth-missing": "This device requires its API encryption key. Enter the key from the device's YAML configuration and test again.",
+  "misconfigured": "Something answered at that address, but it is not a Ratgdo or Konnected opener this plugin supports.",
+  "timeout": "The device did not answer in time. Check that it is powered on and reachable at that address.",
+  "unreachable": "Nothing answered at that address. Check the address, and that the device is on the network.",
+  "unsupported": "This device's ESPHome API version is not one this plugin can talk to. Update the device's firmware or this plugin so the two match."
+};
+
+/* The interpreter over the served catalog, built once for the page's life and shared by everything that reads or writes this plugin's configuration shape - the
+ * legacy migration at load, and the Add Device card's save. One construction, because two would be two engines over one catalog answering the same questions.
+ */
+let interpreter = null;
+
+const configInterpreter = async () => {
+
+  interpreter ??= makeRatgdoConfig({ FeatureOptions, catalog: await ui.featureOptions.catalog(), formatValueList, scopeSafeId });
+
+  return interpreter;
+};
+
+/* Build one element through plain DOM calls. Every part of the Add Device card is composed with this and nothing else: no HTML string is ever parsed, because every
+ * value the card shows came from a user or from a device, and `textContent` cannot be talked into being markup the way an HTML sink can.
+ *
+ * @param {string} tag                 - The element to create.
+ * @param {Object} [options]           - What to set on it.
+ * @param {Object} [options.attributes] - Attributes to set, by name.
+ * @param {Array}  [options.children]  - Elements to append, in order.
+ * @param {string} [options.className] - The class list.
+ * @param {string} [options.text]      - The text content.
+ *
+ * @returns {Object} The built element.
+ */
+const buildElement = (tag, { attributes = {}, children = [], className = "", text = "" } = {}) => {
+
+  const element = document.createElement(tag);
+
+  if(className) {
+
+    element.className = className;
+  }
+
+  if(text) {
+
+    element.textContent = text;
+  }
+
+  for(const [ name, value ] of Object.entries(attributes)) {
+
+    element.setAttribute(name, value);
+
+    // The id is what a label's `for` resolves against, so it is set as a property too rather than only as an attribute.
+    if(name === "id") {
+
+      element.id = value;
+    }
+  }
+
+  element.append(...children);
+
+  return element;
+};
+
+/* The Add Device card: a labelled field pair, a live connection test, and a save that writes only what answered.
+ *
+ * The card is built at runtime rather than declared in the page's markup, for two reasons that both matter. The markup file carries a generated region the UI build
+ * restamps, so hand-authored structure in it is the owner's to place rather than this feature's; and the settings-page harness verifies exactly what the page builds,
+ * so a card the page constructs is a card the suite can hold, down to its labels and its copy.
+ *
+ * It mounts as two plugin-owned regions, each carrying `data-fo-region` so the framework hides and reveals them with the rest of the page and never clears them: the
+ * Add Device button at the top of the sidebar, and the card itself above the settings content. Both are INSERTED beside the framework's own markup - nothing of the
+ * framework's is reparented, and no framework element is ever written on, so the framework remains the only writer of its own regions. Opening the card shows it in
+ * place above the settings; the settings content stays where it is.
+ */
+const card = {
+
+  // The elements the card's behavior reads and writes, filled in at mount. Held together rather than looked up by id at each use, because the card is built once and
+  // these are the same elements for the page's life.
+  address: null,
+
+  /* The card's action generation, and the single mechanism that retires a stale answer.
+   *
+   * Two different things make an answer stale, and one counter covers both: a NEWER action started (the user pressed Test Connection again, or pressed Save while a
+   * test was still running), or the card CLOSED while an answer was still in flight. Every action reads this counter before it awaits and compares afterward, and
+   * both starting an action and closing the card bump it - so one comparison retires a slow probe, a superseded probe, and an answer to a card that is no longer
+   * open, rather than three separate guards that could disagree.
+   */
+  generation: 0,
+  key: null,
+  mounted: false,
+  readout: null,
+  region: null,
+  verdict: null
+};
+
+// Whether the answer an action is holding is still the one the card wants. False once a newer action started or the card closed, which is what keeps a slow answer
+// from painting over newer input or rendering into a card the user has already dismissed.
+const cardIsCurrent = (generation) => (card.generation === generation) && !ui.epochSignal.aborted;
+
+// Render the card's verdict line, and clear the identity readout unless the caller is filling it. The verdict element carries role="status", so a screen reader
+// announces each new verdict without the user having to go looking for it.
+const renderVerdict = (message, rows = []) => {
+
+  card.verdict.textContent = message;
+
+  // replaceChildren with no arguments is the DOM's own way to empty a node. `children` is an HTMLCollection whose length is a getter, so assigning to it throws.
+  card.readout.replaceChildren();
+
+  for(const [ label, value ] of rows) {
+
+    card.readout.append(buildElement("div", { children: [ buildElement("span", { className: "fw-bold", text: label + ": " }),
+      buildElement("span", { text: value }) ] }));
+  }
+};
+
+// Close the card, retiring whatever is in flight on the way out. Bumping the generation is what makes a probe or a commit that answers afterward render nothing.
+const closeCard = () => {
+
+  if(!card.mounted) {
+
+    return;
+  }
+
+  card.generation++;
+  card.region.hidden = true;
+};
+
+/* Open the card, fresh. The fields and the verdict are cleared rather than left as the last visit wrote them, because the card is built once and reused - a stale
+ * verdict above empty fields would read as a claim about the device the user is about to type.
+ */
+const openCard = () => {
+
+  card.generation++;
+  card.address.value = "";
+  card.key.value = "";
+  card.region.hidden = false;
+  renderVerdict("");
+};
+
+/* Run one connection test and render what came back. Returns the successful result so Save can act on it, and null for every other outcome including a retired one -
+ * Save writing nothing unless a device answered is exactly what this return says.
+ *
+ * The typed address takes its canonical form ONCE, here, and the value this returns alongside the answer is what Save writes - so the address that was tested and the
+ * address that is saved cannot be two different strings. A zoned address is refused before any request goes out, because a zone identifier means nothing without the
+ * link it was heard on and nothing could dial it; the user is told on the card rather than left watching a probe that was always going to fail.
+ *
+ * The request is bounded twice over: by the page's own deadline, which is the longer of the two so the server's classified answer wins a race with it, and by the
+ * page epoch, so a panel reopen retires the request rather than leaving it to resolve into a retired copy.
+ */
+const runProbe = async () => {
+
+  const address = canonicalManualAddress(card.address.value);
+  const psk = card.key.value.trim();
+
+  if(!address.length) {
+
+    renderVerdict("Please enter the device's address.");
+
+    return null;
+  }
+
+  if(isZonedAddress(address)) {
+
+    renderVerdict("An address with a zone identifier cannot be dialed. List the device's routable address or hostname instead.");
+
+    return null;
+  }
+
+  // Starting an action bumps the generation, which is what retires an earlier test still in flight: two overlapping tests must leave the NEWER one's verdict on the
+  // card, whichever of them the network answers first.
+  const generation = ++card.generation;
+
+  renderVerdict("Connecting to the device...");
+
+  try {
+
+    const answer = await withDeadline({ promise: homebridge.request(STATUS_PROBE_ROUTE, { address, psk }), seconds: PROBE_DEADLINE, signal: ui.epochSignal });
+
+    if(!cardIsCurrent(generation)) {
+
+      return null;
+    }
+
+    if(answer?.kind !== "ok") {
+
+      renderVerdict(PROBE_MESSAGES[answer?.reason] ?? PROBE_MESSAGES.unreachable);
+
+      return null;
+    }
+
+    // The readout names what answered, so a user who typed the wrong address of two openers can see which one they reached. Encrypted is shown only when the
+    // transport actually negotiated encryption, because its absence is not a fact worth a row.
+    const rows = [ [ "Name", answer.name ?? "" ], [ "Model", answer.model ?? "" ], [ "MAC", answer.mac ], [ "Firmware", answer.firmwareVersion ] ];
+
+    if(answer.encrypted) {
+
+      rows.push([ "Encrypted", "Yes" ]);
+    }
+
+    renderVerdict("This device answered.", rows);
+
+    return answer;
+  } catch(error) {
+
+    if(cardIsCurrent(generation)) {
+
+      renderVerdict(PROBE_MESSAGES.unreachable);
+    }
+
+    // console is the browser panel's diagnostic transport; the user already has the verdict, and this is for whoever is reading the console.
+    // eslint-disable-next-line no-console
+    console.error("The device connection test failed.", error);
+
+    return null;
+  }
+};
+
+/* Save: test first, then write, and write nothing at all if the device did not answer. That ordering is the whole promise of the card - an address only reaches the
+ * configuration once something at it has identified itself as an opener this plugin supports.
+ *
+ * The decision about whether anything would change is made BEFORE any commit, against the configuration the page is holding: a composer answering null means the
+ * address is listed and its key is already what the user typed, so the card says so and never opens a write. The composer runs a second time inside the commit,
+ * against whatever entry the framework hands it there, and its `?? {}` covers only the narrow case of the configuration having moved between the two.
+ */
+const saveCard = async () => {
+
+  const answered = await runProbe();
+
+  if(!answered) {
+
+    return;
+  }
+
+  const generation = card.generation;
+
+  // The address the probe tested, not a fresh read of the field: the canonical form was settled once before the request went out, so what is saved is exactly what
+  // answered. Re-reading here would let a keystroke landing during the probe save an address nothing ever tested.
+  const address = answered.address;
+  const key = card.key.value.trim();
+  const ratgdoConfig = await configInterpreter();
+
+  if(!cardIsCurrent(generation)) {
+
+    return;
+  }
+
+  const listed = ratgdoConfig.manualAddresses(ui.featureOptions.editedConfig[0]);
+
+  if(!ratgdoConfig.withManualDevice(ui.featureOptions.editedConfig[0], { address, key })) {
+
+    renderVerdict("This device is already listed.");
+
+    return;
+  }
+
+  /* Whether this address was already in the list decides the confirmation copy, and it is read BEFORE the write, while the answer is still the truth. Every listed
+   * entry is canonicalized for the comparison, so a list holding the bracketed spelling of this address reads as already carrying it - the same rule the composer
+   * itself applies, which is what keeps the copy and the write from disagreeing.
+   */
+  const wasListed = listed.some((entry) => (canonicalManualAddress(entry) === address));
+  const result = await ui.featureOptions.commitConfig((platform) => ratgdoConfig.withManualDevice(platform, { address, key }) ?? {});
+
+  // A commit already in flight cannot be recalled, so a card closed across it still leaves the configuration written - once. What a retired generation suppresses is
+  // everything AFTER the write: the confirmation, the close, and the warm recompute.
+  if(!cardIsCurrent(generation)) {
+
+    return;
+  }
+
+  switch(result.kind) {
+
+    case "committed":
+    case "staged":
+
+      if(result.kind === "staged") {
+
+        renderVerdict(String(result.error?.message ?? result.error));
+
+        return;
+      }
+
+      renderVerdict(wasListed ? "Updated the key for this device." : "Saved. Restart Homebridge to add this device.");
+      closeCard();
+      scheduleRecompute();
+
+      return;
+
+    case "failed":
+
+      renderVerdict(String(result.error?.message ?? result.error));
+
+      return;
+
+    default:
+
+      // A superseded write belongs to a page copy the window has retired, which renders nothing at all.
+      return;
+  }
+};
+
+/* Mount the card, once per page life. The framework announces a loaded model on every show cycle, so a later cycle finds the card already built and only closes it -
+ * rebuilding would discard the elements the framework has promised never to clear, and would register a second set of listeners on them.
+ */
+const mountCard = () => {
+
+  if(card.mounted) {
+
+    closeCard();
+
+    return;
+  }
+
+  const sidebar = document.getElementById("sidebar");
+  const stats = document.getElementById("deviceStatsContainer");
+
+  // A page whose markup does not carry the mount points is a page this card has nothing to attach to. It says nothing and stays unmounted rather than throwing out
+  // of the framework's load announcement.
+  if(!sidebar || !stats) {
+
+    return;
+  }
+
+  card.address = buildElement("input", { attributes: { autocapitalize: "off", autocomplete: "off", id: "ratgdoAddressField", placeholder:
+    "garage.local or 10.0.0.20", spellcheck: "false", type: "text" }, className: "form-control font-monospace" });
+  card.key = buildElement("input", { attributes: { autocapitalize: "off", autocomplete: "off", id: "ratgdoKeyField", spellcheck: "false", type: "text" },
+    className: "form-control font-monospace" });
+  card.verdict = buildElement("div", { attributes: { role: "status" }, className: "mt-2" });
+  card.readout = buildElement("div", { className: "mt-2" });
+
+  const test = buildElement("button", { attributes: { type: "button" }, className: "btn btn-primary me-2", text: "Test Connection" });
+  const save = buildElement("button", { attributes: { type: "button" }, className: "btn btn-primary me-2", text: "Save" });
+  const cancel = buildElement("button", { attributes: { type: "button" }, className: "btn btn-secondary", text: "Cancel" });
+
+  card.region = buildElement("div", { attributes: { "data-fo-region": "" }, children: [
+
+    buildElement("h5", { text: "Add a device by address" }),
+    buildElement("p", { text: "The plugin finds openers on your network by itself. Add one here when it sits somewhere autodiscovery cannot reach, or when you want " +
+      "the plugin to use a specific address for it." }),
+    buildElement("label", { attributes: { for: "ratgdoAddressField" }, className: "form-label", text: "Address" }),
+    card.address,
+    buildElement("label", { attributes: { for: "ratgdoKeyField" }, className: "form-label mt-2", text: "Encryption key (optional)" }),
+    card.key,
+    buildElement("div", { children: [ test, save, cancel ], className: "mt-3" }),
+    card.verdict,
+    card.readout
+  ], className: "alert-info rounded p-3 mb-3" });
+  card.region.hidden = true;
+
+  const open = buildElement("button", { attributes: { type: "button" }, className: "btn btn-sm w-100", text: "Add Device" });
+  const launcher = buildElement("div", { attributes: { "data-fo-region": "" }, children: [open], className: "mb-2" });
+
+  sidebar.prepend(launcher);
+  stats.before(card.region);
+  card.mounted = true;
+
+  ui.on(open, "click", openCard);
+  ui.on(test, "click", () => void runProbe());
+  ui.on(save, "click", () => void saveCard());
+  ui.on(cancel, "click", closeCard);
+
+  /* Selecting a device is the user moving on, so the card closes. The listener is delegated on the sidebar because that is the only element the device rows are
+   * inside - registering a listener reads the page rather than writing on it, so the framework stays the only writer of its own markup - and a click on this
+   * plugin's own launcher is excluded, since that click is what opens the card.
+   */
+  ui.on(sidebar, "click", (event) => {
+
+    // Node.contains answers this directly, and it answers true for the launcher itself as well as for the button inside it - which is the whole rule, since the click
+    // that opens the card is a click on that button and must not also close it.
+    if(launcher.contains(event?.target)) {
+
+      return;
+    }
+
+    closeCard();
+  });
+};
+
 /* The feature-options parameters. onLoaded is the page's first warm: the framework announces it once per show cycle that reaches a loaded model, with the status panel's
  * handle already minted and the configuration session established, which is exactly the state the recompute's own establishment gate waits for. The statusPanel
  * configuration supplies exactly the parts ratgdo owns and inherits the shared homebridge-plugin-utils panel around them:
@@ -313,6 +753,7 @@ const featureOptionsParams = {
   getDevices: deviceList,
   onLoaded: () => {
 
+    mountCard();
     void recomputeWarmSet();
   },
   onOptionsEdited: scheduleRecompute,
@@ -364,12 +805,13 @@ const ui = new webUi({ featureOptions: featureOptionsParams, name: "Ratgdo" });
 void ui.registerTheming();
 
 /* The trigger registrations, every one of them scoped to this module copy's claim on the window. Each subscription belongs to the module rather than to a panel, so it
- * must outlive any single panel mount and end only when a successor webUi construction claims the window; they ride the framework's ui.on, which composes the page epoch
- * into every registration it makes, so a retired copy stops receiving events at all rather than driving the live copy's state from a stale closure. They register after
- * construction because the facade that makes the registration must exist first, and before show() because a trigger arriving during the launch is answered honestly by
- * the recompute's own establishment gate. One bounded caveat: the composed { signal } option rides the native EventTarget, which every browser the Homebridge UI supports
- * provides, while the bridge library carries a legacy constructor polyfill whose listener registration drops its options argument - on that path a retired copy's
- * listeners survive, and the recompute's pre-send epoch check is the correctness backstop, degrading the hazard from a wrong send to a wasted recompute.
+ * must outlive any single panel mount and end only when a successor webUi construction claims the window; they are carried by the framework's ui.on, which composes
+ * the page epoch into every registration it makes, so a retired copy stops receiving events at all rather than driving the live copy's state from a stale closure. They
+ * register after construction because the facade that makes the registration must exist first, and before show() because a trigger arriving during the launch is
+ * answered honestly by the recompute's own establishment gate. One bounded caveat: the composed { signal } option depends on the native EventTarget, which every
+ * browser the Homebridge UI supports provides, while the bridge library carries a legacy constructor polyfill whose listener registration drops its options argument -
+ * on that path a retired copy's listeners survive, and the recompute's pre-send epoch check is the correctness backstop, degrading the hazard from a wrong send to a
+ * wasted recompute.
  */
 
 // The schema-form belt: a config edit made through Homebridge's own settings form (rather than the feature-options UI) surfaces only as configChanged, so it feeds the
@@ -409,8 +851,8 @@ ui.on(document, "visibilitychange", () => {
 });
 
 /* The resume trigger: the framework's clock-gap detector fires on a page that froze and woke - the iPad app-switch case the belt cannot see - and a wake is exactly when
- * the helper process may have been replaced, so the whole-pool re-send rides it. The framework bounds this subscription by the epoch itself, and the send chokepoint's
- * establishment and epoch gates bound what it produces exactly as they bound every other trigger.
+ * the helper process may have been replaced, so the whole-pool re-send goes with it. The framework bounds this subscription by the epoch itself, and the send
+ * chokepoint's establishment and epoch gates bound what it produces exactly as they bound every other trigger.
  */
 ui.liveness.onResume(forceWarmResend);
 
@@ -424,7 +866,7 @@ const WIRING_DEADLINE = 5;
 const wiringController = new AbortController();
 
 /* The signal the wiring's cancellation points read: the envelope's own controller bounded by this module copy's claim on the window, through the facade's one
- * epoch-composition rule - the same rule every listener registration rides. The epoch half matters because a reopened settings panel mints a successor copy and
+ * epoch-composition rule - the same rule every listener registration follows. The epoch half matters because a reopened settings panel mints a successor copy and
  * retires this one: bounding the envelope aborts a superseded copy's wiring at the same chokepoints the deadline uses, rather than letting a retired copy write
  * config underneath the copy the user is looking at.
  */
@@ -451,7 +893,7 @@ const wiringSignal = ui.epochBounded(wiringController.signal);
  */
 const wireRatgdoConfig = async () => {
 
-  const ratgdoConfig = makeRatgdoConfig({ FeatureOptions, catalog: await ui.featureOptions.catalog() });
+  const ratgdoConfig = await configInterpreter();
 
   // The library's session is the single conduit the framework's own writes use, so the patch merges onto a replica synced just now rather than onto a snapshot taken
   // before the page opened.

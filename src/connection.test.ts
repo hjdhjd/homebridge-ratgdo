@@ -1,18 +1,21 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * connection.test.ts: Unit tests for the connection layer - captureInitialState's fast / slow / timeout / shutdown paths, openConnection's error taxonomy,
- * applyDeviceInfo's identity refresh, and the isEncryptionError predicate. The ESPHome client factory is injected as a fake (makeFakeOpenClient), and the
- * state-capture budget (timeoutSeconds) is injected in fractional seconds (e.g. 0.02) so each wait resolves in milliseconds of real time, driving every branch
- * deterministically without a live device, fake timers, or a fake Homebridge harness.
+ * connection.test.ts: Unit tests for the connection layer - captureInitialState's fast / slow / timeout / shutdown paths, the error taxonomy both entry points
+ * classify with, openManualConnection's identification of whatever answered at an address, applyDeviceInfo's identity refresh, and the isEncryptionError predicate.
+ * The ESPHome client factory is injected as a fake (makeFakeOpenClient), and the state-capture budget (timeoutSeconds) is injected in fractional seconds (e.g. 0.02)
+ * so each wait resolves in milliseconds of real time, driving every branch deterministically without a live device, fake timers, or a fake Homebridge harness.
  */
 import { AuthenticationError, EncryptionKeyInvalidError, EncryptionKeyMissingError, EncryptionRequiredError, NegotiationFailedError,
   entityId } from "esphome-client";
-import { TestEspHomeClient, asEspHomeClient, makeCoverEvent, makeFakeOpenClient, makeLightEvent, makeTestDevice } from "./testing.helpers.ts";
-import { applyDeviceInfo, captureInitialState, isEncryptionError, openConnection } from "./connection.ts";
+import type { DeviceInfo, EntityId, TelemetryEvent } from "esphome-client";
+import { RATGDO_ENTITIES, idFor, ratgdoInitialStateEntityIds } from "./entities.ts";
+import { TestEspHomeClient, asEspHomeClient, makeCoverEvent, makeFakeOpenClient, makeLightEvent, makeTelemetry, makeTestDevice } from "./testing.helpers.ts";
+import { applyDeviceInfo, captureInitialState, isEncryptionError, openConnection, openManualConnection } from "./connection.ts";
 import { capturingLog, loggedAt } from "homebridge-plugin-utils/testing";
 import { describe, test } from "node:test";
-import type { EntityId } from "esphome-client";
 import type { OpenEspHomeClient } from "./connection.ts";
+import type { RatgdoEntityRef } from "./entities.ts";
+import { RatgdoVariant } from "./types.ts";
 import type { RecordedOpenOptions } from "./testing.helpers.ts";
 import assert from "node:assert/strict";
 
@@ -142,8 +145,8 @@ describe("openConnection", () => {
     assert.equal(client.disposeCount, 0, "a successful open does not dispose the client");
     assert.equal(entries.filter((entry) => entry.level === "error").length, 0, "the success path logs nothing at error level");
 
-    // The headline of the client-factory port: the platform resolves the encryption key and threads a concrete psk through openConnection into the factory. Pin that the
-    // factory received exactly what openConnection forwards - the static clientId, the host, the resolved psk unchanged, and the caller's own shutdown signal by
+    // The headline of the client-factory port: the platform resolves the encryption key and threads a concrete psk through openConnection into the factory. Assert that
+    // the factory received exactly what openConnection forwards - the static clientId, the host, the resolved psk unchanged, and the caller's own shutdown signal by
     // reference - since 100% line coverage alone would not catch openConnection passing the wrong host, dropping the psk, or handing the factory a different signal
     // than the one that cancels the call.
     assert.equal(openClient.calls.length, 1, "openConnection invokes the factory exactly once");
@@ -243,7 +246,7 @@ describe("openConnection", () => {
     const controller = new AbortController();
 
     /* Model the factory's documented cancellation contract without its retry loop: the call stays pending until the caller's signal aborts, then rejects with that
-     * signal's reason. That is the shape esphome-client presents to openConnection when a shutdown lands mid-handshake, so this pins the classification of an
+     * signal's reason. That is the shape esphome-client presents to openConnection when a shutdown lands mid-handshake, so this asserts the classification of an
      * abort-driven factory rejection end to end. It deliberately measures no latency - the real factory's attempt-and-backoff loop is bypassed here.
      */
     const openClient = ((options: RecordedOpenOptions): Promise<never> => {
@@ -265,6 +268,157 @@ describe("openConnection", () => {
     assert.ok(!result.ok, "a connect cancelled mid-flight by shutdown is abandoned");
     assert.equal(result.reason, "shutdown", "a factory rejection that lands while the shutdown signal is aborted carries the shutdown reason token");
     assert.equal(log.entries.filter((entry) => entry.level === "error").length, 0, "the silent stand-down branch logs nothing at error level");
+  });
+});
+
+describe("openManualConnection", () => {
+
+  // The address the user listed and this suite dials.
+  const DIALED = "192.0.2.10";
+
+  /* A well-formed device-info record for a Ratgdo opener, spelled the way a connected ESPHome client reports one. Individual tests replace a single member of it, so
+   * the member under test is the only difference between a refusal and the success asserted below.
+   */
+  const ratgdoInfo: DeviceInfo = { esphomeVersion: "2024.1.0", friendlyName: "Garage", macAddress: "AA:BB:CC:DD:EE:FF", projectName: "ratgdo.esp32",
+    projectVersion: "2.5" };
+
+  const ratgdoEntities = RATGDO_ENTITIES[RatgdoVariant.RATGDO];
+  const konnectedEntities = RATGDO_ENTITIES[RatgdoVariant.KONNECTED];
+
+  /* Both variants' stateful entities, advertised together by every client double here. Advertising the union is what makes the wait-list observable at all: the
+   * capture waits for exactly the entities the classified variant declares, so a snapshot holding one variant's set completes a correctly-derived wait and stalls a
+   * wait derived from the other. A double advertising only one variant's entities would collapse a wrong derivation to an empty wait-list and pass either way.
+   */
+  const bothVariants: RatgdoEntityRef[] = [ ratgdoEntities.cover, ratgdoEntities.laser, ratgdoEntities.led, ratgdoEntities.light, ratgdoEntities.lock,
+    ratgdoEntities.obstruction, ratgdoEntities.vehicleDetected, konnectedEntities.cover, konnectedEntities.light, konnectedEntities.lock,
+    konnectedEntities.obstruction, konnectedEntities.strOutput ];
+
+  // The latest-state snapshot a device of one variant would have pushed by the time its handshake resolves: one event per entity that variant's wait-list names.
+  const snapshotFor = (variant: RatgdoVariant): Map<EntityId, TelemetryEvent> => {
+
+    const required = new Set<string>(ratgdoInitialStateEntityIds(variant));
+
+    return new Map(bothVariants.filter((ref) => required.has(idFor(ref))).map((ref): [ EntityId, TelemetryEvent ] => [ idFor(ref),
+      makeTelemetry(ref.type, ref.objectId) ]));
+  };
+
+  // Dial the fixed host this suite uses against an injected client or error, returning the capturing log's entries and the recorded factory alongside the outcome.
+  const dial = async (result: Error | TestEspHomeClient, overrides: Partial<Parameters<typeof openManualConnection>[0]> = {}) => {
+
+    const log = capturingLog();
+    const openClient = makeFakeOpenClient(result);
+    const outcome = await openManualConnection({ host: DIALED, log, openClient, shutdownSignal: new AbortController().signal, ...overrides });
+
+    return { entries: log.entries, openClient, outcome };
+  };
+
+  test("success: resolves the identity the device-info record named alongside the connected client and its captured state", async () => {
+
+    const client = new TestEspHomeClient({ deviceInfo: ratgdoInfo, entities: bothVariants, snapshot: snapshotFor(RatgdoVariant.RATGDO) });
+    const { entries, openClient, outcome } = await dial(client, { psk: "test-psk", timeoutSeconds: 0.05 });
+
+    assert.ok(outcome.ok, "a device that answers, identifies, and pushes its state yields a success outcome");
+    assert.equal(outcome.discovered.strippedMac, "AABBCCDDEEFF", "the MAC the record carried is the identity the caller receives");
+    assert.equal(outcome.discovered.variant, RatgdoVariant.RATGDO, "the project name the record carried classifies the variant");
+    assert.equal(outcome.discovered.address, DIALED, "the identity names the address that was dialed, since that is where this device answers");
+    assert.deepEqual(outcome.discovered.addresses, [DIALED], "and that one address stands in for the advertisement a record does not carry");
+    assert.equal(outcome.client, client, "the dial's own connection is the device's connection, handed back live rather than closed and reopened");
+    assert.equal(outcome.initialState, client.snapshot(), "the captured initial state is the client's populated cache");
+    assert.equal(client.disposeCount, 0, "a successful dial does not dispose the client");
+    assert.equal(openClient.calls[0]?.host, DIALED, "the listed address is the host the factory was given");
+    assert.equal(openClient.calls[0]?.psk, "test-psk", "the resolved key threads through to the factory unchanged");
+    assert.equal(entries.filter((entry) => entry.level === "error").length, 0, "the success path logs nothing at error level");
+  });
+
+  test("the wait-list follows the classified variant rather than a fixed one", async () => {
+
+    /* The one observation of which variant decided the wait-list. Both doubles advertise both variants' entities and hold only the Konnected set in their snapshot;
+     * they differ only in the project name their record reports. The Konnected one completes its capture because its wait-list is satisfied, and the Ratgdo one
+     * exhausts the budget waiting for entities this device advertised and never pushed.
+     */
+    const konnected = new TestEspHomeClient({ deviceInfo: { ...ratgdoInfo, projectName: "konnected.garage-door-gdov2-s" }, entities: bothVariants,
+      snapshot: snapshotFor(RatgdoVariant.KONNECTED) });
+    const satisfied = await dial(konnected, { timeoutSeconds: 0.05 });
+
+    assert.ok(satisfied.outcome.ok, "a Konnected device whose Konnected entities have all pushed completes its capture");
+    assert.equal(satisfied.outcome.discovered.variant, RatgdoVariant.KONNECTED, "and is identified as the variant its project name names");
+
+    const mismatched = new TestEspHomeClient({ deviceInfo: ratgdoInfo, entities: bothVariants, snapshot: snapshotFor(RatgdoVariant.KONNECTED) });
+    const stalled = await dial(mismatched, { timeoutSeconds: 0.02 });
+
+    assert.ok(!stalled.outcome.ok, "a Ratgdo record's wait-list names entities this device advertised but never pushed");
+    assert.equal(stalled.outcome.reason, "timeout", "so the capture exhausts its budget rather than resolving on the wrong variant's set");
+    assert.equal(mismatched.disposeCount, 1, "and the client opened for a capture that timed out is torn down");
+  });
+
+  test("an unrecognized device is refused by address, and its connection is closed", async () => {
+
+    const client = new TestEspHomeClient({ deviceInfo: { ...ratgdoInfo, projectName: "esphome.generic-sensor" }, entities: bothVariants,
+      snapshot: snapshotFor(RatgdoVariant.RATGDO) });
+    const { entries, outcome } = await dial(client);
+
+    assert.ok(!outcome.ok, "a device that is not an opener we support yields a failure outcome");
+    assert.equal(outcome.reason, "unrecognized", "the refusal carries the reason only an address dial can produce");
+    assert.ok(loggedAt(entries, "error", "The device at 192.0.2.10 is not a Ratgdo or Konnected opener this plugin supports."),
+      "the diagnostic names the address, because the address is the only thing the user gave us to correct");
+    assert.equal(client.disposeCount, 1, "the connection is closed rather than left holding one of the device's few API slots");
+  });
+
+  test("a client reporting no device-info record at all is refused the same way", async () => {
+
+    const client = new TestEspHomeClient({ deviceInfo: null, entities: bothVariants, snapshot: snapshotFor(RatgdoVariant.RATGDO) });
+    const { entries, outcome } = await dial(client);
+
+    assert.ok(!outcome.ok, "a client with nothing to identify the device by has identified no opener");
+    assert.equal(outcome.reason, "unrecognized", "the refusal is the same one a device of the wrong kind earns");
+    assert.ok(loggedAt(entries, "error", "The device at 192.0.2.10 is not"), "and the user is told which address answered without identifying itself");
+    assert.equal(client.disposeCount, 1, "the connection is closed");
+  });
+
+  test("shutdown: stands down silently and closes the connection", async () => {
+
+    const client = new TestEspHomeClient({ deviceInfo: ratgdoInfo, entities: bothVariants, snapshot: new Map() });
+    const { entries, outcome } = await dial(client, { shutdownSignal: AbortSignal.abort("shutdown"), timeoutSeconds: 1 });
+
+    assert.ok(!outcome.ok, "an in-flight dial interrupted by shutdown is abandoned");
+    assert.equal(outcome.reason, "shutdown", "the failure outcome carries the shutdown reason token");
+    assert.equal(entries.filter((entry) => entry.level === "error").length, 0, "shutdown is not a failure, so nothing is logged at error level");
+    assert.equal(client.disposeCount, 1, "the client opened before the shutdown abort is torn down");
+  });
+
+  describe("the failure taxonomy is the one openConnection classifies with", () => {
+
+    /* Both entry points run one connect core, and this is what holds them to it: the same thrown error is driven through each, and the reason and every log line
+     * are compared against EACH OTHER rather than against a written-down expectation. An expectation written here would still pass if both paths drifted together;
+     * an equality between the two cannot. The discovered path is given an empty wait-list because the error is thrown before any capture would run.
+     */
+    const failures: { error: Error; why: string }[] = [
+
+      { error: new EncryptionKeyInvalidError("bad key"), why: "a mismatched encryption key" },
+      { error: new EncryptionKeyMissingError("missing key"), why: "an absent encryption key" },
+      { error: new EncryptionRequiredError("key required"), why: "a device that requires a key it was not given" },
+      { error: new NegotiationFailedError("api major 5 is outside the supported range", "API_MAJOR_OUT_OF_RANGE"), why: "an unsupported API version" },
+      { error: new AuthenticationError("auth failed"), why: "a permanent connection error" },
+      { error: new Error("connection refused"), why: "an unclassified connection error" }
+    ];
+
+    for(const { error, why } of failures) {
+
+      test(why + " classifies identically on both entry points", async () => {
+
+        const manualLog = capturingLog();
+        const discoveredLog = capturingLog();
+        const manual = await openManualConnection({ host: DIALED, log: manualLog, openClient: makeFakeOpenClient(error),
+          shutdownSignal: new AbortController().signal });
+        const discovered = await openConnection({ expected: [], host: DIALED, log: discoveredLog, openClient: makeFakeOpenClient(error),
+          shutdownSignal: new AbortController().signal });
+
+        assert.ok(!manual.ok, "the address dial refuses the connect");
+        assert.ok(!discovered.ok, "and so does the discovered connect");
+        assert.equal(manual.reason, discovered.reason, "the classified reason is the same through either entry point");
+        assert.deepEqual(manualLog.entries, discoveredLog.entries, "and so is every diagnostic the user sees, because one body emits them");
+      });
+    }
   });
 });
 

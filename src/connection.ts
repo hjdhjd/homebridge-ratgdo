@@ -7,25 +7,32 @@
  * so the dependency on esphome-client's `openEspHomeClient` factory is an explicit, injectable parameter (defaulting to the real factory) instead of a hard module edge.
  * A unit test passes a fake factory and drives every branch (fast / slow / timeout / shutdown, plus the error taxonomy) without a live device or fake timers.
  *
+ * Two entry points open a connection, and they differ in one thing only: a discovered device is already identified when its connect begins, while a device reached at
+ * an address the user typed is identified from the device-info record the connect produces. Both therefore run through one private core that owns the open, the
+ * failure taxonomy, every diagnostic, and the single teardown of a client no caller will receive; each entry point supplies only the step that answers what to wait
+ * for on the connected client. Keeping the taxonomy in one body is what keeps the two paths from classifying the same fault differently.
+ *
  * Feature-option resolution stays at the platform: the caller resolves the device's encryption key and passes the concrete `psk` in, so this module's only external
- * dependency is the client-factory port. That keeps the seam single-purpose and the functions trivially testable.
+ * dependency is the client-factory port. That keeps the boundary single-purpose and the functions trivially testable.
  */
 import { EncryptionKeyInvalidError, EncryptionKeyMissingError, EncryptionRequiredError, NegotiationFailedError, PermanentError, openEspHomeClient } from "esphome-client";
 import type { EntityId, EspHomeClient, TelemetryEvent } from "esphome-client";
 import type { HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
+import { presentEntityIds, ratgdoInitialStateEntityIds } from "./entities.ts";
+import type { DiscoveredRatgdo } from "./discovery.ts";
 import { RATGDO_INITIAL_STATE_TIMEOUT } from "./settings.ts";
 import type { RatgdoDevice } from "./types.ts";
-import { presentEntityIds } from "./entities.ts";
+import { classifyDeviceInfo } from "./discovery.ts";
 import util from "node:util";
 import { waitWithSignal } from "homebridge-plugin-utils";
 
-/* The injectable ESPHome client-factory port. Aliased to the real factory's type so the seam stays bound to esphome-client's signature: if `openEspHomeClient`'s shape
- * changes, this alias and every default-arg site that resolves to it move with it. Production never passes it (the default real factory runs); a unit test passes a
- * fake that resolves a synthetic client or rejects with a typed error.
+/* The injectable ESPHome client-factory port. Aliased to the real factory's type so the boundary stays bound to esphome-client's signature: if `openEspHomeClient`'s
+ * shape changes, this alias and every default-arg site that resolves to it move with it. Production never passes it (the default real factory runs); a unit test passes
+ * a fake that resolves a synthetic client or rejects with a typed error.
  */
 export type OpenEspHomeClient = typeof openEspHomeClient;
 
-/* The success payload of `openConnection`: the live, connected client plus the initial-state snapshot `captureInitialState` waited for. It rides inside the `ok: true`
+/* The success payload of `openConnection`: the live, connected client plus the initial-state snapshot `captureInitialState` waited for. It is carried by the `ok: true`
  * arm of the `ConnectionOutcome` union; the failure arms carry a typed `ConnectionFailureReason` instead, so a caller branches on `outcome.ok` and, on failure, acts on
  * the classified reason without parsing log output.
  */
@@ -49,6 +56,23 @@ export type ConnectionFailureReason = "encryption-invalid" | "encryption-missing
  * what to do next - construct the accessory, surface an error to the user, or stand down on shutdown.
  */
 export type ConnectionOutcome = ({ ok: true } & ConnectionResult) | { ok: false; reason: ConnectionFailureReason };
+
+/* Everything `openManualConnection` can fail with: every way a connection fails, plus the one refusal only an address dial can make. `unrecognized` marks a device that
+ * answered and negotiated perfectly well but is not an opener this plugin supports, which no retry changes - the user typed the address of something else. A
+ * discovered device cannot reach this verdict, because its advertisement was classified before anything dialed it.
+ */
+export type ManualConnectionFailureReason = ConnectionFailureReason | "unrecognized";
+
+/* The success payload of `openManualConnection`: everything `openConnection` yields, plus the identity the device-info record named. The identity is the point of the
+ * call - an address alone says nothing about which device answers there - so it is carried beside the client rather than left for the caller to re-derive.
+ */
+export interface ManualConnectionResult extends ConnectionResult {
+
+  discovered: DiscoveredRatgdo;
+}
+
+// `openManualConnection`'s outcome, the same discriminated union `ConnectionOutcome` is over the wider reason set and the identity-bearing success arm.
+export type ManualConnectionOutcome = ({ ok: true } & ManualConnectionResult) | { ok: false; reason: ManualConnectionFailureReason };
 
 /* Options for `captureInitialState`. The caller supplies the connected client, the wait-list of entities that must appear in the cache before construction proceeds,
  * the platform-wide shutdown signal (independent cancellation), and an optional per-call state-capture budget. `timeoutSeconds` is injectable so the timeout branch is
@@ -89,29 +113,117 @@ export interface OpenConnectionOptions {
   timeoutSeconds?: number;
 }
 
-/* Establish the ESPHome client connection AND wait for the LatestStateCache to populate with initial state for every stateful entity. The dual await is wrapped
- * in one try/catch so error logging and cleanup are consistent regardless of which phase failed: any failure tears down the partially-constructed client and
- * returns a failure outcome carrying the classified `ConnectionFailureReason`, signalling the caller to skip this discovery attempt (the next mDNS refresh will retry).
- * The platformAccessory (if any) stays registered with Homebridge - acquireService() is safe to call more than once and reuses existing service objects on the retry's
- * RatgdoAccessory construction.
+/* Options for `openManualConnection`, which is `OpenConnectionOptions` without the wait-list: the caller cannot declare which entities matter until the connected
+ * device has said which variant it is, so this call derives the wait-list for itself out of the identity it classifies.
+ */
+export type OpenManualConnectionOptions = Omit<OpenConnectionOptions, "expected">;
+
+/* What a caller's wait-list step answers once the client is connected: the entities to wait for and whatever else that caller derived from the same client, or a
+ * refusal of what answered. The refusal arm is generic and defaults to nothing, so an entry point that cannot refuse - the discovered path, which knows its device
+ * before it dials - carries no refusal arm at all and its outcome's reason set stays exactly `ConnectionFailureReason`.
+ */
+type WaitListOutcome<TIdentity, TRefusal> = { expected: readonly EntityId[]; identity: TIdentity; ok: true } | { ok: false; reason: TRefusal };
+
+/* What the shared core answers its two entry points: the connected client, whatever that caller's step derived from it, and the captured initial state - or the
+ * classified reason the connect produced no usable device. Each entry point then reshapes this into its own published outcome, naming the identity in its own terms.
+ */
+type CaptureOutcome<TIdentity, TRefusal> = { client: EspHomeClient; identity: TIdentity; initialState: ReadonlyMap<EntityId, TelemetryEvent>; ok: true } |
+  { ok: false; reason: ConnectionFailureReason | TRefusal };
+
+/* Establish the ESPHome client connection for a device discovery already identified, AND wait for the LatestStateCache to populate with initial state for every
+ * stateful entity. The core below owns the open, the wait, and the classification of anything that goes wrong: any failure tears down the partially-constructed
+ * client and returns a failure outcome carrying the classified `ConnectionFailureReason`, signalling the caller to skip this discovery attempt (the next mDNS
+ * refresh will retry). The platformAccessory (if any) stays registered with Homebridge - acquireService() is safe to call more than once and reuses existing service
+ * objects on the retry's RatgdoAccessory construction.
  *
  * The factory's `logger` field accepts the EspHomeLogging shape; the caller passes a static-prefix adapter built from device.name so client-internal messages (connect
  * retries, heartbeat, encryption fallback) carry device context. The adapter is permanent for the client's lifetime, so a HomeKit rename later does not retitle
  * client-internal logs - the accessory's dynamic-name logger is used for everything else.
+ */
+export async function openConnection({ expected, ...options }: OpenConnectionOptions): Promise<ConnectionOutcome> {
+
+  /* The discovered path's wait-list step: answer the caller's own declaration and nothing else. It never reads device info, because the advertisement already
+   * identified this device, and it has no refusal arm at all - which is what keeps this entry point's outcome exactly the union it has always been.
+   */
+  const outcome = await openAndCapture(options, () => ({ expected, identity: undefined, ok: true }));
+
+  if(!outcome.ok) {
+
+    return outcome;
+  }
+
+  return { client: outcome.client, initialState: outcome.initialState, ok: true };
+}
+
+/* Establish an ESPHome client connection against a bare address and identify whatever answered there.
+ *
+ * This is the manual path's whole connect. A user who lists an address has told us where to dial but cannot tell us what is there, so the identity a discovered
+ * device carries from its advertisement is derived here instead, from the device-info record the connected client read. Ordering is forced: the variant decides the
+ * initial-state wait-list, so the classification has to sit between the open and the capture rather than beside either of them.
+ *
+ * The connection this call returns IS the device's connection. Nothing probes and hangs up first, because a device with few API slots should not spend two of them
+ * to answer one question, and the record the handshake already produced answers it.
+ *
+ * @param options - Everything `openConnection` takes except the wait-list, which this call derives from the identity it classifies.
+ *
+ * @returns The connected client, the identity, and the captured initial state, or the classified reason the address yielded no opener.
+ */
+export async function openManualConnection(options: OpenManualConnectionOptions): Promise<ManualConnectionOutcome> {
+
+  const { host, log } = options;
+
+  /* The manual path's wait-list step, and the one place `unrecognized` is produced. A null classification means something answered at this address that is not an
+   * opener we support - a missing MAC, a missing project name, a project name matching no known variant - and the diagnostic names the address, because the address
+   * is the only thing the user gave us to correct.
+   */
+  const outcome = await openAndCapture(options, (client): WaitListOutcome<DiscoveredRatgdo, "unrecognized"> => {
+
+    const discovered = classifyDeviceInfo(client.deviceInfo(), host);
+
+    if(!discovered) {
+
+      log.error("The device at %s is not a Ratgdo or Konnected opener this plugin supports.", host);
+
+      return { ok: false, reason: "unrecognized" };
+    }
+
+    return { expected: ratgdoInitialStateEntityIds(discovered.variant), identity: discovered, ok: true };
+  });
+
+  if(!outcome.ok) {
+
+    return outcome;
+  }
+
+  return { client: outcome.client, discovered: outcome.identity, initialState: outcome.initialState, ok: true };
+}
+
+/* The shared connect core: open the client, let the caller's step answer what to wait for, capture initial state, and classify anything that goes wrong. Both entry
+ * points run through this body, so the failure taxonomy, every user-facing diagnostic, and the teardown of a client no caller will receive each exist exactly once.
  *
  * The catch's error-narrowing strategy mirrors the abort-source taxonomy that captureInitialState produces. Shutdown is checked first because it is not a failure -
- * the platform is going away and any in-flight discovery should tear down silently. TimeoutError DOMException is the dedicated state-capture-budget-exhausted case
+ * the platform is going away and any in-flight connect should tear down silently. TimeoutError DOMException is the dedicated state-capture-budget-exhausted case
  * (AbortSignal.timeout always uses that name; AbortError would be the wrong token to test). Encryption and PermanentError each get a dedicated branch so the user
  * sees a focused diagnostic instead of a wrapped stack trace. Everything else falls through to the generic else with the unfiltered util.inspect output.
+ *
+ * Every failure - a thrown one and a refused one alike - leaves through the single tail below rather than returning from where it was decided, which is what makes
+ * the dispose one statement instead of one per branch.
+ *
+ * @param options      - The connect options minus the wait-list.
+ * @param resolveWaitList - The caller's step, run on the connected client before anything is captured.
+ *
+ * @returns The connected client and the step's identity, or the classified failure reason.
  */
-export async function openConnection({ expected, host, log, openClient = openEspHomeClient, psk, shutdownSignal, timeoutSeconds = RATGDO_INITIAL_STATE_TIMEOUT }:
-OpenConnectionOptions): Promise<ConnectionOutcome> {
+async function openAndCapture<TIdentity, TRefusal = never>({ host, log, openClient = openEspHomeClient, psk, shutdownSignal,
+  timeoutSeconds = RATGDO_INITIAL_STATE_TIMEOUT }: OpenManualConnectionOptions,
+resolveWaitList: (client: EspHomeClient) => WaitListOutcome<TIdentity, TRefusal>): Promise<CaptureOutcome<TIdentity, TRefusal>> {
 
   /* Client is a plain, manually-disposed variable rather than a `using` declaration. A `using` binding runs its disposal on any scope exit, including the
-   * success-path `return { client, initialState }` below, which would tear down the freshly-connected client before the caller ever receives it. Manual
-   * disposal keeps teardown confined to the failure paths - the catch branches below - where cleanup is actually the intent.
+   * success-path return below, which would tear down the freshly-connected client before the caller ever receives it. Manual disposal keeps teardown confined to
+   * the one failure tail, where cleanup is actually the intent.
    */
   let client: EspHomeClient | undefined;
+  let reason: ConnectionFailureReason | TRefusal;
 
   try {
 
@@ -129,25 +241,25 @@ OpenConnectionOptions): Promise<ConnectionOutcome> {
       signal: shutdownSignal
     });
 
-    const initialState = await captureInitialState({ client, expected, shutdownSignal, timeoutSeconds });
+    const waitList = resolveWaitList(client);
 
-    return { client, initialState, ok: true };
+    if(waitList.ok) {
+
+      const initialState = await captureInitialState({ client, expected: waitList.expected, shutdownSignal, timeoutSeconds });
+
+      return { client, identity: waitList.identity, initialState, ok: true };
+    }
+
+    // The step refused what answered. Only the step knows what it was looking for, so it has already told the user what it found instead.
+    reason = waitList.reason;
   } catch(error) {
 
-    // Shutdown is not a failure - the platform is tearing down and this in-flight discovery is no longer interesting. Silent cleanup so the log is not filled
+    // Shutdown is not a failure - the platform is tearing down and this in-flight connect is no longer interesting. Silent classification so the log is not filled
     // with spurious "Failed to establish connection" lines on every device that happened to be mid-handshake when the user stopped Homebridge.
     if(shutdownSignal.aborted) {
 
-      client?.[Symbol.dispose]();
-
-      return { ok: false, reason: "shutdown" };
-    }
-
-    // Classify the fault into the typed reason the caller acts on, keeping each branch's user-facing diagnostic. The shared teardown-and-return below then disposes the
-    // partially-constructed client exactly once, regardless of which branch classified the failure.
-    let reason: ConnectionFailureReason;
-
-    if(isEncryptionError(error)) {
+      reason = "shutdown";
+    } else if(isEncryptionError(error)) {
 
       log.error("Encryption configuration error - check the device's API encryption key: %s", error.message);
 
@@ -174,11 +286,12 @@ OpenConnectionOptions): Promise<ConnectionOutcome> {
       log.error("Failed to establish connection: %s", util.inspect(error, { depth: null }));
       reason = "unknown";
     }
-
-    client?.[Symbol.dispose]();
-
-    return { ok: false, reason };
   }
+
+  // The one teardown, reached by every failure however it was decided, so a partially-constructed client is disposed exactly once and never on the success path.
+  client?.[Symbol.dispose]();
+
+  return { ok: false, reason };
 }
 
 /* Refresh a device's identity fields from the connected client's device info. The mDNS TXT record seeds both the model and the firmware version at discovery, but the

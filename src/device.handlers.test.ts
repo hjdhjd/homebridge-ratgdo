@@ -90,6 +90,20 @@ describe("RatgdoAccessory characteristic getters (onGet read lens)", () => {
     assert.equal(await accessory.getService(Service.MotionSensor)?.getCharacteristic(Characteristic.StatusActive).triggerGet(), true,
       "the StatusActive onGet returns the online availability state");
   });
+
+  test("the reachability accessor follows the same flag in both directions", () => {
+
+    /* The one field of the status record the platform reads from outside the accessory, so it is held to the same flag every StatusActive characteristic reads
+     * rather than to a second copy of it. A fresh accessory is born online, because the platform constructs one only after a connection has captured its state.
+     */
+    const { ratgdo } = buildRatgdoAccessory();
+
+    assert.equal(ratgdo.isOnline, true, "an accessory constructed from a captured snapshot is reachable");
+
+    ratgdo.updateState({ id: "availability", state: "offline" });
+
+    assert.equal(ratgdo.isOnline, false, "and a disconnect the platform announces is what makes it unreachable");
+  });
 });
 
 describe("RatgdoAccessory Konnected getters (onGet read lens)", () => {

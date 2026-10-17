@@ -8,8 +8,8 @@
  * so the feature-option engine that resolves each device's key and the configuration session that stages the migration are the library's own. What the fakes observe
  * is therefore the page's behavior rather than a restatement of it - the host's request log, the double's handler store and counters, and the fake document's state.
  */
-import type { FakeCatalog, FakeConfigEntry, FakeDevice } from "./webui-double.helpers.ts";
-import { STATUS_ADDRESSES_ROUTE, STATUS_WARM_ROUTE, defaultConfig, defaultDevices, realCatalog } from "./webui-double.helpers.ts";
+import type { FakeCatalog, FakeConfigEntry, FakeDevice, FakeElement } from "./webui-double.helpers.ts";
+import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE, STATUS_WARM_ROUTE, defaultConfig, defaultDevices, realCatalog } from "./webui-double.helpers.ts";
 import { describe, test } from "node:test";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import type { LoadedUi } from "./webui.helpers.ts";
@@ -28,6 +28,11 @@ const configWith = (...options: string[]): FakeConfigEntry[] => [{ name: "Ratgdo
 
 // The device-scoped encryption-key entry the real feature-option engine resolves into a warm entry's psk.
 const keyEntry = (mac: string, key: string): string => "Enable.Device.Encryption.Key." + mac + "=" + key;
+
+/* The log-name entry the engine resolves into a warm entry's logName, at whichever scope the caller addresses. Passing no mac composes the global entry, which is what
+ * lets one helper describe both halves of the inheritance the page leaves entirely to the engine.
+ */
+const logNameEntry = (name: string, mac?: string): string => "Enable.Device.LogName" + ((mac === undefined) ? "" : ("." + mac)) + "=" + name;
 
 // Every warm request the page has sent, in order. Reading the log by route is how each test counts sends without depending on what else the page asked for.
 const warmSends = (page: LoadedUi): unknown[] => page.host.requests.filter((entry) => (entry.route === STATUS_WARM_ROUTE)).map((entry) => entry.body);
@@ -65,7 +70,7 @@ describe("the ratgdo settings page", () => {
       assert.ok(page.double.params.onLoaded, "the page answers the framework's load announcement, which is what carries its first warm");
       assert.equal(page.double.showCalls, 1, "the page ran exactly one show cycle");
       assert.equal(sends.length, 1, "establishing the page sends exactly one warm");
-      assert.deepEqual(sends[0], { devices: [ { mac: MAC, psk: KEY }, { mac: MAC_TWO } ] },
+      assert.deepEqual(sends[0], { addresses: [], devices: [ { mac: MAC, psk: KEY }, { mac: MAC_TWO } ] },
         "the warm lists every device, carrying the configured key for the device that has one and no key for the device that does not");
 
       const warm = page.host.requests.find((entry) => (entry.route === STATUS_WARM_ROUTE));
@@ -164,7 +169,8 @@ describe("the ratgdo settings page", () => {
       const sends = warmSends(page);
 
       assert.equal(sends.length, before + 1, "the burst coalesces into exactly one send");
-      assert.deepEqual(sends.at(-1), { devices: [ { mac: MAC, psk: "second" }, { mac: MAC_TWO } ] }, "the one send carries the settled value, not the half-typed one");
+      assert.deepEqual(sends.at(-1), { addresses: [], devices: [ { mac: MAC, psk: "second" }, { mac: MAC_TWO } ] },
+        "the one send carries the settled value, not the half-typed one");
     });
   });
 
@@ -191,6 +197,136 @@ describe("the ratgdo settings page", () => {
       await releaseDebounce(t.mock.timers);
 
       assert.equal(warmSends(page).length, before + 1, "a changed key sends once");
+    });
+  });
+
+  describe("the log names the warm payload carries", () => {
+
+    test("carries the name the engine resolves at the device's own scope and at the global one, and omits it for a device with neither", async () => {
+
+      // Two devices and two scopes in one fixture: the first device's own entry, and a global entry the second device inherits. Resolution is the engine's alone, so
+      // what this asserts is that the page reads the option at each device's identity and sends exactly what came back.
+      using page = await loadUi({ config: configWith(logNameEntry("North Door", MAC)) });
+
+      assert.deepEqual(warmSends(page)[0], { addresses: [], devices: [ { logName: "North Door", mac: MAC }, { mac: MAC_TWO } ] },
+        "the named device carries its name and the unnamed one carries no logName field at all");
+
+      using global = await loadUi({ config: configWith(logNameEntry("Every Opener")) });
+
+      assert.deepEqual(warmSends(global)[0], { addresses: [], devices: [ { logName: "Every Opener", mac: MAC }, { logName: "Every Opener", mac: MAC_TWO } ] },
+        "a global entry reaches every device, because the page asks the engine rather than reading the entry itself");
+    });
+
+    test("re-sends for a log-name-only edit and stays suppressed when nothing moved", async (t) => {
+
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+
+      using page = await loadUi({ config: configWith(keyEntry(MAC, KEY)) });
+
+      const before = warmSends(page).length;
+
+      // A name is not a key, so this edit moves no field the old per-mac key memory could have seen. It re-sends because the payload itself spells differently.
+      setOptions(page, keyEntry(MAC, KEY), logNameEntry("North Door", MAC));
+      page.double.params.onOptionsEdited?.();
+
+      await releaseDebounce(t.mock.timers);
+
+      const sends = warmSends(page);
+
+      assert.equal(sends.length, before + 1, "an edit that changed only a log name sends once");
+      assert.deepEqual(sends.at(-1), { addresses: [], devices: [ { logName: "North Door", mac: MAC, psk: KEY }, { mac: MAC_TWO } ] },
+        "the send carries the new name beside the unchanged key");
+
+      page.double.params.onOptionsEdited?.();
+
+      await releaseDebounce(t.mock.timers);
+
+      assert.equal(warmSends(page).length, before + 1, "a recompute over the same names and keys sends nothing");
+    });
+
+    test("tells an omitted field from a present one, so a name and a key cannot be confused for each other", async (t) => {
+
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+
+      /* The distinguishing input for a signature that collapses its fields: one device moves its key from "x" to nothing while another takes the name "x". A
+       * comparison over a flattened set of values would read those two edits as no change at all, where a fixed-position tuple reads them as two.
+       */
+      using page = await loadUi({ config: configWith(keyEntry(MAC, "x")) });
+
+      const before = warmSends(page).length;
+
+      setOptions(page, logNameEntry("x", MAC_TWO));
+      page.double.params.onOptionsEdited?.();
+
+      await releaseDebounce(t.mock.timers);
+
+      assert.equal(warmSends(page).length, before + 1, "dropping one device's key while another takes that same text as its name is a change, and it sends");
+      assert.deepEqual(warmSends(page).at(-1), { addresses: [], devices: [ { mac: MAC }, { logName: "x", mac: MAC_TWO } ] },
+        "the payload carries the key's removal and the name's arrival together");
+    });
+  });
+
+  describe("the manual addresses the warm payload carries", () => {
+
+    test("carries every listed address with the key the engine resolves at that address's own identity", async () => {
+
+      /* The key for a manually addressed device is stored under the ADDRESS, because a device nobody has connected to yet has no mac anyone knows. The three
+       * address shapes are here together because each one reaches the engine's stored form differently: an IPv4 address and a hostname both carry periods the
+       * stored form gives meaning to, while an IPv6 literal's colons pass through untouched.
+       */
+      using page = await loadUi({ config: configWith(
+        "Enable.Device.Address=10.0.0.20, garage.local, fd00::1",
+        "Enable.Device.Encryption.Key.10-0-0-20=" + KEY,
+        "Enable.Device.Encryption.Key.garage-local=hostname-key",
+        "Enable.Device.Encryption.Key.fd00::1=literal-key"
+      ) });
+
+      const sent = warmSends(page)[0] as { addresses: unknown[] };
+
+      assert.deepEqual(sent.addresses, [ { address: "10.0.0.20", psk: KEY }, { address: "garage.local", psk: "hostname-key" },
+        { address: "fd00::1", psk: "literal-key" } ],
+      "each listed address travels with the key stored at its own identity, in the order the user listed them");
+    });
+
+    test("carries a listed address with no key at all, and omits the list entirely for an install that has none", async () => {
+
+      using none = await loadUi();
+
+      assert.deepEqual((warmSends(none)[0] as { addresses: unknown[] }).addresses, [], "an install listing no address sends an empty list rather than nothing");
+
+      using listed = await loadUi({ config: configWith("Enable.Device.Address=10.0.0.20") });
+
+      assert.deepEqual((warmSends(listed)[0] as { addresses: unknown[] }).addresses, [{ address: "10.0.0.20" }],
+        "an address the user has set no key for carries no psk field, exactly as a keyless device does");
+    });
+
+    test("re-sends when an address is added and stays suppressed when the list has not moved", async (t) => {
+
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+
+      using page = await loadUi();
+
+      const before = warmSends(page).length;
+
+      setOptions(page, "Enable.Device.Address=10.0.0.20");
+      page.double.params.onOptionsEdited?.();
+
+      await releaseDebounce(t.mock.timers);
+
+      assert.equal(warmSends(page).length, before + 1, "adding an address sends once");
+
+      page.double.params.onOptionsEdited?.();
+
+      await releaseDebounce(t.mock.timers);
+
+      assert.equal(warmSends(page).length, before + 1, "a recompute over the same list sends nothing");
+
+      setOptions(page, "Enable.Device.Address=10.0.0.20", "Enable.Device.Encryption.Key.10-0-0-20=" + KEY);
+      page.double.params.onOptionsEdited?.();
+
+      await releaseDebounce(t.mock.timers);
+
+      assert.equal(warmSends(page).length, before + 2, "a key set against a listed address is a change the signature sees, so it sends");
     });
   });
 
@@ -430,7 +566,7 @@ describe("the ratgdo settings page", () => {
 
       using page = await loadUi({ config: configWith(keyEntry(MAC, KEY)) });
 
-      assert.deepEqual(warmSends(page)[0], { devices: [ { mac: MAC, psk: KEY }, { mac: MAC_TWO } ] },
+      assert.deepEqual(warmSends(page)[0], { addresses: [], devices: [ { mac: MAC, psk: KEY }, { mac: MAC_TWO } ] },
         "tagging a row for the sidebar adds nothing to the warm body the server receives");
     });
   });
@@ -534,6 +670,572 @@ describe("the ratgdo settings page", () => {
       assert.ok(routes.includes(STATUS_WARM_ROUTE), "the warm send addresses the shared warm route");
       assert.ok(routes.includes(STATUS_ADDRESSES_ROUTE), "the address read addresses the shared addresses route");
       assert.equal(defaultDevices().length, 2, "the default fixture install advertises one device of each variant");
+    });
+  });
+});
+
+/* The Add Device card, exercised against the real page building real elements into the recording document.
+ *
+ * Everything below reads the card off what the page BUILT - the button text it wrote, the fields it labelled, the verdict it rendered - rather than off a structure
+ * this file describes. That is the whole reason the card is constructed at runtime rather than declared in markup: a card the page builds is a card the harness can
+ * hold, and a change to its copy or its shape has to come through here.
+ */
+describe("the ratgdo settings page's Add Device card", () => {
+
+  // A probe answer describing a device that responded, which is the input every save row starts from.
+  const ANSWERED = { address: "10.0.0.20", encrypted: true, firmwareVersion: "2.0.0", kind: "ok", mac: MAC, model: "Ratgdo Disco", name: "North Door",
+    variant: "ratgdo" };
+
+  // Find one element the page built, by the text it carries. Reading by text is how a row addresses a button the way a user would - by what it says.
+  const byText = (page: LoadedUi, text: string): FakeElement => {
+
+    const found = page.findElement((element) => (element.textContent === text));
+
+    assert.ok(found, "the page built an element reading " + JSON.stringify(text));
+
+    return found;
+  };
+
+  // Open the card and hand back the fields and buttons a row drives, so each row says what it is doing rather than re-finding elements.
+  const openCard = (page: LoadedUi): { address: FakeElement; key: FakeElement; region: FakeElement; save: FakeElement; test: FakeElement } => {
+
+    page.double.fireOn(byText(page, "Add Device"), "click");
+
+    const address = page.document.getElementById("ratgdoAddressField");
+    const key = page.document.getElementById("ratgdoKeyField");
+    const region = page.findElement((element) => Object.hasOwn(element.attributes, "data-fo-region") &&
+      element.children.some((child) => (child.textContent === "Add a device by address")));
+
+    assert.ok(address && key && region, "the card carries its two fields inside its own region");
+
+    return { address, key, region, save: byText(page, "Save"), test: byText(page, "Test Connection") };
+  };
+
+  // Whatever the card's verdict line currently says. It is found by its role rather than by position, which is also how a screen reader finds it.
+  const verdict = (page: LoadedUi): string => page.findElement((element) => (element.attributes["role"] === "status"))?.textContent ?? "";
+
+  describe("mounting", () => {
+
+    test("inserts its button into the sidebar and its card region above the settings content, without touching either", async () => {
+
+      using page = await loadUi();
+
+      const sidebar = page.document.getElementById("sidebar");
+      const stats = page.document.getElementById("deviceStatsContainer");
+
+      assert.ok(sidebar && stats, "the page markup carries the two mount points");
+
+      const launcher = sidebar.children[0];
+
+      assert.ok(launcher, "the sidebar carries a first child");
+      assert.ok(Object.hasOwn(launcher.attributes, "data-fo-region"),
+        "the button sits in a plugin-owned region, so the framework hides and reveals it with the page and never clears it");
+      assert.equal(launcher.children[0]?.textContent, "Add Device", "and that region holds the Add Device button");
+      assert.equal(sidebar.children[1]?.className, "sidebar-content", "the framework's own sidebar content is still there, after the inserted region");
+
+      const main = stats.parentElement;
+      const region = main?.children.find((child) => Object.hasOwn(child.attributes, "data-fo-region"));
+
+      assert.ok(region, "the card's own region was inserted into the main content");
+      assert.ok(main && (main.children.indexOf(region) < main.children.indexOf(stats)), "and it sits ahead of the framework's device-stats region");
+      assert.equal(region.hidden, true, "the card starts closed - mounting it is not opening it");
+    });
+
+    test("builds the card's copy, its labelled fields, and its three actions", async () => {
+
+      using page = await loadUi();
+
+      page.double.fireOn(byText(page, "Add Device"), "click");
+
+      const address = page.document.getElementById("ratgdoAddressField");
+      const key = page.document.getElementById("ratgdoKeyField");
+
+      assert.ok(address && key, "both fields exist and carry ids, which is what a label's for attribute resolves against");
+      assert.equal(address.attributes["placeholder"], "garage.local or 10.0.0.20", "the address field shows both address shapes a user might type");
+      assert.ok(address.className.includes("font-monospace") && key.className.includes("font-monospace"), "both fields are monospace, since both carry exact text");
+      assert.equal(byText(page, "Address").attributes["for"], "ratgdoAddressField", "the address label is associated with its field");
+      assert.equal(byText(page, "Encryption key (optional)").attributes["for"], "ratgdoKeyField", "and the key label with its own, naming the key as optional");
+
+      for(const label of [ "Test Connection", "Save", "Cancel" ]) {
+
+        assert.ok(byText(page, label), "the card offers " + label);
+      }
+
+      assert.ok(page.findElement((element) => (element.attributes["role"] === "status")), "the verdict line is a status region, so each verdict is announced");
+    });
+
+    test("mounts once for the page's life, and a later show cycle closes the card rather than rebuilding it", async () => {
+
+      using page = await loadUi();
+
+      const sidebar = page.document.getElementById("sidebar");
+      const card = openCard(page);
+
+      assert.equal(card.region.hidden, false, "the card is open");
+
+      await page.double.show();
+      await settle();
+
+      assert.equal(sidebar?.children.filter((child) => Object.hasOwn(child.attributes, "data-fo-region")).length, 1,
+        "a second cycle builds no second button - the framework promises never to clear a plugin region, so rebuilding would only duplicate it");
+      assert.equal(card.region.hidden, true, "and the framework rebuilding the page closes the card");
+    });
+
+    test("closes on Cancel and on a sidebar navigation click, but not on a click of its own button", async () => {
+
+      using page = await loadUi();
+
+      const card = openCard(page);
+
+      page.double.fireOn(byText(page, "Cancel"), "click");
+
+      assert.equal(card.region.hidden, true, "Cancel closes the card");
+
+      const sidebar = page.document.getElementById("sidebar");
+
+      assert.ok(sidebar, "the sidebar is the element the device rows are inside");
+
+      page.double.fireOn(byText(page, "Add Device"), "click");
+
+      assert.equal(card.region.hidden, false, "the card reopens");
+
+      // A click on the plugin's own launcher travels through the sidebar too, and must not close the card it just opened.
+      page.double.fireOn(sidebar, "click", { target: byText(page, "Add Device") });
+
+      assert.equal(card.region.hidden, false, "a click on the card's own button is what opened it, so it is excluded from the close");
+
+      page.double.fireOn(sidebar, "click", { target: page.document.querySelector("sidebar-content") });
+
+      assert.equal(card.region.hidden, true, "selecting a device is the user moving on, so the card closes");
+
+      page.double.fireOn(byText(page, "Add Device"), "click");
+
+      assert.equal(card.region.hidden, false, "the card reopens once more");
+
+      // A click landing on the sidebar's own padding, where the target IS the sidebar rather than anything inside the launcher. contains() answers false for it, so
+      // it closes - which is the right answer, since the user clicked away from the card.
+      page.double.fireOn(sidebar, "click", { target: sidebar });
+
+      assert.equal(card.region.hidden, true, "a click on the sidebar itself is still a click away from the card, so it closes");
+    });
+  });
+
+  describe("testing a connection", () => {
+
+    test("refuses an empty address without sending a request", async () => {
+
+      using page = await loadUi();
+
+      const card = openCard(page);
+      const before = page.host.requests.filter((entry) => (entry.route === STATUS_PROBE_ROUTE)).length;
+
+      page.double.fireOn(card.test, "click");
+
+      await settle();
+
+      assert.equal(verdict(page), "Please enter the device's address.", "the card says what is missing");
+      assert.equal(page.host.requests.filter((entry) => (entry.route === STATUS_PROBE_ROUTE)).length, before, "and nothing was asked of the server");
+    });
+
+    test("sends exactly what was typed and renders the device that answered", async () => {
+
+      using page = await loadUi({ probe: async () => ANSWERED });
+
+      const card = openCard(page);
+
+      card.address.value = "  10.0.0.20  ";
+      card.key.value = " secret ";
+      page.double.fireOn(card.test, "click");
+
+      await settle();
+
+      const probes = page.host.requests.filter((entry) => (entry.route === STATUS_PROBE_ROUTE));
+
+      assert.equal(probes.length, 1, "one test is one request");
+      assert.deepEqual(probes[0]?.body, { address: "10.0.0.20", psk: "secret" }, "the typed address and key are sent trimmed, exactly as typed otherwise");
+      assert.equal(verdict(page), "This device answered.", "the card says so plainly");
+
+      const readout = page.findElement((element) => (element.textContent === "MAC: "))?.parentElement;
+
+      assert.ok(readout, "the identity readout names the MAC");
+      assert.equal(readout.children[1]?.textContent, MAC, "and carries the value beside the label");
+
+      for(const label of [ "Name", "Model", "Firmware", "Encrypted" ]) {
+
+        assert.ok(page.findElement((element) => (element.textContent === (label + ": "))), "the readout names " + label);
+      }
+    });
+
+    test("replaces the identity readout between verdicts rather than stacking them", async () => {
+
+      /* Two successful probes in ONE page session, which is the only input that can tell a readout that is cleared from one that is appended to. The card is built
+       * once and reused, so a readout that merely appended would show the first device's identity underneath the second's - and a user testing two addresses in a row
+       * would be reading a row that belongs to neither.
+       */
+      const answers = [ { ...ANSWERED, mac: MAC, name: "North Door" }, { ...ANSWERED, mac: MAC_TWO, name: "South Door" } ];
+      let issued = 0;
+
+      using page = await loadUi({ probe: async () => answers[issued++] ?? answers[1] });
+
+      const card = openCard(page);
+
+      card.address.value = "10.0.0.20";
+      page.double.fireOn(card.test, "click");
+
+      await settle();
+
+      assert.ok(page.findElement((element) => (element.textContent === "North Door")), "the first device's name is shown");
+
+      card.address.value = "10.0.0.21";
+      page.double.fireOn(card.test, "click");
+
+      await settle();
+
+      assert.ok(page.findElement((element) => (element.textContent === "South Door")), "the second device's name is shown");
+      assert.equal(page.findElement((element) => (element.textContent === "North Door")), null,
+        "and the first device's name is gone, because the readout is replaced between verdicts rather than added to");
+
+      const readout = page.findElement((element) => (element.textContent === "MAC: "))?.parentElement?.parentElement;
+
+      assert.ok(readout, "the readout is found");
+      assert.equal(readout.children.length, 5, "it carries exactly one verdict's worth of rows, not two stacked");
+    });
+
+    test("renders one sentence per failure reason, and omits the encrypted row for a plaintext device", async () => {
+
+      // Every reason the server can answer with, so a reason added to the wire without copy here shows up as an unreachable fallback rather than silently.
+      const copy: Record<string, RegExp> = {
+
+        "auth-invalid": /refused that encryption key/,
+        "auth-missing": /requires its API encryption key/,
+        "misconfigured": /not a Ratgdo or Konnected opener/,
+        "timeout": /did not answer in time/,
+        "unreachable": /Nothing answered at that address/,
+        "unsupported": /ESPHome API version/
+      };
+
+      for(const [ reason, expected ] of Object.entries(copy)) {
+
+        // eslint-disable-next-line no-await-in-loop
+        using page = await loadUi({ probe: async () => ({ kind: "error", reason }) });
+
+        const card = openCard(page);
+
+        card.address.value = "10.0.0.20";
+        page.double.fireOn(card.test, "click");
+
+        // eslint-disable-next-line no-await-in-loop
+        await settle();
+
+        assert.match(verdict(page), expected, "the card explains " + reason + " in its own sentence");
+      }
+
+      using plaintext = await loadUi({ probe: async () => ({ ...ANSWERED, encrypted: false }) });
+
+      const card = openCard(plaintext);
+
+      card.address.value = "10.0.0.20";
+      plaintext.double.fireOn(card.test, "click");
+
+      await settle();
+
+      assert.equal(plaintext.findElement((element) => (element.textContent === "Encrypted: ")), null,
+        "a device that negotiated no encryption shows no Encrypted row - its absence is not a fact worth a line");
+    });
+  });
+
+  describe("saving", () => {
+
+    test("writes nothing at all when the device did not answer", async () => {
+
+      // A17 and T18's second half: the probe-first guard is the card's whole promise, so a failed answer must leave the configuration untouched.
+      using page = await loadUi({ probe: async () => ({ kind: "error", reason: "auth-missing" }) });
+
+      const card = openCard(page);
+
+      card.address.value = "10.0.0.20";
+      page.double.fireOn(card.save, "click");
+
+      await settle();
+
+      assert.equal(page.double.featureOptions.commits.length, 0, "a device that refused the connection is never written to the configuration");
+      assert.match(verdict(page), /requires its API encryption key/, "and the card says why rather than claiming a save");
+    });
+
+    test("commits exactly once, with one patch carrying both the address and its key", async () => {
+
+      using page = await loadUi({ probe: async () => ANSWERED });
+
+      const card = openCard(page);
+
+      card.address.value = "10.0.0.20";
+      card.key.value = KEY;
+      page.double.fireOn(card.save, "click");
+
+      await settle();
+
+      assert.equal(page.double.featureOptions.commits.length, 1, "a save is ONE coordinated write, never one per entry");
+
+      const options = (page.double.featureOptions.commits[0]?.patch as { options?: string[] })?.options ?? [];
+
+      assert.ok(options.some((entry) => (entry === "Enable.Device.Address=10.0.0.20")), "the one patch lists the address");
+      assert.ok(options.some((entry) => (entry === ("Enable.Device.Encryption.Key.10-0-0-20=" + KEY))), "and carries its key at the address identity");
+      assert.equal(verdict(page), "Saved. Restart Homebridge to add this device.", "a new device is a restart away from HomeKit, and the card says so");
+      assert.equal(card.region.hidden, true, "a saved card closes");
+    });
+
+    test("tells a listed address with a new key apart from one with nothing to change", async () => {
+
+      using rewritten = await loadUi({ config: configWith("Enable.Device.Address=10.0.0.20", "Enable.Device.Encryption.Key.10-0-0-20=old-key"),
+        probe: async () => ANSWERED });
+
+      const first = openCard(rewritten);
+
+      first.address.value = "10.0.0.20";
+      first.key.value = KEY;
+      rewritten.double.fireOn(first.save, "click");
+
+      await settle();
+
+      assert.equal(rewritten.double.featureOptions.commits.length, 1, "a listed address with a new key is still a write");
+      assert.equal(verdict(rewritten), "Updated the key for this device.", "and its confirmation says what actually changed, not that a device was added");
+
+      using unchanged = await loadUi({ config: configWith("Enable.Device.Address=10.0.0.20"), probe: async () => ANSWERED });
+
+      const second = openCard(unchanged);
+
+      second.address.value = "10.0.0.20";
+      unchanged.double.fireOn(second.save, "click");
+
+      await settle();
+
+      assert.equal(unchanged.double.featureOptions.commits.length, 0, "nothing would change, so no write is opened at all");
+      assert.equal(verdict(unchanged), "This device is already listed.", "and the card says so rather than offering a pointless restart");
+    });
+
+    test("renders the error for a staged or failed write, and nothing at all for a superseded one", async () => {
+
+      const rows = [
+
+        { expected: "the host refused the write", kind: "failed", open: true },
+        { expected: "the write never reached disk", kind: "staged", open: true }
+      ];
+
+      for(const row of rows) {
+
+        // eslint-disable-next-line no-await-in-loop
+        using page = await loadUi({ probe: async () => ANSWERED });
+
+        const card = openCard(page);
+
+        page.double.featureOptions.nextCommit = { error: new Error(row.expected), kind: row.kind as "failed" };
+        card.address.value = "10.0.0.20";
+        page.double.fireOn(card.save, "click");
+
+        // eslint-disable-next-line no-await-in-loop
+        await settle();
+
+        assert.equal(verdict(page), row.expected, "a " + row.kind + " write shows the host's own message rather than a claim of success");
+        assert.equal(card.region.hidden, !row.open, "and the card stays open, since the user may want to try again");
+      }
+
+      using superseded = await loadUi({ probe: async () => ANSWERED });
+
+      const card = openCard(superseded);
+
+      superseded.double.featureOptions.nextCommit = { kind: "superseded" };
+      card.address.value = "10.0.0.20";
+      superseded.double.fireOn(card.save, "click");
+
+      await settle();
+
+      assert.equal(verdict(superseded), "This device answered.", "a superseded write belongs to a retired page copy, so the card renders nothing new");
+    });
+  });
+
+  describe("the address the card accepts", () => {
+
+    test("refuses an address naming a zone without sending a probe or writing anything", async () => {
+
+      /* A zone identifier names the interface a link-local address was heard on and means nothing without that link - nothing could dial it, so the card says so
+       * before a request goes out rather than letting the user watch a probe that was always going to fail. The assertion reads the exact sentence, because this is
+       * the one place the user is told what to do instead.
+       */
+      using page = await loadUi({ probe: async () => ANSWERED });
+
+      const card = openCard(page);
+      const probes = page.host.requests.filter((entry) => (entry.route === STATUS_PROBE_ROUTE)).length;
+
+      card.address.value = "fe80::1%en0";
+      page.double.fireOn(card.save, "click");
+
+      await settle();
+
+      assert.equal(verdict(page), "An address with a zone identifier cannot be dialed. List the device's routable address or hostname instead.",
+        "the card explains the refusal and names what to list instead");
+      assert.equal(page.host.requests.filter((entry) => (entry.route === STATUS_PROBE_ROUTE)).length, probes, "no probe is sent for an address nothing can dial");
+      assert.equal(page.double.featureOptions.commits.length, 0, "and nothing is written");
+    });
+
+    test("probes and saves the canonical form of a bracketed address", async () => {
+
+      /* A user typing an IPv6 literal reasonably reaches for the URL spelling. What is tested and what is written must both be the bare literal: the bracketed form
+       * is not an address to Node's own parser, so a dial carrying it resolves as a hostname and fails for good.
+       */
+      using page = await loadUi({ probe: async () => ({ ...ANSWERED, address: "2001:db8::5", mac: MAC }) });
+
+      const card = openCard(page);
+
+      card.address.value = "  [2001:DB8::5]  ";
+      card.key.value = KEY;
+      page.double.fireOn(card.save, "click");
+
+      await settle();
+
+      const probe = page.host.requests.find((entry) => (entry.route === STATUS_PROBE_ROUTE));
+
+      assert.deepEqual(probe?.body, { address: "2001:db8::5", psk: KEY }, "the address tested is the bare, trimmed, lower-cased literal");
+
+      const options = (page.double.featureOptions.commits[0]?.patch as { options?: string[] })?.options ?? [];
+
+      assert.ok(options.includes("Enable.Device.Address=2001:db8::5"), "and the address saved is the same one that was tested, not the spelling that was typed");
+      assert.ok(options.includes("Enable.Device.Encryption.Key.2001:db8::5=" + KEY), "with the key stored at that canonical identity");
+    });
+
+    test("tells a user their bracketed spelling of a listed address is already listed", async () => {
+
+      using page = await loadUi({ config: configWith("Enable.Device.Address=2001:db8::5"),
+        probe: async () => ({ ...ANSWERED, address: "2001:db8::5", mac: MAC }) });
+
+      const card = openCard(page);
+
+      card.address.value = "[2001:DB8::5]";
+      page.double.fireOn(card.save, "click");
+
+      await settle();
+
+      assert.equal(verdict(page), "This device is already listed.", "the two spellings are one address, so there is nothing to add");
+      assert.equal(page.double.featureOptions.commits.length, 0, "and no write is opened for it");
+    });
+
+    test("sends the canonical form of every listed address in the warm payload", async () => {
+
+      // The page and the plugin have to name one identity for one address, so the payload carries what the plugin would dial rather than what the user typed - and
+      // an entry nothing could dial is dropped rather than sent for the feed to drop again.
+      using page = await loadUi({ config: configWith("Enable.Device.Address=[2001:DB8::5], Garage.Local, fe80::1%en0",
+        "Enable.Device.Encryption.Key.2001:db8::5=" + KEY) });
+
+      const sent = warmSends(page)[0] as { addresses: { address: string; psk?: string }[] };
+
+      assert.deepEqual(sent.addresses, [ { address: "2001:db8::5", psk: KEY }, { address: "garage.local" } ],
+        "the bracketed literal is sent bare with the key found at its canonical identity, the hostname is lower-cased, and the zoned entry is not sent at all");
+    });
+  });
+
+  describe("actions that outlive the card", () => {
+
+    test("shows the newer answer when two tests overlap, whichever resolves last", async () => {
+
+      /* Risk 8's ordering row. The first probe answers LAST and describes a different device, so an implementation without a generation check would paint the first
+       * device's verdict over the second's - the reason a per-action counter exists at all.
+       */
+      const answers = [ Promise.withResolvers<unknown>(), Promise.withResolvers<unknown>() ];
+      let issued = 0;
+
+      using page = await loadUi({ probe: () => answers[issued++]?.promise ?? Promise.resolve(ANSWERED) });
+
+      const card = openCard(page);
+
+      card.address.value = "10.0.0.20";
+      page.double.fireOn(card.test, "click");
+
+      await settle();
+
+      card.address.value = "10.0.0.21";
+      page.double.fireOn(card.test, "click");
+
+      await settle();
+
+      // The SECOND probe answers first, then the first one answers late with a verdict that must not be rendered.
+      answers[1]?.resolve({ kind: "error", reason: "timeout" });
+
+      await settle();
+
+      answers[0]?.resolve(ANSWERED);
+
+      await settle();
+
+      assert.match(verdict(page), /did not answer in time/, "the verdict is the newer action's, and the slow answer to the retired one paints nothing");
+    });
+
+    test("renders nothing and schedules no warm when a probe answers after the card closed", async () => {
+
+      // The ruling's named row, probe half. A user who presses Test Connection and then Cancel must not have the card light up underneath them afterward.
+      const answer = Promise.withResolvers<unknown>();
+
+      using page = await loadUi({ probe: () => answer.promise });
+
+      const card = openCard(page);
+      const warms = warmSends(page).length;
+
+      card.address.value = "10.0.0.20";
+      page.double.fireOn(card.test, "click");
+
+      await settle();
+
+      page.double.fireOn(byText(page, "Cancel"), "click");
+
+      assert.equal(card.region.hidden, true, "the card is closed while the test is still running");
+
+      answer.resolve(ANSWERED);
+
+      await settle();
+
+      assert.equal(card.region.hidden, true, "the late answer does not reopen the card");
+      assert.equal(verdict(page), "Connecting to the device...", "and it renders nothing into it - the verdict is still whatever the card last said while open");
+      assert.equal(page.double.featureOptions.commits.length, 0, "a probe that never reached a save writes nothing");
+      assert.equal(warmSends(page).length, warms, "and schedules no warm recompute, since nothing was saved");
+    });
+
+    test("leaves a commit that lands after the card closed written exactly once, and renders nothing", async () => {
+
+      /* The ruling's named row, commit half. A commit already in flight cannot be recalled, so the configuration IS written - what the close suppresses is
+       * everything after the write: the confirmation, the close, and the warm recompute. The distinguishing observation is the commit COUNT, because an
+       * implementation that retried or re-entered on the late result would write twice.
+       */
+      const held = Promise.withResolvers<boolean>();
+
+      using page = await loadUi({ probe: async () => ANSWERED });
+
+      const card = openCard(page);
+      const original = page.double.featureOptions.commitConfig;
+
+      // The commit is held open so the card can be closed across it, then released.
+      page.double.featureOptions.commitConfig = async (compose) => {
+
+        await held.promise;
+
+        return original(compose);
+      };
+
+      const warms = warmSends(page).length;
+
+      card.address.value = "10.0.0.20";
+      page.double.fireOn(card.save, "click");
+
+      await settle();
+
+      page.double.fireOn(byText(page, "Cancel"), "click");
+
+      assert.equal(card.region.hidden, true, "the card is closed while the write is still in flight");
+
+      held.resolve(true);
+
+      await settle();
+
+      assert.equal(page.double.featureOptions.commits.length, 1, "the write that was already in flight still happened, exactly once");
+      assert.notEqual(verdict(page), "Saved. Restart Homebridge to add this device.", "but its confirmation renders into nothing, since the card is closed");
+      assert.equal(warmSends(page).length, warms, "and no warm recompute is scheduled for a card the user dismissed");
     });
   });
 });

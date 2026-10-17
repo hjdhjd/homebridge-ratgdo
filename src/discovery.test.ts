@@ -1,10 +1,13 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * discovery.test.ts: Unit tests for parseRatgdoService - the pure mDNS-service-to-recognized-identity parse, classification, MAC normalization, and validity guard.
+ * discovery.test.ts: Unit tests for the two wire-record readers - the mDNS-service parse and the device-info classification - plus the identity composition,
+ * classification, MAC normalization, and validity guards they share.
  */
+import { classifyDeviceInfo, isAdvertisedAt, parseRatgdoService } from "./discovery.ts";
 import { describe, test } from "node:test";
-import { isAdvertisedAt, parseRatgdoService } from "./discovery.ts";
+import type { DeviceInfo } from "esphome-client";
 import type { Nullable } from "homebridge-plugin-utils";
+import { RATGDO_AUTODISCOVERY_PROJECTS } from "./settings.ts";
 import { RatgdoVariant } from "./types.ts";
 import assert from "node:assert/strict";
 import { makeRatgdoService } from "./testing.helpers.ts";
@@ -202,6 +205,109 @@ describe("parseRatgdoService", () => {
 
       assert.equal(parseRatgdoService(makeRatgdoService({ mac: "aabbccddeeff", version: "2.0.0" })), null, "a device must advertise a project_name to be classified");
     });
+  });
+});
+
+describe("classifyDeviceInfo", () => {
+
+  // The address a manual dial opened its connection at, which is the address a device-info record's identity carries.
+  const DIALED = "192.0.2.10";
+
+  /* A fully-formed device-info record for the same device the service fixture above describes, spelled the way a connected ESPHome client reports it: a
+   * colon-delimited MAC, and the firmware version under esphomeVersion alone since a record carries no separate version member.
+   */
+  const ratgdoInfo: DeviceInfo = { esphomeVersion: "2024.1.0", friendlyName: "Garage", macAddress: "AA:BB:CC:DD:EE:FF", projectName: "ratgdo.esp32",
+    projectVersion: "2.5" };
+
+  describe("the identity both wire records compose", () => {
+
+    test("a service and a device-info record naming one device derive one identity", () => {
+
+      /* The whole point of the shared composition, asserted as an equality rather than field by field: a device reached at an address the user typed and the same
+       * device reached by its advertisement must be indistinguishable to everything downstream, or the two paths would configure one device two ways. The service
+       * advertises exactly the address the record's connection was opened at, so even the two address fields coincide and the identities are equal outright.
+       */
+      const fromService = parseRatgdoService({ ...makeRatgdoService({ esphome_version: "2024.1.0", friendly_name: "Garage", mac: "aabbccddeeff",
+        project_name: "ratgdo.esp32", project_version: "2.5" }), addresses: [DIALED] });
+
+      assert.deepEqual(classifyDeviceInfo(ratgdoInfo, DIALED), fromService, "the record and the advertisement compose the same identity, field for field");
+    });
+
+    test("both MAC spellings normalize to one pair of representations", () => {
+
+      const colons = classifyDeviceInfo(ratgdoInfo, DIALED);
+      const bareHex = classifyDeviceInfo({ ...ratgdoInfo, macAddress: "aabbccddeeff" }, DIALED);
+
+      assert.equal(colons?.macColon, "AA:BB:CC:DD:EE:FF", "a colon-delimited wire MAC keeps its colons and is uppercased");
+      assert.equal(colons?.strippedMac, "AABBCCDDEEFF", "and yields the bare-hex form downstream consumes");
+      assert.deepEqual(bareHex, colons, "a bare-hex wire MAC naming the same device derives the same identity, colons and all");
+    });
+
+    test("an empty friendly name falls back to the device's own name", () => {
+
+      assert.equal(classifyDeviceInfo({ ...ratgdoInfo, friendlyName: "", name: "garage-door" }, DIALED)?.friendlyName, "garage-door",
+        "an empty member is no name at all, exactly as an empty TXT value is, so the device's own name answers instead");
+      assert.equal(classifyDeviceInfo({ ...ratgdoInfo, friendlyName: undefined, name: undefined }, DIALED)?.friendlyName, undefined,
+        "a record offering neither leaves the display-name fallback undefined for the platform's own default to fill");
+    });
+
+    test("the dialed address becomes both the address and the whole advertisement", () => {
+
+      const result = classifyDeviceInfo(ratgdoInfo, "garage.local");
+
+      assert.equal(result?.address, "garage.local", "the address that answered is the address this identity says to dial");
+      assert.deepEqual(result?.addresses, ["garage.local"], "and it stands in for the advertisement, so a membership test against it answers true rather than false");
+    });
+
+    test("the project version becomes the model and an absent one leaves it undefined", () => {
+
+      assert.equal(classifyDeviceInfo(ratgdoInfo, DIALED)?.model, "2.5", "the advertised project version seeds the device model");
+      assert.equal(classifyDeviceInfo({ ...ratgdoInfo, projectVersion: "" }, DIALED)?.model, undefined, "an empty project version is no model");
+    });
+  });
+
+  describe("variant classification over the autodiscovery registry", () => {
+
+    /* One project name per variant the registry recognizes. A pattern cannot yield a string that matches it, so the sample names are written out - but the rows below
+     * are the registry's own entries, and this table is closed over the variant union, so a variant added to either side without the other stops compiling here
+     * rather than going untested.
+     */
+    const sampleProjectNames = {
+
+      konnected: "konnected.garage-door-gdov2-s",
+      ratgdo: "ratgdo.esp32"
+    } as const satisfies Record<RatgdoVariant, string>;
+
+    for(const entry of RATGDO_AUTODISCOVERY_PROJECTS) {
+
+      test("classifies " + sampleProjectNames[entry.variant] + " as the " + entry.variant + " variant", () => {
+
+        assert.equal(classifyDeviceInfo({ ...ratgdoInfo, projectName: sampleProjectNames[entry.variant] }, DIALED)?.variant, entry.variant,
+          "the registry entry's pattern is both the recognition gate and the variant classifier for a device-info record, exactly as it is for an advertisement");
+      });
+    }
+  });
+
+  describe("refusals", () => {
+
+    /* Every way a record fails to name an opener, as a table. Each row replaces one member of the well-formed record above, so the row is the only difference
+     * between a refusal and the success the suite already asserted.
+     */
+    const rows: { info: Nullable<DeviceInfo>; why: string }[] = [
+
+      { info: null, why: "a client with no device-info record at all has told us nothing to identify" },
+      { info: { ...ratgdoInfo, macAddress: undefined }, why: "a record with no MAC names no device, and the MAC is the identity" },
+      { info: { ...ratgdoInfo, macAddress: "" }, why: "an empty MAC member is as unusable as an absent one" },
+      { info: { ...ratgdoInfo, projectName: undefined }, why: "a record with no project name cannot be classified as any variant" },
+      { info: { ...ratgdoInfo, projectName: "" }, why: "an empty project name matches no pattern and is read as absent" },
+      { info: { ...ratgdoInfo, esphomeVersion: undefined }, why: "a record with no firmware version is not a fully-formed ESPHome identity" },
+      { info: { ...ratgdoInfo, projectName: "esphome.generic-sensor" }, why: "an ESPHome device matching no known pattern is something else answering at this address" }
+    ];
+
+    for(const { info, why } of rows) {
+
+      test(why, () => assert.equal(classifyDeviceInfo(info, DIALED), null, why));
+    }
   });
 });
 /* eslint-enable camelcase */

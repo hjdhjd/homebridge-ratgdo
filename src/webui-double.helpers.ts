@@ -18,9 +18,10 @@ import { featureOptionCategories, featureOptions } from "./options.ts";
  * each route spelled out in exactly one file across the whole repository.
  */
 const ROUTES_MODULE = "../homebridge-ui/public/status-routes.mjs";
-const sharedRoutes = (await import(ROUTES_MODULE)) as { STATUS_ADDRESSES_ROUTE: string; STATUS_WARM_ROUTE: string };
+const sharedRoutes = (await import(ROUTES_MODULE)) as { STATUS_ADDRESSES_ROUTE: string; STATUS_PROBE_ROUTE: string; STATUS_WARM_ROUTE: string };
 
 export const STATUS_ADDRESSES_ROUTE = sharedRoutes.STATUS_ADDRESSES_ROUTE;
+export const STATUS_PROBE_ROUTE = sharedRoutes.STATUS_PROBE_ROUTE;
 export const STATUS_WARM_ROUTE = sharedRoutes.STATUS_WARM_ROUTE;
 
 // The option catalog the page reads, in the two members the framework's own accessor narrows a /getOptions response down to.
@@ -107,12 +108,30 @@ export interface FeatureOptionsParams {
   };
 }
 
+/* What a coordinated configuration write became, as the framework's own `commitConfig` reports it. `committed` and `staged` both mean the configuration changed -
+ * `staged` reached the host's memory and not the disk - while `failed` means nothing changed and `superseded` means a newer page copy owns the window.
+ */
+export type CommitResult = { kind: "committed" } | { error: unknown; kind: "failed" } | { error: unknown; kind: "staged" } | { kind: "superseded" };
+
+/* One recorded `commitConfig` call: the patch the page's composer produced against the fixture's primary entry, and what the double answered. Recording the composed
+ * patch rather than the composer itself is what lets a test assert WHAT would be written without running the write twice.
+ */
+export interface RecordedCommit {
+
+  patch: unknown;
+  result: CommitResult;
+}
+
 // The feature-options facade the page reaches through `ui.featureOptions`.
 export interface FeatureOptionsDouble {
 
   catalog: () => Promise<FakeCatalog>;
+  commitConfig: (compose: (platform: FakeConfigEntry) => Record<string, unknown>) => Promise<CommitResult>;
+  commits: RecordedCommit[];
   editedConfig: FakeConfigEntry[];
   getHomebridgeDevices: () => Promise<DeviceListResult>;
+  // What the next commitConfig call answers. A test sets it to drive the staged, failed, and superseded arms the page renders differently.
+  nextCommit: CommitResult;
   statusPanel: StatusPanelDouble;
 }
 
@@ -142,10 +161,56 @@ export interface FakeHost {
   updates: FakeConfigEntry[][];
 }
 
-// The fake document, carrying the one property the page reads and nothing else. A test sets `visibilityState` before firing the visibility belt's handler.
+/* One recorded DOM element. The page builds its Add Device card through plain DOM calls, so this records exactly the calls the page is allowed to make and nothing
+ * more - a member the page reaches that this does not carry throws inside the test, which is what makes the harness a drift check rather than a mirror.
+ *
+ * Every member here is spelled the way the DOM spells it, and that spelling is the whole point. A double carrying a convenience member of its own - a `parent` where
+ * the DOM says `parentElement` - accepts page code no browser would run, and the suite then goes green on a card that cannot open. So the names are the DOM's, the
+ * behavior is the DOM's wherever it is observable, and anything the DOM does not offer is deliberately absent so that reaching for it throws here instead.
+ *
+ * `children` is a frozen view rather than the live array for that same reason: the real thing is an HTMLCollection whose `length` is a getter, so `children.length = 0`
+ * throws in a browser and has to throw here too. The tree is mutated through `append`, `prepend`, `before`, and `replaceChildren`, exactly as it is in a browser.
+ * There is deliberately no innerHTML and no insertAdjacentHTML: the card renders values that came from a user and from a device, so an HTML-string sink is a member
+ * the page must not have.
+ */
+export interface FakeElement {
+
+  append: (...nodes: FakeElement[]) => void;
+  attributes: Record<string, string>;
+  before: (...nodes: FakeElement[]) => void;
+  readonly children: readonly FakeElement[];
+  className: string;
+  contains: (node: Nullable<FakeElement> | undefined) => boolean;
+  hidden: boolean;
+  id: string;
+  parentElement: Nullable<FakeElement>;
+  prepend: (...nodes: FakeElement[]) => void;
+  replaceChildren: (...nodes: FakeElement[]) => void;
+  setAttribute: (name: string, value: string) => void;
+  tagName: string;
+  textContent: string;
+  value: string;
+}
+
+/* The fake document the page reads off the global scope. Every member is one the real document has, so a page reaching for anything else throws here rather than in a
+ * browser - the same rule FakeElement follows, for the same reason. The test-facing search lives on the harness handle instead of on this object, because a
+ * convenience member hanging off the document is exactly the sort of thing page code could reach for and get away with.
+ */
 export interface FakeDocument {
 
+  createElement: (tag: string) => FakeElement;
+  getElementById: (id: string) => Nullable<FakeElement>;
+  querySelector: (selector: string) => Nullable<FakeElement>;
   visibilityState: string;
+}
+
+/* The fake document together with the test-facing search over the tree the page built. They are handed back together and installed apart: the document goes onto the
+ * global scope where the page reads it, and `find` stays on the harness handle where only a test can reach it.
+ */
+export interface FakeDom {
+
+  document: FakeDocument;
+  find: (predicate: (element: FakeElement) => boolean) => Nullable<FakeElement>;
 }
 
 // The fake console, recording what the page's diagnostic paths emit rather than writing it into the runner's output.
@@ -203,12 +268,13 @@ export const stageFixture = (fixture: DoubleFixture): void => {
 
 // Build the fake Homebridge bridge over a staged install. The catalog answer is the served one unless the test overrode the accessor, since the host's own catalog is
 // what the page's configuration wiring reads regardless of how the page reaches its option catalog.
-export const makeHost = ({ addresses = {}, config = defaultConfig() }: { addresses?: Record<string, string>; config?: FakeConfigEntry[] } = {}): FakeHost => {
+export const makeHost = ({ addresses = {}, config = defaultConfig(), probe }: { addresses?: Record<string, string>; config?: FakeConfigEntry[];
+  probe?: () => Promise<unknown>; } = {}): FakeHost => {
 
   let held = config;
 
-  // What each route answers with. The catalog is the served one, the addresses route hands back the staged discovery map, and everything else answers null exactly as
-  // the plugin's own UI server does for its two void-returning handlers.
+  // What each route answers with. The catalog is the served one, the addresses route hands back the staged discovery map, the probe route hands back whatever the
+  // fixture staged for it, and everything else answers null exactly as the plugin's own UI server does for its void-returning handlers.
   const answerFor = (route: string): unknown => {
 
     switch(route) {
@@ -220,6 +286,11 @@ export const makeHost = ({ addresses = {}, config = defaultConfig() }: { address
       case STATUS_ADDRESSES_ROUTE:
 
         return addresses;
+
+      case STATUS_PROBE_ROUTE:
+
+        // An unstaged probe answers unreachable, which is the honest answer for a fixture that described no device at that address.
+        return probe ? probe() : { kind: "error", reason: "unreachable" };
 
       default:
 
@@ -256,8 +327,231 @@ export const makeHost = ({ addresses = {}, config = defaultConfig() }: { address
   return host;
 };
 
-// Build the fake document. Only `visibilityState` is modelled, because the page reads nothing else off it - the framework's own `on` owns every registration.
-export const makeDocument = (): FakeDocument => ({ visibilityState: "visible" });
+/* Build the fake document the page mounts its Add Device card into.
+ *
+ * The seeded ids are the page markup Config UI X serves: the sidebar the button mounts inside, the sidebar content it mounts ahead of, and the device-stats region
+ * the card region mounts before. They are seeded rather than created on demand so that a page reaching for an id the real markup does not carry reads null and the
+ * mount has to cope, exactly as it would in a browser.
+ *
+ * Only the DOM surface the card actually uses is modelled. Anything else the page reaches for is undefined and throws inside the test, which is the whole point:
+ * this file is a drift check on what the page is allowed to do, not a re-implementation of the DOM.
+ */
+/* Each element's live child list, keyed by the element. It sits beside the factory rather than on the element because `children` must hand back a frozen view - the
+ * insertion methods need the real array, and nothing outside this file may have it.
+ */
+const liveChildren = new WeakMap<FakeElement, FakeElement[]>();
+
+// The live child list of one element, which every insertion goes through. An element this file did not build has none, and an empty array keeps the walk total.
+const childrenOf = (element: FakeElement): FakeElement[] => liveChildren.get(element) ?? [];
+
+export const makeDocument = (): FakeDom => {
+
+  const seeded = new Map<string, FakeElement>();
+
+  const makeElement = (tag: string): FakeElement => {
+
+    // The live child list. It is held in the closure rather than on the element, so the only way out of it is the frozen view `children` hands back - which is what
+    // makes `children.length = 0` throw here exactly as it throws against a real HTMLCollection.
+    const kids: FakeElement[] = [];
+
+    // Detach a node from wherever it currently sits before it is inserted somewhere else, the way every DOM insertion does.
+    const detach = (node: FakeElement): void => {
+
+      const from = node.parentElement;
+
+      if(!from) {
+
+        return;
+      }
+
+      const siblings = childrenOf(from);
+      const at = siblings.indexOf(node);
+
+      if(at !== -1) {
+
+        siblings.splice(at, 1);
+      }
+
+      node.parentElement = null;
+    };
+
+    const element: FakeElement = {
+
+      append: (...nodes) => {
+
+        for(const node of nodes) {
+
+          detach(node);
+          node.parentElement = element;
+          kids.push(node);
+        }
+      },
+      attributes: {},
+      before: (...nodes) => {
+
+        const parent = element.parentElement;
+
+        if(!parent) {
+
+          return;
+        }
+
+        const siblings = childrenOf(parent);
+        const at = siblings.indexOf(element);
+
+        for(const node of nodes) {
+
+          detach(node);
+          node.parentElement = parent;
+        }
+
+        siblings.splice((at === -1) ? siblings.length : at, 0, ...nodes);
+      },
+
+      /* A frozen snapshot, not the live array. The real `children` is an HTMLCollection whose `length` is a getter-only accessor, so assigning to it throws in strict
+       * mode; freezing reproduces that, and page code that wants to empty a node has to reach for `replaceChildren` as it would in a browser.
+       */
+      get children(): readonly FakeElement[] {
+
+        return Object.freeze([...kids]);
+      },
+      className: "",
+
+      // Node.contains: true for the node itself and for any descendant, false for anything else - including a null or undefined argument.
+      contains: (node) => {
+
+        for(let walker = node ?? null; walker; walker = walker.parentElement) {
+
+          if(walker === element) {
+
+            return true;
+          }
+        }
+
+        return false;
+      },
+      hidden: false,
+      id: "",
+      parentElement: null,
+      prepend: (...nodes) => {
+
+        for(const node of nodes) {
+
+          detach(node);
+          node.parentElement = element;
+        }
+
+        kids.unshift(...nodes);
+      },
+      replaceChildren: (...nodes) => {
+
+        for(const node of kids.splice(0, kids.length)) {
+
+          node.parentElement = null;
+        }
+
+        for(const node of nodes) {
+
+          detach(node);
+          node.parentElement = element;
+          kids.push(node);
+        }
+      },
+      setAttribute: (name, value) => {
+
+        element.attributes[name] = value;
+      },
+      tagName: tag,
+      textContent: "",
+      value: ""
+    };
+
+    liveChildren.set(element, kids);
+
+    return element;
+  };
+
+  // Depth-first walk from every seeded root, which is how a lookup or a test search reaches an element the page built at any depth.
+  const walk = (element: FakeElement, visit: (node: FakeElement) => boolean): Nullable<FakeElement> => {
+
+    if(visit(element)) {
+
+      return element;
+    }
+
+    for(const child of element.children) {
+
+      const found = walk(child, visit);
+
+      if(found) {
+
+        return found;
+      }
+    }
+
+    return null;
+  };
+
+  const search = (predicate: (element: FakeElement) => boolean): Nullable<FakeElement> => {
+
+    for(const root of seeded.values()) {
+
+      const found = walk(root, predicate);
+
+      if(found) {
+
+        return found;
+      }
+    }
+
+    return null;
+  };
+
+  const document: FakeDocument = {
+
+    createElement: makeElement,
+    getElementById: (id) => seeded.get(id) ?? search((element) => (element.id === id)),
+
+    /* The one selector shape the page's own harness uses: a class or a tag. The card mounts against the sidebar's own content wrapper, which the real markup
+     * identifies by class rather than by id, so modelling those two keeps the double honest about what may be reached for.
+     */
+    querySelector: (selector) => search((element) => (element.className.split(" ").includes(selector.replace(".", "")) || (element.tagName === selector))),
+    visibilityState: "visible"
+  };
+
+  // Seed one element the framework's own markup carries, addressable by id. Local rather than a member of the document, because it describes the fixture rather than
+  // anything a page could ask a real document for.
+  const seed = (id: string): FakeElement => {
+
+    const element = makeElement("div");
+
+    element.id = id;
+    seeded.set(id, element);
+
+    return element;
+  };
+
+  /* The markup Config UI X serves, in the shape index.html declares it: one feature-content row holding the sidebar and the main region side by side, the sidebar
+   * holding its own content wrapper, and the main region holding the three framework content regions in order. The NESTING is what matters here rather than the
+   * completeness - the card mounts by inserting beside these elements, so a flat set of roots would let an insertion pass that a real document would refuse.
+   */
+  const row = seed("feature-main-content");
+  const sidebar = seed("sidebar");
+  const sidebarContent = makeElement("div");
+  const main = makeElement("main");
+  const stats = seed("deviceStatsContainer");
+  const searchRegion = seed("search");
+  const options = seed("optionsContainer");
+
+  row.className = "feature-main-content";
+  sidebarContent.className = "sidebar-content";
+  main.className = "feature-content";
+  sidebar.append(sidebarContent);
+  main.append(stats, searchRegion, options);
+  row.append(sidebar, main);
+
+  return { document, find: search };
+};
 
 // Build the fake console, recording the page's diagnostics instead of writing them into the runner's output where a deliberate one would read as noise.
 export const makeConsole = (): FakeConsole => {
@@ -349,8 +643,37 @@ export class webUi {
 
         return this.#catalogPromise;
       },
+
+      /* The framework's coordinated configuration write. The composer is handed the fixture's primary platform entry - the live one, as the real contract hands the
+       * live entry - and whatever it composes is merged onto that entry, so a later read by the page sees the write exactly as it would after a real commit. The
+       * composed patch and the answer are both recorded, which is what lets a test assert the call count and the resulting options in one place.
+       */
+      commitConfig: async (compose) => {
+
+        const primary = this.featureOptions.editedConfig[0];
+
+        if(!primary) {
+
+          throw new Error("commitConfig requires a primary platform entry, which the fixture did not supply.");
+        }
+
+        const patch = compose(primary);
+        const result = this.featureOptions.nextCommit;
+
+        this.featureOptions.commits.push({ patch, result });
+
+        // Only an outcome that changed the configuration writes, which is the difference the two failure kinds describe.
+        if((result.kind === "committed") || (result.kind === "staged")) {
+
+          Object.assign(primary, patch);
+        }
+
+        return result;
+      },
+      commits: [],
       editedConfig: fixture.config,
       getHomebridgeDevices: async () => ({ devices: fixture.devices.map((device) => ({ ...device })), error: "" }),
+      nextCommit: { kind: "committed" },
       statusPanel: {
 
         resetStaleGuards: () => {
@@ -420,6 +743,25 @@ export class webUi {
     if(!handlers.length) {
 
       throw new Error("The settings page registered no listener for " + event + ".");
+    }
+
+    for(const listener of handlers) {
+
+      listener.handler(payload);
+    }
+  }
+
+  /* Fire the listeners ONE element carries for an event, which is what a click on one button is. `fire` above replays every handler registered under an event name,
+   * and the card registers a click handler per button - so driving a single button needs the target in the match as well as the name. A target nobody registered
+   * for is a test's own mistake and is named rather than silently doing nothing.
+   */
+  fireOn(target: unknown, event: string, payload?: unknown): void {
+
+    const handlers = this.listeners.filter((listener) => ((listener.target === target) && (listener.event === event)));
+
+    if(!handlers.length) {
+
+      throw new Error("The settings page registered no " + event + " listener on that element.");
     }
 
     for(const listener of handlers) {

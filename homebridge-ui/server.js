@@ -2,9 +2,9 @@
  *
  * server.js: homebridge-ratgdo webUI server API.
  */
-import { STATUS_ADDRESSES_ROUTE, STATUS_WARM_ROUTE } from "./public/status-routes.mjs";
+import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE, STATUS_WARM_ROUTE } from "./public/status-routes.mjs";
 import { STATUS_EVENT, STATUS_VIEW_ROUTE, consoleLog, narrowStatusViewRequest } from "homebridge-plugin-utils";
-import { StatusFeed, narrowStatusWarmRequest } from "../dist/webui-status.js";
+import { StatusFeed, narrowStatusProbeRequest, narrowStatusWarmRequest } from "../dist/webui-status.js";
 import { featureOptionCategories, featureOptions } from "../dist/options.js";
 import { HomebridgePluginUiServer } from "@homebridge/plugin-ui-utils";
 
@@ -74,11 +74,26 @@ class PluginUiServer extends HomebridgePluginUiServer {
     // /getOptions handler the request carries no body, so it needs no narrowing; feed.addresses() is a pure synchronous read, so we return its projection directly.
     this.onRequest(STATUS_ADDRESSES_ROUTE, () => feed.addresses());
 
+    // Test one address for the Add Device card. We narrow the untrusted body in the tested module, and a body we cannot read answers the card the same shape a failed
+    // probe does rather than a null: the card is rendering this answer, and a malformed request is a fault in what was typed or sent, which is what misconfigured
+    // says. feed.probe is total by the feed's contract and always closes the connection it opened, so we return its promise directly.
+    this.onRequest(STATUS_PROBE_ROUTE, (body) => {
+
+      const request = narrowStatusProbeRequest(body);
+
+      if(request === null) {
+
+        return { kind: "error", reason: "misconfigured" };
+      }
+
+      return feed.probe(request);
+    });
+
     this.ready();
 
     // Introduce this fresh adapter process to any surviving panel: a hello carrying this process's generation lets a page that outlived a helper restart clear its stale
-    // token floors and re-elicit its warm set. Delivery is advisory - it rides the same push relay every status event does, and the frontend's visibility belt covers a
-    // hello lost to a restart's timing. Placed after ready() so the bridge channel is as established as the adapter can make it before the introduction goes out.
+    // token floors and re-elicit its warm set. Delivery is advisory - it goes out over the same push relay every status event does, and the frontend's visibility belt
+    // covers a hello lost to a restart's timing. Placed after ready() so the bridge channel is as established as the adapter can make it before the hello goes out.
     this.pushEvent(STATUS_EVENT, { generation, kind: "hello" });
   }
 }

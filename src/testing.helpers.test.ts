@@ -279,6 +279,13 @@ describe("TestEspHomeClient", () => {
     assert.notEqual(client.snapshot(), snapshot, "the cache is a copy of the seed, not the seed itself, so a delivered state never mutates the caller's map");
   });
 
+  test("deviceInfo returns null when no record is seeded", () => {
+
+    const client = new TestEspHomeClient();
+
+    assert.equal(client.deviceInfo(), null, "deviceInfo reflects the absence of a seeded record");
+  });
+
   test("disconnect and subscribeToLogs record their calls", () => {
 
     const client = new TestEspHomeClient();

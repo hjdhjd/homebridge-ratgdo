@@ -166,6 +166,16 @@ export class RatgdoAccessory implements Disposable {
     this.configureDevice();
   }
 
+  /* Public reachability accessor. Surfaces the one field of the status record the platform has to read, without opening the record itself: the accessory owns every
+   * observable piece of device state, and a second copy of this flag kept outside it would be a second answer to a question with one answer. The platform reads it
+   * where a device's advertisement and its configured address disagree, to tell a device that has genuinely moved from one that simply answers at more addresses
+   * than the one it is dialed at.
+   */
+  public get isOnline(): boolean {
+
+    return this.status.availability;
+  }
+
   // Public identity accessor. Surfaces the accessory's HAP UUID without exposing the full PlatformAccessory, so internal accessory mutations stay inside the class.
   public get uuid(): string {
 

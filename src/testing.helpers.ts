@@ -22,7 +22,7 @@
 import "homebridge-plugin-utils/polyfills";
 import type { Clock, HomebridgePluginLogging, MdnsService, Nullable } from "homebridge-plugin-utils";
 import { CoverOperation, LockState, entityId } from "esphome-client";
-import type { EntityId, EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
+import type { DeviceInfo, EntityId, EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
 import { TestClock, TestMqttClient, capturingLog, makeService } from "homebridge-plugin-utils/testing";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import { FeatureOptions } from "homebridge-plugin-utils";
@@ -538,7 +538,7 @@ export interface RecordedCommand {
 export interface TestEspHomeClientOptions {
 
   capabilities?: { encryption: { active: boolean } };
-  deviceInfo?: { esphomeVersion?: string; projectVersion?: string };
+  deviceInfo?: Nullable<DeviceInfo>;
   entities?: { objectId: string; type: string }[];
   isEncrypted?: boolean;
   onListen?: (event: string, client: TestEspHomeClient) => void;
@@ -566,7 +566,7 @@ export class TestEspHomeClient implements Disposable {
   // of one fact and a double-dispose would read the same as a single one.
   public disposeCount = 0;
   private readonly capabilitiesValue: { encryption: { active: boolean } };
-  private readonly deviceInfoValue: { esphomeVersion?: string; projectVersion?: string } | undefined;
+  private readonly deviceInfoValue: Nullable<DeviceInfo>;
   private readonly entities: { objectId: string; type: string }[];
   private readonly handlers = new Map<string, ((event: unknown) => void)[]>();
   private readonly isEncryptedValue: boolean;
@@ -580,7 +580,7 @@ export class TestEspHomeClient implements Disposable {
   public constructor(options: TestEspHomeClientOptions = {}) {
 
     this.capabilitiesValue = options.capabilities ?? { encryption: { active: false } };
-    this.deviceInfoValue = options.deviceInfo;
+    this.deviceInfoValue = options.deviceInfo ?? null;
     this.entities = options.entities ?? [];
     this.isEncryptedValue = options.isEncrypted ?? false;
     this.onListen = options.onListen;
@@ -595,7 +595,7 @@ export class TestEspHomeClient implements Disposable {
   }
 
   // Return the configured device info, mirroring the ESPHome client's deviceInfo().
-  public deviceInfo(): { projectVersion?: string } | undefined {
+  public deviceInfo(): Nullable<DeviceInfo> {
 
     return this.deviceInfoValue;
   }

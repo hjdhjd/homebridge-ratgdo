@@ -4,15 +4,17 @@
  */
 import type { API, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
 import type { Clock, HomebridgePluginLogging, MdnsDiscovery, MdnsDiscoveryEvent, MqttClient, Nullable } from "homebridge-plugin-utils";
-import { CoalescingTask, FeatureOptions, HbpuAbortError, createMqttClient, debugGatedLog, discoverServices, formatErrorMessage, mqttConnectionSettings,
-  prefixedLog, sanitizeName, superviseLoop, systemClock } from "homebridge-plugin-utils";
-import type { EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
-import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_MDNS_SERVICE_TYPE } from "./settings.ts";
-import { applyDeviceInfo, isEncryptionError, openConnection } from "./connection.ts";
-import { consolidatedFlag, featureOptionCategories, featureOptions, normalizeConfig } from "./options.ts";
+import { CoalescingTask, FeatureOptions, HbpuAbortError, WakeableWait, createMqttClient, debugGatedLog, discoverServices, formatErrorMessage,
+  mqttConnectionSettings, prefixedLog, sanitizeName, superviseLoop, systemClock } from "homebridge-plugin-utils";
+import type { EntityId, EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
+import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_MANUAL_RETRY_INTERVAL, RATGDO_MDNS_SERVICE_TYPE } from "./settings.ts";
+import { applyDeviceInfo, isEncryptionError, openConnection, openManualConnection } from "./connection.ts";
+import { consolidatedFlag, featureOptionCategories, featureOptions, manualAddressScope, normalizeConfig } from "./options.ts";
+import { governingAddress, isZonedAddress, manualAddressList, runManualAddress } from "./manual.ts";
 import { isAdvertisedAt, parseRatgdoService } from "./discovery.ts";
 import type { DiscoveredRatgdo } from "./discovery.ts";
 import { LogLevel } from "esphome-client";
+import type { ManualDialOutcome } from "./manual.ts";
 import { RatgdoAccessory } from "./device.ts";
 import type { RatgdoDevice } from "./types.ts";
 import type { RatgdoResolvedConfig } from "./options.ts";
@@ -36,11 +38,29 @@ interface RatgdoConnection {
   stack: DisposableStack;
 }
 
+/* What the one post-connect admit decision is handed, whichever source connected.
+ *
+ * @property client       - The connected client, which this decision either keeps for the device or disposes.
+ * @property device       - The device record the screening built, carrying the governing manual address when a listed address is what connected.
+ * @property discovered   - The identity the connect derived, read for the colon MAC the HomeKit UUID comes from.
+ * @property initialState - The state burst the connect captured, replayed into an accessory whose connection this one replaces.
+ */
+interface AdmitConnectionOptions {
+
+  client: EspHomeClient;
+  device: RatgdoDevice;
+  discovered: DiscoveredRatgdo;
+  initialState: ReadonlyMap<EntityId, TelemetryEvent>;
+}
+
 export class RatgdoPlatform implements DynamicPlatformPlugin {
 
   // Cached platform accessories keyed by HAP UUID. Map storage matches the rest of the platform's per-device stores (configuredDevices, connections) and gives O(1)
   // lookup at the reconcile pass's "have we seen this UUID before?" check.
   private readonly accessories: Map<string, PlatformAccessory>;
+  // One entry per MAC-and-announced-address pair already warned about, never cleared: the line is advice about a configuration only a restart changes, so saying it
+  // twice would be nagging rather than informing.
+  private readonly announcedElsewhere: Set<string>;
   public readonly api: API;
   /* The one time source every timer the plugin arms reads: each accessory's timer registry and the discovery stream's own deadlines. It is the production clock in the
    * field and a controllable one under a platform double, so a suite drives every deadline on a virtual timeline instead of serving it out in real seconds.
@@ -53,6 +73,11 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   public readonly featureOptions: FeatureOptions;
   public readonly hap: HAP;
   public readonly log: HomebridgePluginLogging;
+  // Every address the user listed, canonical and in the user's own order, read once because a configuration change reaches this plugin only through a restart. The
+  // order is what settles which of two addresses reaching one device governs it, so it is carried rather than re-derived per decision.
+  private readonly manualAddresses: readonly string[];
+  // The wakeable pause each address's loop is sitting in, keyed by that address, so the admit chokepoint can end a pause whose address has just been served.
+  private readonly manualPauses: Map<string, WakeableWait>;
   public readonly mqtt: Nullable<MqttClient>;
   // AbortController scoped to the platform's lifetime. Aborted on Homebridge shutdown so that every signal-aware resource we own (the MQTT client, any future
   // signal-driven primitive) tears itself down through one composed signal instead of per-resource imperative cleanup.
@@ -61,6 +86,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   constructor(log: Logging, config: PlatformConfig | undefined, api: API) {
 
     this.accessories = new Map();
+    this.announcedElsewhere = new Set();
     this.api = api;
     this.clock = systemClock;
 
@@ -70,6 +96,8 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.connections = new Map();
     this.discoveredDevices = new Set();
     this.featureOptions = new FeatureOptions(featureOptionCategories, featureOptions, legacy.options);
+    this.manualAddresses = manualAddressList(this.featureOptions.valueList({ option: "Device.Address" }));
+    this.manualPauses = new Map();
 
     /* Assemble the effective configuration. This is where a raw configuration property and a configured feature option meet for every setting the plugin resolves
      * for itself, so no reader downstream has to know that a setting has two possible homes. The broker URL and the topic prefix are resolved by the library at the
@@ -167,8 +195,13 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
   /* Configure and connect to Ratgdo ESPHome clients, for as long as this platform runs.
    *
-   * Two lifetimes meet here. The loop's is the platform's: it listens until the shutdown signal aborts, and `superviseLoop` swallows that unwind silently because an
-   * abort we caused is not a fault. `onError` is for the other case - a throw out of the loop body, which would be a defect in this platform rather than anything the
+   * Two ways a device reaches this plugin, and each gets a supervised loop of its own: one listening to the network for as long as the platform runs, and one per
+   * address the user listed. They are separate loops on purpose. The discovery pass is single-flight over every device the browser knows, so a listed address that
+   * is not answering would hold every later discovery event behind its connect timeout if it were dialed inside that pass. Keeping them apart costs the two paths
+   * one meeting point instead - the synchronous admit below, which is where they agree about who owns a device.
+   *
+   * Two lifetimes meet here. Each loop's is the platform's: it runs until the shutdown signal aborts, and `superviseLoop` swallows that unwind silently because an
+   * abort we caused is not a fault. `onError` is for the other case - a throw out of a loop body, which would be a defect in this platform rather than anything the
    * network did. A browser that loses its sockets is neither: it ends the stream in order, and `runDiscovery` reports that from the loop's own end.
    */
   private configureRatgdo(): void {
@@ -176,6 +209,132 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     void superviseLoop({ loop: (): Promise<void> => this.runDiscovery(),
       onError: (error: unknown): void => this.log.error("Device discovery failed and will not restart until Homebridge restarts: %s.", formatErrorMessage(error)),
       signal: this.shutdownController.signal });
+
+    for(const address of this.manualAddresses) {
+
+      /* An address naming a zone is refused here, before anything is launched for it. A zone identifier names the interface a link-local address was heard on and
+       * means nothing without that link, which is why autodiscovery drops a zoned candidate before it can be chosen at all; a typed one deserves the same answer
+       * rather than a loop that cannot succeed and retries every interval forever. This is the one site where the option's values become loops, so this is where the
+       * refusal belongs.
+       */
+      if(isZonedAddress(address)) {
+
+        this.log.warn("%s: an address with a zone identifier cannot be dialed. List the device's routable address or hostname instead.", address);
+
+        continue;
+      }
+
+      /* The pause this address's loop takes between attempts, held here so the admit chokepoint can end it early. The clock is the platform's own, matching
+       * the one time source every other timer on this platform reads.
+       */
+      const pause = new WakeableWait({ clock: this.clock, signal: this.shutdownController.signal });
+
+      this.manualPauses.set(address, pause);
+
+      // A listed address is the user departing from the default, which is the kind of thing the startup log exists to report.
+      this.log.info("Connecting directly to %s.", address);
+
+      void superviseLoop({ loop: (): Promise<void> => this.runManualAddressLoop(address, pause),
+        onError: (error: unknown): void => this.log.error("The connection to %s failed and will not restart until Homebridge restarts: %s.", address,
+          formatErrorMessage(error)),
+        signal: this.shutdownController.signal });
+    }
+  }
+
+  /* Compose one listed address's connect loop out of platform state. The loop itself is pure and lives in manual.ts; this is the only place its ports are bound to
+   * anything instance-shaped, which is what lets every rule the loop follows be driven in a test without a platform at all.
+   *
+   * @param address - The listed address this loop keeps connected.
+   * @param pause   - The wakeable pause this loop waits on between attempts.
+   *
+   * @returns The loop, running until the address is served, gives up, or the platform shuts down.
+   */
+  private runManualAddressLoop(address: string, pause: WakeableWait): Promise<void> {
+
+    return runManualAddress({
+
+      address,
+      dial: (log: HomebridgePluginLogging): Promise<ManualDialOutcome> => this.dialManualAddress(address, log),
+      isServed: (): boolean => this.isAddressServed(address),
+      log: this.log,
+      pause,
+      retrySeconds: RATGDO_MANUAL_RETRY_INTERVAL
+    });
+  }
+
+  /* Open a connection to one listed address, identify what answers there, and hand it to the admit decision.
+   *
+   * This is the manual loop's whole interaction with the platform, and it resolves what became of the address rather than what became of the connection: every way
+   * the admit can go - configured, adopted, yielded to an address listed earlier, refused because the user disabled this device - leaves the address needing no
+   * further dial, so each of them is a success as far as the loop is concerned. Only a connect that produced no usable device comes back as a failure with a reason
+   * the loop can act on.
+   *
+   * The key is read at the address rather than at the MAC, because the MAC is exactly what this connection exists to learn. The screening runs after the connect for
+   * the same reason: a device the user disabled is disabled by MAC, and nothing here knows the MAC until the device has answered.
+   *
+   * @param address - The listed address to dial.
+   * @param log     - The log this attempt speaks through, which the loop quiets when the same failure is repeating.
+   *
+   * @returns What became of the address.
+   */
+  private async dialManualAddress(address: string, log: HomebridgePluginLogging): Promise<ManualDialOutcome> {
+
+    const outcome = await openManualConnection({
+
+      host: address,
+      log: prefixedLog(log, () => address),
+      psk: this.featureOptions.value("Device.Encryption.Key", manualAddressScope(address)),
+      shutdownSignal: this.shutdownController.signal
+    });
+
+    if(!outcome.ok) {
+
+      return { ok: false, reason: outcome.reason };
+    }
+
+    /* Everything after the connect is contained, so that the two admit callers answer a fault the same way. The discovered path runs its screening and its admit
+     * inside reconcileDevice's own try/catch and simply retries on the next pass; without the same containment here, a throw would unwind into the supervising
+     * loop's onError and end THIS ADDRESS's loop for the life of the plugin, with the client it opened still connected and no longer referenced.
+     *
+     * The failure is reported as `unknown`, which the retry predicate treats as retryable - a fault in our own admit is exactly the kind of thing a later attempt may
+     * get past, and it is the same class the discovered path's retry assumes.
+     */
+    try {
+
+      const device = this.screenDevice(outcome.discovered, address);
+
+      // A device the user disabled. The connection was the only way to find out, so it is closed here rather than admitted.
+      if(!device) {
+
+        outcome.client[Symbol.dispose]();
+
+        return { ok: true };
+      }
+
+      this.admitConnection({ client: outcome.client, device, discovered: outcome.discovered, initialState: outcome.initialState });
+
+      return { ok: true };
+    } catch(error) {
+
+      this.disposeIfUnowned(outcome.discovered.strippedMac, outcome.client);
+      log.error("%s: the connection could not be completed: %s.", address, formatErrorMessage(error));
+
+      return { ok: false, reason: "unknown" };
+    }
+  }
+
+  // Whether a configured device already holds this address, which is the one condition that leaves a listed address's loop with nothing to do.
+  private isAddressServed(address: string): boolean {
+
+    for(const ratgdo of this.configuredDevices.values()) {
+
+      if(ratgdo.device.address.toLowerCase() === address) {
+
+        return true;
+      }
+    }
+
+    return false;
   }
 
   /* Listen to the network for the whole of this platform's life, and reconcile what it says.
@@ -278,19 +437,13 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
    */
   private async reconcileDevice(discovered: DiscoveredRatgdo): Promise<void> {
 
+    // The client this pass has opened but not yet handed over, held where the catch can reach it. A fault anywhere after the connect would otherwise leave it running
+    // against a real device with nothing referencing it; the disposal below is conditioned on ownership, so a fault after the handover leaves it alone.
+    let opened: Nullable<EspHomeClient> = null;
+
     try {
 
-      const { address, firmwareVersion, friendlyName, macColon, model, strippedMac, variant } = discovered;
-      const uuid = this.hap.uuid.generate(macColon);
-
-      /* Devices the user disabled are settled for this run: discoveredDevices holds MACs we have decided not to configure for a reason that will not change without
-       * user action. Keeping it separate from configuredDevices means a transient connection failure sticks the device in neither set, so a later pass retries the
-       * connect path automatically without requiring a Homebridge restart.
-       */
-      if(this.discoveredDevices.has(macColon)) {
-
-        return;
-      }
+      const uuid = this.hap.uuid.generate(discovered.macColon);
 
       // A device we have already configured is reconciled against its advertisement rather than discovered again. The accessory, its services, and its HomeKit
       // identity all stand; only the connection is replaced, and only when the address it was opened against has left the set the device advertises.
@@ -303,35 +456,11 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
         return;
       }
 
-      // See if we already know about this accessory or if it's truly new; the Map gives O(1) membership lookup.
-      let accessory = this.accessories.get(uuid);
+      // The screening runs before the connect on this path, which is what keeps a device the user disabled from ever being dialed: its advertisement carries the MAC,
+      // so the answer is already knowable here.
+      const device = this.screenDevice(discovered);
 
-      const device: RatgdoDevice = {
-
-        address: address,
-        firmwareVersion: firmwareVersion,
-        mac: strippedMac,
-        model: model,
-        name: this.resolveLogName(strippedMac) ?? friendlyName ?? "Ratgdo",
-        variant: variant
-      };
-
-      const deviceSummary = device.name + " (address: " + device.address + " mac: " + device.mac + " firmware: v" + device.firmwareVersion + " variant: " +
-        device.variant + (device.model ? (" [" + device.model + "]") : "") + ")";
-
-      this.log.info("Discovered: %s.", deviceSummary);
-
-      // Disabled by the user. Unregister any cached accessory, mark the MAC as discovered-and-skipped so subsequent mDNS broadcasts do not re-log it, and return.
-      if(!this.featureOptions.test("Device", device.mac)) {
-
-        if(accessory) {
-
-          this.log.info("%s: Removing device from HomeKit.", accessory.displayName);
-          this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
-          this.accessories.delete(uuid);
-        }
-
-        this.discoveredDevices.add(macColon);
+      if(!device) {
 
         return;
       }
@@ -352,9 +481,9 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       const connection = await openConnection({
 
         expected,
-        host: address,
+        host: device.address,
         log: connectLog,
-        psk: this.featureOptions.value("Device.Encryption.Key", strippedMac),
+        psk: this.featureOptions.value("Device.Encryption.Key", device.mac),
         shutdownSignal: this.shutdownController.signal
       });
 
@@ -363,41 +492,260 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
         return;
       }
 
-      const { client, initialState } = connection;
+      opened = connection.client;
 
-      // openConnection's fast paths hand back a connected client without consulting the shutdown signal, so a shutdown landing during the handshake can resolve here
-      // after the shutdown handler has already torn every connection down. Re-checking after the connect resolves is what keeps a client from outliving the platform.
-      if(this.shutdownController.signal.aborted) {
-
-        client.disconnect();
-
-        return;
-      }
-
-      applyDeviceInfo(device, client);
-
-      // Register the PlatformAccessory with Homebridge if it is new. Cached accessories (restored on startup) reuse their persisted services via the acquireService
-      // path inside the RatgdoAccessory constructor's configureDevice chain.
-      if(!accessory) {
-
-        accessory = new this.api.platformAccessory(sanitizeName(device.name), uuid);
-        this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
-        this.accessories.set(uuid, accessory);
-      }
-
-      this.log.info("Configuring: %s.", deviceSummary);
-
-      // Construct the accessory with the real telemetry data we just captured. configureDevice walks the configureXxx chain inside the constructor; each method writes
-      // the corresponding HAP characteristic from the populated `status`, so HomeKit sees the device's actual current state from the first read.
-      const ratgdo = new RatgdoAccessory(this, accessory, device, initialState);
-
-      this.bindConnection(ratgdo, client);
-      this.configuredDevices.set(uuid, ratgdo);
-      this.api.updatePlatformAccessories([accessory]);
+      this.admitConnection({ client: connection.client, device, discovered, initialState: connection.initialState });
     } catch(error) {
+
+      /* The same ownership rule the address dial's containment follows, so a fault on either admit path answers the same way. A throw before the handover leaves a
+       * client nothing holds, and it is closed; a throw after it would otherwise close the device's own live connection, and it is left alone.
+       */
+      if(opened) {
+
+        this.disposeIfUnowned(discovered.strippedMac, opened);
+      }
 
       this.log.error("Discovery error: %s.", formatErrorMessage(error));
     }
+  }
+
+  /* Dispose an in-flight client after a fault, IF AND ONLY IF nothing has taken ownership of it.
+   *
+   * Both admit callers need this, and the two sides of the handover need opposite answers. The admit chokepoint hands a client to `bindConnection`, which puts it on
+   * a disposable stack and writes the connection record; from that write on the client is the device's, torn down by the accessory's own lifecycle. Statements still
+   * run afterwards, though, so a throw can land on either side of that write.
+   *
+   * Disposing unconditionally closes a connection the device is now using and leaves the stale record behind it: the next dial of that address finds the MAC
+   * configured, takes the equal-address arm, disposes its own client, and the device sits disconnected for the rest of the run. Disposing never leaks a client that
+   * nothing holds - connected to a real device, counting against its few API slots, unreachable by shutdown.
+   *
+   * The test is ownership itself rather than a proxy for it: does this MAC's connection record hold THIS client. Anything else - no record at all, or a record
+   * holding some other client - means this one was never adopted, and closing it is what keeps it from being lost.
+   *
+   * @param mac    - The device whose connection record answers the ownership question.
+   * @param client - The client the faulted call was holding.
+   */
+  private disposeIfUnowned(mac: string, client: EspHomeClient): void {
+
+    if(this.connections.get(mac)?.client === client) {
+
+      return;
+    }
+
+    client[Symbol.dispose]();
+  }
+
+  /* Decide whether a device may be configured at all, and announce it, at the earliest point its caller knows the MAC.
+   *
+   * Both sources ask this, and each asks at the earliest moment it can. Discovery asks before it dials, because an advertisement already carries the MAC and a
+   * device the user disabled should never be connected to. An address dial asks after it connects, because nothing knows which device answers at an address until
+   * one has. That is the whole difference between the two paths here, and it is a difference in timing rather than in policy.
+   *
+   * It answers with the device record rather than a bare yes, because building that record IS most of the decision - the resolved log name, the address, the
+   * governing manual address - and building it twice would let the announcement and the accessory disagree about the same device.
+   *
+   * @param discovered    - The identity derived from whichever wire record named this device.
+   * @param manualAddress - The listed address that is dialing, when a listed address is what found this device.
+   *
+   * @returns The record to configure this device from, or null when the device is one we are not configuring.
+   */
+  private screenDevice(discovered: DiscoveredRatgdo, manualAddress?: string): Nullable<RatgdoDevice> {
+
+    const { address, firmwareVersion, friendlyName, macColon, model, strippedMac, variant } = discovered;
+
+    /* Devices the user disabled are settled for this run: discoveredDevices holds MACs we have decided not to configure for a reason that will not change without
+     * user action. Keeping it separate from configuredDevices means a transient connection failure sticks the device in neither set, so a later pass retries the
+     * connect path automatically without requiring a Homebridge restart. A MAC already settled here is answered without announcing the device a second time.
+     */
+    if(this.discoveredDevices.has(macColon)) {
+
+      return null;
+    }
+
+    const device: RatgdoDevice = {
+
+      address: address,
+      firmwareVersion: firmwareVersion,
+      mac: strippedMac,
+      manualAddress: manualAddress,
+      model: model,
+      name: this.resolveLogName(strippedMac) ?? friendlyName ?? "Ratgdo",
+      variant: variant
+    };
+
+    /* Announce a device the first time this run finds it, and only then. Two callers reach this from different places in their own sequences: the discovered path
+     * screens BEFORE it dials, having already found the MAC unconfigured, while the manual path can only screen AFTER its connect, because an address says nothing
+     * about which device is at it - so a listed address that reaches a device discovery already configured would otherwise announce it a second time. And a connect
+     * that resolves during shutdown has nobody to tell. Neither case is a device to announce, so neither announces.
+     */
+    if(!this.configuredDevices.has(this.hap.uuid.generate(macColon)) && !this.shutdownController.signal.aborted) {
+
+      this.log.info("Discovered: %s.", this.describeDevice(device));
+    }
+
+    // Disabled by the user. Unregister any cached accessory, mark the MAC as discovered-and-skipped so subsequent mDNS broadcasts do not re-log it, and refuse.
+    if(!this.featureOptions.test("Device", device.mac)) {
+
+      const uuid = this.hap.uuid.generate(macColon);
+      const accessory = this.accessories.get(uuid);
+
+      if(accessory) {
+
+        this.log.info("%s: Removing device from HomeKit.", accessory.displayName);
+        this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+        this.accessories.delete(uuid);
+      }
+
+      this.discoveredDevices.add(macColon);
+
+      return null;
+    }
+
+    return device;
+  }
+
+  // The one-line description of a device the discovery and configuration announcements share, so an operator reading either sees the same fields in the same shape.
+  private describeDevice(device: RatgdoDevice): string {
+
+    return device.name + " (address: " + device.address + " mac: " + device.mac + " firmware: v" + device.firmwareVersion + " variant: " + device.variant +
+      (device.model ? (" [" + device.model + "]") : "") + ")";
+  }
+
+  /* Decide what becomes of a connection that has just opened and identified its device. The one chokepoint both sources meet at, and SYNCHRONOUS from end to end.
+   *
+   * That synchrony is the whole design. Two connects can be in flight to one device at once - a listed address dialing while a discovery pass dials the same MAC, or
+   * two listed addresses that turn out to reach one device - and each of them arrives here having already awaited. Deciding ownership without awaiting again means
+   * the second arrival reads a map the first one has already written, so no path can construct a device twice and no client can be both kept and forgotten. Every
+   * path either keeps the client or disposes it.
+   *
+   * @param options - See AdmitConnectionOptions.
+   */
+  private admitConnection({ client, device, discovered, initialState }: AdmitConnectionOptions): void {
+
+    // openConnection's fast paths hand back a connected client without consulting the shutdown signal, so a shutdown landing during the handshake can resolve here
+    // after the shutdown handler has already torn every connection down. Re-checking after the connect resolves is what keeps a client from outliving the platform.
+    if(this.shutdownController.signal.aborted) {
+
+      client.disconnect();
+
+      return;
+    }
+
+    const uuid = this.hap.uuid.generate(discovered.macColon);
+    const configured = this.configuredDevices.get(uuid);
+    const settled = configured ?? this.configureDevice(uuid, { client, device, discovered, initialState });
+
+    if(configured) {
+
+      if(device.manualAddress === undefined) {
+
+        /* Another connect configured this MAC while this one was in flight - the listed address's, or a second advertisement of the same MAC inside one pass, since
+         * discovery keys its snapshot by service name and one device can appear under two. The accessory that exists is the one that stands.
+         */
+        client[Symbol.dispose]();
+      } else {
+
+        this.admitManualAddress(configured, device.manualAddress, { client, device, discovered, initialState });
+      }
+    }
+
+    /* End the pause of whichever listed address this device now answers at. Without this, a loop that failed a moment before discovery configured its device would
+     * sit out its whole retry interval before noticing it has nothing left to do. The address a device was discovered at is not canonical, so it is lower-cased here
+     * against a map whose keys already are.
+     */
+    this.manualPauses.get(settled.device.address.toLowerCase())?.wake("configured");
+  }
+
+  /* Build the accessory for a device nothing has configured yet, and take ownership of the connection that found it.
+   *
+   * @param uuid    - The HomeKit UUID derived from the device's colon MAC.
+   * @param options - See AdmitConnectionOptions.
+   *
+   * @returns The constructed accessory.
+   */
+  private configureDevice(uuid: string, { client, device, initialState }: AdmitConnectionOptions): RatgdoAccessory {
+
+    // The summary is composed before the device info refresh below, so the two announcements about this device describe it identically.
+    const summary = this.describeDevice(device);
+
+    applyDeviceInfo(device, client);
+
+    // Register the PlatformAccessory with Homebridge if it is new. Cached accessories (restored on startup) reuse their persisted services via the acquireService
+    // path inside the RatgdoAccessory constructor's configureDevice chain. The Map gives O(1) membership lookup.
+    let accessory = this.accessories.get(uuid);
+
+    if(!accessory) {
+
+      accessory = new this.api.platformAccessory(sanitizeName(device.name), uuid);
+      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+      this.accessories.set(uuid, accessory);
+    }
+
+    this.log.info("Configuring: %s.", summary);
+
+    // Construct the accessory with the real telemetry data we just captured. configureDevice walks the configureXxx chain inside the constructor; each method writes
+    // the corresponding HAP characteristic from the populated `status`, so HomeKit sees the device's actual current state from the first read.
+    const ratgdo = new RatgdoAccessory(this, accessory, device, initialState);
+
+    this.bindConnection(ratgdo, client);
+    this.configuredDevices.set(uuid, ratgdo);
+    this.api.updatePlatformAccessories([accessory]);
+
+    return ratgdo;
+  }
+
+  /* Settle a listed address against a device something else already configured.
+   *
+   * Three outcomes, decided by which address governs. The governing address is the one listed first, never the one that happened to connect first, because two loops
+   * racing over a network finish in a different order every run and the address a connection is opened at is the address its client reconnects to forever after.
+   *
+   * An address that yields is not a standby: nothing dials it again this run, even if the governing address later fails. The device's own client owns its reconnects
+   * at that point, and a second address quietly taking over would put the device back at an address the user ranked lower without telling anyone.
+   *
+   * @param ratgdo  - The accessory this device already has.
+   * @param address - The listed address that just connected.
+   * @param options - See AdmitConnectionOptions.
+   */
+  private admitManualAddress(ratgdo: RatgdoAccessory, address: string, { client, initialState }: AdmitConnectionOptions): void {
+
+    const previous = ratgdo.device.manualAddress;
+    const governing = governingAddress(previous, address, this.manualAddresses);
+
+    if(governing !== address) {
+
+      client[Symbol.dispose]();
+      ratgdo.log.warn("%s and %s reach the same device. Using %s, which is listed first.", address, governing, governing);
+
+      return;
+    }
+
+    /* The same news, told from the other side of the race. Two listed addresses reaching one opener is worth saying once however the two connects happen to land: when
+     * the later-listed address answers second it yields above and says it there, and when it answered FIRST this address displaces it here - and without this line the
+     * user would be told nothing at all about a duplicate list entry, purely because of which connect the network settled sooner.
+     *
+     * Only when a DIFFERENT listed address governed this device before. A device discovery alone had configured carries no previous address, and that is the ordinary
+     * first connect rather than two entries naming one opener.
+     */
+    if((previous !== undefined) && (previous !== address)) {
+
+      ratgdo.log.warn("%s and %s reach the same device. Using %s, which is listed first.", previous, address, address);
+    }
+
+    ratgdo.device.manualAddress = address;
+
+    // The device is already where this address wanted it. Equal address text is a fast path and nothing more, so the connection this dial opened is surplus.
+    if(ratgdo.device.address.toLowerCase() === address) {
+
+      client[Symbol.dispose]();
+
+      return;
+    }
+
+    // Discovery configured this device at another address first. The connection this dial already opened becomes the device's connection - dialing a second time
+    // would cost the device another of its few API slots to reach an address we are already connected to.
+    ratgdo.log.info("Address set to %s by the Device.Address option. Reconnecting.", address);
+    this.releaseConnection(ratgdo);
+    this.installConnection(ratgdo, address, client, initialState);
   }
 
   /* Bind a connected client to an accessory: own the client, attach the listeners it drives, and run the post-connect setup.
@@ -451,6 +799,19 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
    */
   private async reconnectOnAddressChange(ratgdo: RatgdoAccessory, discovered: DiscoveredRatgdo): Promise<void> {
 
+    const { manualAddress } = ratgdo.device;
+
+    /* A device a listed address governs is dialed at that address and at no other, which is what the user asked for by listing it. Discovery still hears this device
+     * and still reconciles it, so this branch sits ahead of everything below: the membership test underneath would otherwise read an advertisement that does not
+     * carry the listed address as a device that has moved, and would redial it straight off the address the user chose.
+     */
+    if(manualAddress !== undefined) {
+
+      this.warnAnnouncedElsewhere(ratgdo, manualAddress, discovered);
+
+      return;
+    }
+
     // A live connection at an address the device still advertises needs nothing, whether or not that address is the one the pick now favors: a re-advertisement
     // carrying only a changed TXT record, a changed port, or a changed address list lands here, and the identity fields it might have moved are refreshed through
     // markOnline on the client's own next connect.
@@ -469,9 +830,11 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       ratgdo.log.info("Reconnecting at %s.", discovered.address);
     }
 
-    ratgdo.updateState({ id: "availability", state: "offline" });
-    this.connections.get(ratgdo.device.mac)?.stack.dispose();
-    this.connections.delete(ratgdo.device.mac);
+    /* The existing connection goes before the new one is dialed, rather than after it lands. A device that moved is not answering at the address its client keeps
+     * retrying, and leaving that client running through the dial would have two clients racing for one device's API slots. The cost is that a failed dial leaves the
+     * device offline with no connection, which is the same next-refresh-retries rule a failed first connect follows.
+     */
+    this.releaseConnection(ratgdo);
 
     const outcome = await openConnection({
 
@@ -496,18 +859,98 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       return;
     }
 
-    ratgdo.device.address = discovered.address;
+    /* The governance re-check, and the reason this method needs one where the admit chokepoint does not. Every other connect decides what it owns synchronously after
+     * its own await; this one read the governance BEFORE its await and would write after it. A manual dial that adopted this device inside that window has already
+     * installed its connection and set the governing address, and installing over it would replace the connection record without disposing what it replaced - leaving
+     * the manual client connected, unreferenced, and beyond the reach of shutdown, with the device sitting at the discovered address the user had overruled.
+     *
+     * Two things are re-read here rather than trusted from before the await: whether a listed address now governs this device, and whether a connection for this MAC
+     * exists that this call did not install - the same question asked of the store rather than of the device. Either one means this dial lost the race, so its client
+     * is disposed and nothing is written. Nothing awaits between this check and installConnection, so what is true here is still true at that write.
+     */
+    if((ratgdo.device.manualAddress !== undefined) || this.connections.has(ratgdo.device.mac)) {
 
-    this.bindConnection(ratgdo, outcome.client);
+      outcome.client[Symbol.dispose]();
+
+      return;
+    }
+
+    this.installConnection(ratgdo, discovered.address, outcome.client, outcome.initialState);
+  }
+
+  /* Tell the operator that a device set to a listed address is announcing itself somewhere else, once per address it announces.
+   *
+   * Only worth saying when the device is actually in trouble. A device that is connected and working at its listed address while advertising others is the ordinary
+   * case - a dual-stack device announces an IPv6 address the user did not list, and nothing is wrong. A device that is OFFLINE while announcing an address other
+   * than the one it is set to has usually moved, and the listed address is now the thing keeping it unreachable, which the user is the only one who can fix.
+   *
+   * @param ratgdo        - The governed accessory.
+   * @param manualAddress - The listed address governing it.
+   * @param discovered    - The identity derived from the advertisement that triggered this pass.
+   */
+  private warnAnnouncedElsewhere(ratgdo: RatgdoAccessory, manualAddress: string, discovered: DiscoveredRatgdo): void {
+
+    const announced = discovered.address.toLowerCase();
+
+    if((announced === manualAddress) || ratgdo.isOnline) {
+
+      return;
+    }
+
+    const said = ratgdo.device.mac + "@" + announced;
+
+    if(this.announcedElsewhere.has(said)) {
+
+      return;
+    }
+
+    this.announcedElsewhere.add(said);
+    ratgdo.log.warn("This device is set to %s by the Device.Address option, but it is announcing itself at %s. Update the option if the device has moved.",
+      manualAddress, discovered.address);
+  }
+
+  /* Give up a device's connection: announce it offline and tear the connection record down. Both halves belong together - a connection record this platform no
+   * longer holds means a device HomeKit should be showing as unreachable - so neither caller decides them separately.
+   *
+   * @param ratgdo - The accessory whose connection is released.
+   */
+  private releaseConnection(ratgdo: RatgdoAccessory): void {
+
+    ratgdo.updateState({ id: "availability", state: "offline" });
+    this.connections.get(ratgdo.device.mac)?.stack.dispose();
+    this.connections.delete(ratgdo.device.mac);
+  }
+
+  /* Put a configured device onto a connection that is already open at a new address: record the address, take ownership of the client, and hand the accessory the
+   * state that connection captured on its way up.
+   *
+   * `device.address` is written only once the new address has connected, so the field always names the address the live connection was actually opened against.
+   *
+   * @param ratgdo       - The accessory being moved.
+   * @param address      - The address the connection was opened at.
+   * @param client       - The connected client.
+   * @param initialState - The state burst that connection captured.
+   */
+  private installConnection(ratgdo: RatgdoAccessory, address: string, client: EspHomeClient, initialState: ReadonlyMap<EntityId, TelemetryEvent>): void {
+
+    this.bindConnection(ratgdo, client);
+
+    /* The address is written only once the binding has returned. `bindConnection` runs the post-connect chain, and a fault anywhere in it - the listener
+     * registration, the online announcement, the battery-log subscription - leaves this call without a connection. Writing the address first would leave the device
+     * claiming an address nothing is connected at, and the listed-address loop reads exactly that field to decide it has nothing left to do: the device would be
+     * passed over on every later attempt and sit disconnected for the run. Nothing inside `bindConnection` or the `onConnect` chain reads `device.address`, so
+     * moving the write after it costs those callers nothing.
+     */
+    ratgdo.device.address = address;
 
     /* Replay the captured initial state into the accessory through the same translation the live listener uses. A fresh client's initial-state burst landed inside
-     * openConnection before any listener existed, so the accessory learns it from the snapshot here - exactly as it learns the full-state burst the device sends
+     * the connect before any listener existed, so the accessory learns it from the snapshot here - exactly as it learns the full-state burst the device sends
      * after every ordinary reconnect through the retained telemetry listener. This runs after bindConnection so markOnline has already run and the replay carries
      * the post-reconnect truth.
      */
     const telemetry = this.buildTelemetryListener(ratgdo);
 
-    for(const event of outcome.initialState.values()) {
+    for(const event of initialState.values()) {
 
       telemetry(event);
     }

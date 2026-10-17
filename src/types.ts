@@ -3,14 +3,20 @@
  * types.ts: Interface and type definitions for Ratgdo.
  */
 
-// Ratgdo device settings. The mac, name, and variant are written once at discovery time and never reassigned, so they carry readonly. Three fields stay mutable
-// because the platform rewrites them after construction: address, once a reconnect to an advertised change has actually connected, and firmwareVersion and model,
-// from the connected client's device info on every connect.
+/* Ratgdo device settings. The mac, name, and variant are written once at discovery time and never reassigned, so they carry readonly. The rest stay mutable because
+ * the platform rewrites them after construction: address, once a reconnect to a new address has actually connected; firmwareVersion and model, from the connected
+ * client's device info on every connect; and manualAddress, once a listed address has won the right to govern this device's dial.
+ *
+ * manualAddress is where the answer to "is this device governed by an address the user listed, and by which one?" lives, rather than in a map beside the device. Two
+ * listed addresses can reach one device, so the question has an answer per device and not per address, and reading it off the device is what keeps the two possible
+ * answers from disagreeing. It is absent for a device autodiscovery alone reached.
+ */
 export interface RatgdoDevice {
 
   address: string;
   firmwareVersion: string;
   readonly mac: string;
+  manualAddress?: string;
   model?: string;
   readonly name: string;
   readonly variant: RatgdoVariant;
@@ -64,7 +70,7 @@ export const RATGDO_VARIANT_LABELS = {
 } as const satisfies Record<RatgdoVariant, string>;
 
 /* Matched entry from RATGDO_AUTODISCOVERY_PROJECTS. The discovery boundary returns one of these whenever a TXT-advertised project_name matches a known pattern, so
- * the variant classification rides through the same .find() call that gates the device into the configuration path.
+ * the variant classification comes back from the same .find() call that gates the device into the configuration path.
  */
 export interface MdnsProject {
 
