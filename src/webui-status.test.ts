@@ -363,7 +363,7 @@ describe("StatusFeed pool connect", () => {
     const snapshot = pushes.find((event) => event.kind === "snapshot");
 
     assert.ok(snapshot?.kind === "snapshot", "the connect completes through a snapshot push");
-    assert.equal(snapshot.encrypted, true, "the snapshot carries encrypted true, threaded from the client's isEncrypted getter");
+    assert.equal(snapshot.encrypted, true, "the snapshot carries encrypted true, the transport the session recorded from its client");
   });
 });
 
@@ -1196,7 +1196,24 @@ describe("StatusFeed availability", () => {
     assert.deepEqual(availability.map((event) => event.online), [ false, true ],
       "an outage pushes availability online false at lost and true at recovered, values and order both, and the session boundaries push nothing");
     assert.deepEqual(availability.map((event) => event.encrypted), [ false, true ],
-      "the lost verdict carries encrypted false and the recovered verdict threads the client's isEncrypted true");
+      "the lost verdict carries encrypted false and the recovered verdict carries the encryption the session's connect negotiated");
+  });
+
+  test("states on a recovered push the transport the session's connect negotiated, though the client's getter reads false", async () => {
+
+    // The client's getter reads false throughout, while the session's connect says it negotiated encryption, so only a push that reads the session's record of the
+    // transport carries the lock.
+    const client = makeClient({ isEncrypted: false, snapshot: restingCache() });
+    const { pushes } = await connectedFeed(client);
+
+    client.emit("lifecycle", { cause: new ConnectionError("The reconnect attempt failed.", "CONNECT_FAILED"), kind: "lost" });
+    client.emit("lifecycle", { encrypted: true, kind: "connect" });
+    client.emit("lifecycle", { kind: "recovered" });
+
+    const availability = pushes.filter((event) => event.kind === "availability");
+
+    assert.deepEqual(availability.map((event) => [ event.online, event.encrypted ]), [ [ false, false ], [ true, true ] ],
+      "the recovered push states the opener online with the encryption its session negotiated, rather than the getter's false");
   });
 
   test("pushes nothing for a drop the client heals on its first attempt", async () => {
@@ -1275,6 +1292,27 @@ describe("StatusFeed availability", () => {
 
     assert.equal(openClient.calls.length, 2, "the dropped plaintext session reconnects on the changed key rather than adopting it in place");
     assert.equal(offeredKey(callsForHost(openClient, ADDR)[1]), "k2", "the reconnect offers the changed key");
+  });
+
+  test("keeps an encrypted device's lock on a reselect between sessions, and takes the lock each new session negotiates", async () => {
+
+    // The client's getter reads its live session the way the real client's does, so it reads false while the client sits between sessions.
+    const client = makeClient({ snapshot: restingCache() });
+
+    Object.defineProperty(client, "isEncrypted", { get: (): boolean => client.live });
+
+    const { feed, pushes } = await connectedFeed(client);
+    const snapshots = (): boolean[] => pushes.filter((event) => event.kind === "snapshot").map((event) => event.encrypted);
+
+    client.emit("lifecycle", { cause: undefined, kind: "disconnect" });
+    feed.view(MAC);
+
+    assert.deepEqual(snapshots(), [ true, true ], "a reselect inside the patience window keeps the lock the session negotiated, though the client's getter reads false");
+
+    client.emit("lifecycle", { encrypted: false, kind: "connect" });
+    feed.view(MAC);
+
+    assert.equal(snapshots().at(-1), false, "and a new session's negotiated transport is what the next snapshot shows");
   });
 
   test("refuses a later session whose device is another opener, pushes the identity verdict, and dials the device again at the next warm", async () => {

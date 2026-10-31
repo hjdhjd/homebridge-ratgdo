@@ -12,7 +12,7 @@
 import type { DeviceListResult, FakeCatalog, FakeConfigEntry, FakeDevice, FakeElement, FakeValueControl, RecordedLog } from "./webui-double.helpers.ts";
 import { LIBRARY_UI_DIR, loadUi } from "./webui.helpers.ts";
 import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE, STATUS_WARM_ROUTE, defaultConfig, defaultDevices, fire, isValueControl, webUi } from "./webui-double.helpers.ts";
-import { describe, test } from "node:test";
+import { beforeEach, describe, test } from "node:test";
 import { expectAt, settle } from "homebridge-plugin-utils/testing";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import type { CommitConfigResult } from "homebridge-plugin-utils";
@@ -54,6 +54,19 @@ const releaseDebounce = async (timers: { tick: (milliseconds: number) => void })
   await settle();
 };
 
+/* Every row runs on the mocked clock, which this hook enables before each one. The page arms its warm debounce through the global setTimeout, and a page instance
+ * outlives its row: the harness's dispose restores the globals the load installed and cancels nothing the page scheduled. A debounce armed on the real clock would
+ * fire after its row had ended, and the stale page's send would land on whichever row's host stood then, as a warm that row never caused. The mock belongs to the
+ * row's own context, so each row's ticks advance only its own clock, and node:test resets the mock as the row ends, which drops anything the page left armed.
+ */
+beforeEach((t): void => {
+
+  // The runner hands a before-each hook the context of the test about to run, which carries that test's mock tracker. The hook's type admits a suite's context too.
+  assert.ok("mock" in t, "A before-each hook runs for a test, whose context carries its own mock tracker.");
+
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+});
+
 describe("the ratgdo settings page", () => {
 
   describe("the first warm", () => {
@@ -77,9 +90,7 @@ describe("the ratgdo settings page", () => {
         "the panel's handle already existed when the announcement sent, so the first warm is watched rather than unobserved");
     });
 
-    test("a launch that never establishes sends nothing, and the relaunch that establishes warms at once", async (t) => {
-
-      t.mock.timers.enable({ apis: ["setTimeout"] });
+    test("a launch that never establishes sends nothing, and the relaunch that establishes warms at once", async () => {
 
       using page = await loadUi({ failNextShow: true });
 
@@ -122,8 +133,6 @@ describe("the ratgdo settings page", () => {
 
     test("a device-list read that fails sends nothing and reports the diagnostic, and the next trigger sends once it resolves", async (t) => {
 
-      t.mock.timers.enable({ apis: ["setTimeout"] });
-
       using page = await loadUi();
 
       const before = warmSends(page).length;
@@ -156,8 +165,6 @@ describe("the ratgdo settings page", () => {
 
     test("coalesces a burst of option edits into one send at the end of the window", async (t) => {
 
-      t.mock.timers.enable({ apis: ["setTimeout"] });
-
       using page = await loadUi();
 
       const before = warmSends(page).length;
@@ -182,13 +189,29 @@ describe("the ratgdo settings page", () => {
       assert.deepEqual(sends.at(-1), { devices: [ MAC, MAC_TWO ], options: [keyEntry(MAC, "second")] },
         "the one send carries the settled value, not the half-typed one");
     });
+
+    test("a rolled-back options edit recomputes the warm set, so the live panel follows the configuration the page restored", async (t) => {
+
+      using page = await loadUi();
+
+      const before = warmSends(page).length;
+
+      // A staged write that failed rolls the options back, and the framework announces the rollback rather than re-firing the edit it undoes.
+      setOptions(page, keyEntry(MAC, "restored"));
+      page.double.params.onOptionsRolledBack?.();
+
+      await releaseDebounce(t.mock.timers);
+
+      const sends = warmSends(page);
+
+      assert.equal(sends.length, before + 1, "the rollback sends one warm through the same debounce an edit uses");
+      assert.deepEqual(sends.at(-1), { devices: [ MAC, MAC_TWO ], options: [keyEntry(MAC, "restored")] }, "and it carries the restored configuration");
+    });
   });
 
   describe("send suppression", () => {
 
     test("re-sends only when the configuration would change", async (t) => {
-
-      t.mock.timers.enable({ apis: ["setTimeout"] });
 
       using page = await loadUi();
 
@@ -215,8 +238,6 @@ describe("the ratgdo settings page", () => {
        * resolves exactly what the plugin resolves, so an edit to an option it never reads moves no connection there. A device list handed back in another order is
        * the same list, and suppresses.
        */
-      t.mock.timers.enable({ apis: ["setTimeout"] });
-
       using page = await loadUi({ config: configWith(keyEntry(MAC, KEY)) });
 
       assert.deepEqual(warmSends(page).at(-1), { devices: [ MAC, MAC_TWO ], options: [keyEntry(MAC, KEY)] },
@@ -278,8 +299,6 @@ describe("the ratgdo settings page", () => {
 
     test("re-sends when an address is added and stays suppressed when the list has not moved", async (t) => {
 
-      t.mock.timers.enable({ apis: ["setTimeout"] });
-
       using page = await loadUi();
 
       const before = warmSends(page).length;
@@ -310,8 +329,6 @@ describe("the ratgdo settings page", () => {
 
     test("the visibility belt re-sends an unchanged set on a return to the foreground", async (t) => {
 
-      t.mock.timers.enable({ apis: ["setTimeout"] });
-
       using page = await loadUi();
 
       const before = warmSends(page).length;
@@ -325,8 +342,6 @@ describe("the ratgdo settings page", () => {
     });
 
     test("the visibility belt stays quiet while the page is hidden", async (t) => {
-
-      t.mock.timers.enable({ apis: ["setTimeout"] });
 
       using page = await loadUi();
 
@@ -342,8 +357,6 @@ describe("the ratgdo settings page", () => {
 
     test("the resume trigger re-sends an unchanged set after a page froze and woke", async (t) => {
 
-      t.mock.timers.enable({ apis: ["setTimeout"] });
-
       using page = await loadUi();
 
       const before = warmSends(page).length;
@@ -357,8 +370,6 @@ describe("the ratgdo settings page", () => {
 
     test("a server hello re-sends an unchanged set after a helper restart", async (t) => {
 
-      t.mock.timers.enable({ apis: ["setTimeout"] });
-
       using page = await loadUi();
 
       const before = warmSends(page).length;
@@ -371,8 +382,6 @@ describe("the ratgdo settings page", () => {
     });
 
     test("the schema-form belt recomputes without forcing, so an unchanged set stays suppressed", async (t) => {
-
-      t.mock.timers.enable({ apis: ["setTimeout"] });
 
       using page = await loadUi();
 
@@ -1115,8 +1124,6 @@ describe("the ratgdo settings page's Add Device card", () => {
 
     test("confirms a staged write with a warning toast, gives the content area back, and schedules the warm", async (t) => {
 
-      t.mock.timers.enable({ apis: ["setTimeout"] });
-
       using page = await loadUi({ probe: async () => ANSWERED });
 
       const card = openCard(page);
@@ -1411,8 +1418,6 @@ describe("the ratgdo settings page's Add Device card", () => {
        * confirmation the closed card cannot show goes to the host's toast. The debounce is released before the warms are counted, because the write moved the
        * address list, so a warm the page failed to schedule shows as a missing send.
        */
-      t.mock.timers.enable({ apis: ["setTimeout"] });
-
       const answer = Promise.withResolvers<unknown>();
 
       using page = await loadUi({ probe: () => answer.promise });
@@ -1447,8 +1452,6 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       // A navigation away ends the page cycle, which the harness models as the next show cycle tearing the standing one down. The page's configuration session
       // outlives the cycle, so a save pressed before the cycle ended writes and reports exactly as a cancelled card's save does.
-      t.mock.timers.enable({ apis: ["setTimeout"] });
-
       const answer = Promise.withResolvers<unknown>();
 
       using page = await loadUi({ probe: () => answer.promise });
@@ -1565,8 +1568,6 @@ describe("the ratgdo settings page's Add Device card", () => {
        * the reopened card stays held. The reopen empties the key field without an edit, which is what shows the commit carrying the key that was tested rather than
        * a fresh read of the field.
        */
-      t.mock.timers.enable({ apis: ["setTimeout"] });
-
       const answer = Promise.withResolvers<unknown>();
 
       using page = await loadUi({ probe: () => answer.promise });
@@ -1653,8 +1654,6 @@ describe("the ratgdo settings page's Add Device card", () => {
        * because an implementation that let the close suppress what follows the write would drop both. The debounce is released before the warms are counted, because
        * the write moved the address list, so a warm the page failed to schedule shows as a missing send.
        */
-      t.mock.timers.enable({ apis: ["setTimeout"] });
-
       const held = Promise.withResolvers<boolean>();
 
       using page = await loadUi({ probe: async () => ANSWERED });
@@ -1700,8 +1699,6 @@ describe("the ratgdo settings page's Add Device card", () => {
        * the card it was pressed on, and schedules the warm. An implementation that let the save's retirement decide whether to report after the write would drop all
        * three, which is the observation that tells the two apart - a close alone never retires a save, so only an edit or a newer action landing across the write can.
        */
-      t.mock.timers.enable({ apis: ["setTimeout"] });
-
       const held = Promise.withResolvers<boolean>();
       let started = false;
 

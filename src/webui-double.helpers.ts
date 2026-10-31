@@ -95,6 +95,7 @@ export interface FeatureOptionsParams {
   getDevices?: (controller: unknown, args: { config: unknown }) => Promise<DeviceListResult>;
   onLoaded?: () => void;
   onOptionsEdited?: () => void;
+  onOptionsRolledBack?: () => void;
   sidebar?: { deviceLabel?: string; groupOrder?: (a: string, b: string) => number };
   statusPanel?: StatusPanelParams;
 

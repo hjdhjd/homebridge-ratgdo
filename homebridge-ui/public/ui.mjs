@@ -787,6 +787,7 @@ const featureOptionsParams = {
     void recomputeWarmSet();
   },
   onOptionsEdited: scheduleRecompute,
+  onOptionsRolledBack: scheduleRecompute,
   sidebar: {
 
     deviceLabel: "Ratgdo Devices",
