@@ -2,556 +2,60 @@
  *
  * testing.helpers.ts: Cross-cutting test helpers shared across every unit test in homebridge-ratgdo.
  *
- * The plugin's production code reads and writes through Homebridge's HAP shapes (Service, Characteristic, Accessory) on every per-accessory configure path, and it
- * drives the device over the esphome-client API. We never want a unit test to drag in a live HAP runtime or a real ESPHome connection, so this file owns the
- * following families of doubles:
+ * The plugin's production code reads and writes through Homebridge's HAP shapes (Service, Characteristic, PlatformAccessory) on every per-accessory configure path,
+ * and it drives the device over the esphome-client API. A unit test meets the HAP the plugin meets at runtime and never a real ESPHome connection, so this file owns
+ * the harness each of those surfaces needs:
  *
- *   - A hand-built HAP test-double (the Service / Characteristic marker namespaces, TestService, TestCharacteristic, TestAccessory) that mirrors only the surface the
- *     plugin actually touches. homebridge-plugin-utils' REAL acquireService / validService run unmodified against these doubles, so a REAL RatgdoAccessory is
- *     constructed end to end with no live HAP - the construction-boundary casts are confined to buildRatgdoAccessory.
- *   - A platform double (makeTestPlatform) carrying a REAL FeatureOptions engine (so userOptions thread through the production feature-option logic), a capturing log,
- *     an optional recording MQTT double, and a fake esphome-client.
- *   - A fake esphome-client (TestEspHomeClient) that records command dispatch and lets a test drive lifecycle / telemetry / log subscriptions, plus typed telemetry
- *     factories that build the initial-state snapshot the accessory is born from.
+ *   - The Homebridge runtime, loaded once from this repository's tree through the homebridge-plugin-utils Homebridge test double: Homebridge's own PlatformAccessory
+ *     over the hap-nodejs copy Homebridge loads, whose Service and Characteristic namespaces this file exports so every suite reads HAP's classes and constants from
+ *     one source. Every API double is the kit's TestHomebridgeApi over that runtime, built through the kit's server-warning watcher so a test fails when Homebridge
+ *     logs a warning or an error it leaves untaken. homebridge-plugin-utils' REAL acquireService / validService run against real HAP services, so HAP's own
+ *     defaults, value validation and name writes apply, and a read or a write goes through HAP's own request path.
+ *   - A platform double (makeTestPlatform) carrying the kit's API, a REAL FeatureOptions engine (so userOptions thread through the production feature-option logic), a
+ *     capturing log, an optional recording MQTT double, and a fake esphome-client.
+ *   - A fake esphome-client (TestEspHomeClient) that records command dispatch and lets a test drive lifecycle / telemetry / log subscriptions and the session's
+ *     health, plus typed telemetry factories that build the initial-state snapshot the accessory is born from.
+ *   - A real-platform builder (buildPlatform) that constructs the production platform on the kit's API with the platform's injectable defaults set to the doubles -
+ *     a TestClock, the library's mDNS browser double, a fake client factory, and the MQTT double - so a suite drives discovery, admission, restore and shutdown
+ *     through the platform's own code with no network and no real time.
  *
- * The HAP surface is intentionally tight: the Service / Characteristic namespaces expand as production reaches for new kinds. Co-located under src/ so the broad
- * tsconfig.json type-checks this file alongside everything else; tsconfig.build.json excludes the *.helpers.ts pattern so it never reaches the published dist/.
+ * Co-located under src/ so the broad tsconfig.json type-checks this file alongside everything else; tsconfig.build.json excludes the *.helpers.ts pattern so it never
+ * reaches the published dist/.
  */
 // The explicit-resource-management bridge, first here as it is first in the plugin's entry point: this file is the suite's composition root, so every test that
 // constructs a feed or an accessory reads against globals that are guaranteed to exist.
 import "homebridge-plugin-utils/polyfills";
-import type { Clock, HomebridgePluginLogging, MdnsService, Nullable } from "homebridge-plugin-utils";
-import { ConnectionError, CoverOperation, EncryptionKeyMissingError, EncryptionRequiredError, EspHomeError, LockState, PermanentError, entityId } from "esphome-client";
-import type { DeviceInfo, EntityId, EspHomeClient, LifecycleEvent, LogEventData, NoiseServerHello, PskResolver, TelemetryEvent } from "esphome-client";
-import { TestClock, TestMqttClient, capturingLog, makeService, makeTxtStrings } from "homebridge-plugin-utils/testing";
+import type { API, HAP, Logging } from "homebridge";
+import type { Clock, HomebridgePluginLogging, MdnsService, MqttClient, Nullable } from "homebridge-plugin-utils";
+import { ConnectionError, CoverOperation, EncryptionKeyMissingError, EncryptionRequiredError, EspHomeError, HealthState, LockState, PermanentError, disconnectedHealth,
+  entityId } from "esphome-client";
+import type { ConnectionHealth, DeviceInfo, EntityId, EspHomeClient, LifecycleEvent, LogEventData, NoiseServerHello, PskResolver, TelemetryEvent } from "esphome-client";
+import { FeatureOptions, onAbort } from "homebridge-plugin-utils";
+import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_MDNS_SERVICE_TYPE } from "./settings.ts";
+import { TestClock, TestMdnsBrowserFactory, TestMqttClient, capturingLog, expectAt, loadHomebridge, makeService, makeTxtStrings,
+  watchServerWarnings } from "homebridge-plugin-utils/testing";
+import type { TestHomebridgeApi, TestLogEntry, TestMdnsBrowser, TestPlatformAccessory } from "homebridge-plugin-utils/testing";
 import { featureOptionCategories, featureOptions } from "./options.ts";
-import { FeatureOptions } from "homebridge-plugin-utils";
 import type { OpenEspHomeClient } from "./connection.ts";
-import { RATGDO_MDNS_SERVICE_TYPE } from "./settings.ts";
 import { RatgdoAccessory } from "./device.ts";
 import type { RatgdoDevice } from "./types.ts";
+import { RatgdoPlatform } from "./platform.ts";
+import type { RatgdoPlatformDefaults } from "./platform.ts";
 import type { RatgdoResolvedConfig } from "./options.ts";
 import type { RatgdoTxtKey } from "./discovery.ts";
 import { RatgdoVariant } from "./types.ts";
-import type { TestLogEntry } from "homebridge-plugin-utils/testing";
 
-// Identity classes for the HAP Characteristic kinds the plugin touches. Each kind is its own marker class carrying a hapKind property (so failures surface the kind in
-// inspect output) and, where production compares against named constants, the HAP integer constants as statics. Production passes the class itself as a key into
-// getCharacteristic / updateCharacteristic.
-class BrightnessCharacteristicType {
+// The Homebridge runtime every suite runs on, loaded once from this repository's tree: the hap-nodejs copy and the PlatformAccessory class Homebridge itself loads
+// here, so the handlers the accessory binds meet the HAP they meet at runtime.
+const runtime = await loadHomebridge(import.meta.url);
 
-  public readonly hapKind = "Brightness" as const;
-}
+// Every API double the suites build comes from this builder. Created at this module's top level, it registers its check once in each suite that imports the
+// harness, and after every test, once that test's own cleanups have run, it fails the test when Homebridge's server logged a warning or an error the test left
+// untaken.
+const makeApi = watchServerWarnings(runtime);
 
-class ChargingStateCharacteristicType {
-
-  public static readonly CHARGING = 1;
-  public static readonly NOT_CHARGEABLE = 2;
-  public static readonly NOT_CHARGING = 0;
-  public readonly hapKind = "ChargingState" as const;
-}
-
-class ContactSensorStateCharacteristicType {
-
-  public static readonly CONTACT_DETECTED = 0;
-  public static readonly CONTACT_NOT_DETECTED = 1;
-  public readonly hapKind = "ContactSensorState" as const;
-}
-
-class CurrentDoorStateCharacteristicType {
-
-  public static readonly CLOSED = 1;
-  public static readonly CLOSING = 3;
-  public static readonly OPEN = 0;
-  public static readonly OPENING = 2;
-  public static readonly STOPPED = 4;
-  public readonly hapKind = "CurrentDoorState" as const;
-}
-
-class FirmwareRevisionCharacteristicType {
-
-  public readonly hapKind = "FirmwareRevision" as const;
-}
-
-class LockCurrentStateCharacteristicType {
-
-  public static readonly JAMMED = 2;
-  public static readonly SECURED = 1;
-  public static readonly UNKNOWN = 3;
-  public static readonly UNSECURED = 0;
-  public readonly hapKind = "LockCurrentState" as const;
-}
-
-class LockTargetStateCharacteristicType {
-
-  public static readonly SECURED = 1;
-  public static readonly UNSECURED = 0;
-  public readonly hapKind = "LockTargetState" as const;
-}
-
-class ManufacturerCharacteristicType {
-
-  public readonly hapKind = "Manufacturer" as const;
-}
-
-class ModelCharacteristicType {
-
-  public readonly hapKind = "Model" as const;
-}
-
-class MotionDetectedCharacteristicType {
-
-  public readonly hapKind = "MotionDetected" as const;
-}
-
-class NameCharacteristicType {
-
-  public readonly hapKind = "Name" as const;
-}
-
-class ObstructionDetectedCharacteristicType {
-
-  public readonly hapKind = "ObstructionDetected" as const;
-}
-
-class OccupancyDetectedCharacteristicType {
-
-  public static readonly OCCUPANCY_DETECTED = 1;
-  public static readonly OCCUPANCY_NOT_DETECTED = 0;
-  public readonly hapKind = "OccupancyDetected" as const;
-}
-
-class OnCharacteristicType {
-
-  public readonly hapKind = "On" as const;
-}
-
-class SerialNumberCharacteristicType {
-
-  public readonly hapKind = "SerialNumber" as const;
-}
-
-class StatusActiveCharacteristicType {
-
-  public readonly hapKind = "StatusActive" as const;
-}
-
-class TargetDoorStateCharacteristicType {
-
-  public static readonly CLOSED = 1;
-  public static readonly OPEN = 0;
-  public readonly hapKind = "TargetDoorState" as const;
-}
-
-// The HAP Characteristic namespace as the test-double exposes it. Alphabetical per the house property-order style. Add a kind here when production reaches for one.
-export const Characteristic = {
-
-  Brightness: BrightnessCharacteristicType,
-  ChargingState: ChargingStateCharacteristicType,
-  ContactSensorState: ContactSensorStateCharacteristicType,
-  CurrentDoorState: CurrentDoorStateCharacteristicType,
-  FirmwareRevision: FirmwareRevisionCharacteristicType,
-  LockCurrentState: LockCurrentStateCharacteristicType,
-  LockTargetState: LockTargetStateCharacteristicType,
-  Manufacturer: ManufacturerCharacteristicType,
-  Model: ModelCharacteristicType,
-  MotionDetected: MotionDetectedCharacteristicType,
-  Name: NameCharacteristicType,
-  ObstructionDetected: ObstructionDetectedCharacteristicType,
-  OccupancyDetected: OccupancyDetectedCharacteristicType,
-  On: OnCharacteristicType,
-  SerialNumber: SerialNumberCharacteristicType,
-  StatusActive: StatusActiveCharacteristicType,
-  TargetDoorState: TargetDoorStateCharacteristicType
-} as const;
-
-// The constructor-as-key shapes both namespaces expose. The argument list is intentionally permissive: the characteristic markers take no arguments, the service
-// markers take HAP's (displayName?, subtype?) pair, and the alias must admit either when used as a Map key.
-export type CharacteristicType = abstract new (...args: never[]) => object;
-export type ServiceType = abstract new (...args: never[]) => object;
-
-// One characteristic backing instance, owned by a TestService. Holds the last value written plus the optional onGet / onSet handlers production installs. triggerGet /
-// triggerSet are the test-side knobs that exercise the bound handlers without a real HAP request path.
-export class TestCharacteristic {
-
-  public readonly type: CharacteristicType;
-  private currentValue: unknown = null;
-  private getHandler: (() => unknown) | undefined = undefined;
-  private setHandler: ((value: unknown) => Promise<void> | void) | undefined = undefined;
-
-  public constructor(type: CharacteristicType) {
-
-    this.type = type;
-  }
-
-  // The most recently written value. Production reads this after updateCharacteristic to confirm its own write landed.
-  public get value(): unknown {
-
-    return this.currentValue;
-  }
-
-  // Write a value into the characteristic. Returns this so it chains in the production-typical service.updateCharacteristic pattern.
-  public updateValue(value: unknown): this {
-
-    this.currentValue = value;
-
-    return this;
-  }
-
-  // Install the production read handler. Tests inspect what was bound via triggerGet.
-  public onGet(handler: () => unknown): this {
-
-    this.getHandler = handler;
-
-    return this;
-  }
-
-  // Install the production write handler. Tests drive it via triggerSet; the production handler runs as if HomeKit invoked it.
-  public onSet(handler: (value: unknown) => Promise<void> | void): this {
-
-    this.setHandler = handler;
-
-    return this;
-  }
-
-  // Test-side trigger for the installed onGet handler. Falls through to the last-written value when no handler is bound, matching HAP's read-from-cache semantics.
-  public async triggerGet(): Promise<unknown> {
-
-    if(!this.getHandler) {
-
-      return this.currentValue;
-    }
-
-    return this.getHandler();
-  }
-
-  // Test-side trigger for the installed onSet handler. After the handler resolves, the supplied value becomes the cached value, mirroring HAP's set-then-cache behavior.
-  public async triggerSet(value: unknown): Promise<void> {
-
-    if(this.setHandler) {
-
-      await this.setHandler(value);
-    }
-
-    this.currentValue = value;
-  }
-}
-
-/* One service instance attached to a TestAccessory. Holds a Map of characteristic-kind -> TestCharacteristic so getCharacteristic returns the same instance across calls
- * (production binds onGet once and expects the binding to persist). This shape is dictated in several places by homebridge-plugin-utils' REAL service helpers, which run
- * unmodified against the double: characteristics is a PUBLIC ARRAY view (acquireService's getCharacteristicConstructor destructures the first element to recover the
- * Characteristic constructor, and throws when none exists - which is why the constructible service markers seed one characteristic), and displayName is MUTABLE
- * (setServiceName assigns it on every acquire). UUID mirrors the marker's static and is never empty, keeping the real helpers' name-set predicates honestly false against
- * markers that carry no name statics. linkedServices mirrors HAP's Service.linkedServices because acquireService's make-room reads the link list of every service on the
- * accessory and restores each one in place, so the binding is readonly and its contents are not.
- */
-export class TestService {
-
-  public displayName: string;
-  public isPrimary = false;
-  public readonly linkedServices: TestService[] = [];
-  public readonly subtype: string | undefined;
-  public readonly type: ServiceType;
-  private readonly characteristicsByType = new Map<CharacteristicType, TestCharacteristic>();
-
-  public constructor(type: ServiceType, displayName: string, subtype: string | undefined) {
-
-    this.displayName = displayName;
-    this.subtype = subtype;
-    this.type = type;
-  }
-
-  // The service kind's identity string, mirrored from the type's static. Real HAP identifies kinds by UUID; the double uses the kind string, which is unique within the
-  // namespace and legible in failures. The fallback is a non-empty sentinel for a hand-rolled type outside the namespace, so the returned UUID is never empty.
-  public get UUID(): string {
-
-    return (this.type as { UUID?: string }).UUID ?? "unidentified-service-kind";
-  }
-
-  // The public array view of the materialized characteristics, mirroring HAP's Service.characteristics. Insertion order, so a marker's seed characteristic is always
-  // first - exactly what the real getCharacteristicConstructor destructures.
-  public get characteristics(): TestCharacteristic[] {
-
-    return [...this.characteristicsByType.values()];
-  }
-
-  // Record whether production designated this the accessory's primary service, mirroring HAP's Service.setPrimaryService.
-  public setPrimaryService(isPrimary = true): void {
-
-    this.isPrimary = isPrimary;
-  }
-
-  // Fetch or lazily create the characteristic of the given kind. Lazy creation matches HAP, which instantiates required characteristics on first access.
-  public getCharacteristic(charType: CharacteristicType): TestCharacteristic {
-
-    let char = this.characteristicsByType.get(charType);
-
-    if(!char) {
-
-      char = new TestCharacteristic(charType);
-      this.characteristicsByType.set(charType, char);
-    }
-
-    return char;
-  }
-
-  // Write a value to the characteristic of the given kind. Returns this so chained production updates compile.
-  public updateCharacteristic(charType: CharacteristicType, value: unknown): this {
-
-    this.getCharacteristic(charType).updateValue(value);
-
-    return this;
-  }
-
-  // Mirror HAP's Service.setCharacteristic, which routes to setValue and FIRES the bound onSet handler. Fire-and-forget like HAP; a rejection is swallowed because HAP
-  // does not surface a set-handler's failure to the setCharacteristic caller.
-  public setCharacteristic(charType: CharacteristicType, value: unknown): this {
-
-    // HAP does not surface the set-handler's rejection to the caller.
-    void this.getCharacteristic(charType).triggerSet(value).catch((): void => { /* Intentional no-op. */ });
-
-    return this;
-  }
-
-  // Declare an optional characteristic, mirroring HAP's Service.addOptionalCharacteristic. HAP lazily materializes a permitted characteristic on first access, so the
-  // double materializes it now through getCharacteristic, keeping a later getCharacteristic / onGet bind against the SAME instance.
-  public addOptionalCharacteristic(charType: CharacteristicType): void {
-
-    this.getCharacteristic(charType);
-  }
-
-  // Report whether the characteristic of the given kind has already been created, mirroring HAP's Service.testCharacteristic. Unlike getCharacteristic, this never
-  // lazily creates - it is a pure predicate over what has already been added.
-  public testCharacteristic(charType: CharacteristicType): boolean {
-
-    return this.characteristicsByType.has(charType);
-  }
-
-  // Remove a characteristic instance, mirroring HAP's Service.removeCharacteristic. The double keys one instance per kind, so removal by the instance's kind is exact.
-  public removeCharacteristic(characteristic: TestCharacteristic): void {
-
-    this.characteristicsByType.delete(characteristic.type);
-  }
-}
-
-// The service marker classes. Each is a CONSTRUCTIBLE subclass of TestService carrying HAP's (displayName?, subtype?) constructor, because the real acquireService
-// instantiates the namespace entry directly on its create branch and recovers the Characteristic constructor from the new service's first characteristic. Every marker
-// therefore seeds exactly one characteristic at construction: the kind's primary required characteristic.
-class AccessoryInformationServiceType extends TestService {
-
-  public static readonly UUID = "AccessoryInformation";
-  public readonly hapKind = "AccessoryInformation" as const;
-
-  public constructor(displayName = "", subtype?: string) {
-
-    super(AccessoryInformationServiceType, displayName, subtype);
-
-    this.getCharacteristic(NameCharacteristicType);
-  }
-}
-
-class BatteryServiceType extends TestService {
-
-  public static readonly UUID = "Battery";
-  public readonly hapKind = "Battery" as const;
-
-  public constructor(displayName = "", subtype?: string) {
-
-    super(BatteryServiceType, displayName, subtype);
-
-    this.getCharacteristic(ChargingStateCharacteristicType);
-  }
-}
-
-class ContactSensorServiceType extends TestService {
-
-  public static readonly UUID = "ContactSensor";
-  public readonly hapKind = "ContactSensor" as const;
-
-  public constructor(displayName = "", subtype?: string) {
-
-    super(ContactSensorServiceType, displayName, subtype);
-
-    this.getCharacteristic(ContactSensorStateCharacteristicType);
-  }
-}
-
-class GarageDoorOpenerServiceType extends TestService {
-
-  public static readonly UUID = "GarageDoorOpener";
-  public readonly hapKind = "GarageDoorOpener" as const;
-
-  public constructor(displayName = "", subtype?: string) {
-
-    super(GarageDoorOpenerServiceType, displayName, subtype);
-
-    this.getCharacteristic(CurrentDoorStateCharacteristicType);
-  }
-}
-
-class LightbulbServiceType extends TestService {
-
-  public static readonly UUID = "Lightbulb";
-  public readonly hapKind = "Lightbulb" as const;
-
-  public constructor(displayName = "", subtype?: string) {
-
-    super(LightbulbServiceType, displayName, subtype);
-
-    this.getCharacteristic(OnCharacteristicType);
-  }
-}
-
-class MotionSensorServiceType extends TestService {
-
-  public static readonly UUID = "MotionSensor";
-  public readonly hapKind = "MotionSensor" as const;
-
-  public constructor(displayName = "", subtype?: string) {
-
-    super(MotionSensorServiceType, displayName, subtype);
-
-    this.getCharacteristic(MotionDetectedCharacteristicType);
-  }
-}
-
-class OccupancySensorServiceType extends TestService {
-
-  public static readonly UUID = "OccupancySensor";
-  public readonly hapKind = "OccupancySensor" as const;
-
-  public constructor(displayName = "", subtype?: string) {
-
-    super(OccupancySensorServiceType, displayName, subtype);
-
-    this.getCharacteristic(OccupancyDetectedCharacteristicType);
-  }
-}
-
-class SwitchServiceType extends TestService {
-
-  public static readonly UUID = "Switch";
-  public readonly hapKind = "Switch" as const;
-
-  public constructor(displayName = "", subtype?: string) {
-
-    super(SwitchServiceType, displayName, subtype);
-
-    this.getCharacteristic(OnCharacteristicType);
-  }
-}
-
-// The HAP Service namespace as the test-double exposes it. Alphabetical per the house property-order style. Add a kind here when production touches one.
-export const Service = {
-
-  AccessoryInformation: AccessoryInformationServiceType,
-  Battery: BatteryServiceType,
-  ContactSensor: ContactSensorServiceType,
-  GarageDoorOpener: GarageDoorOpenerServiceType,
-  Lightbulb: LightbulbServiceType,
-  MotionSensor: MotionSensorServiceType,
-  OccupancySensor: OccupancySensorServiceType,
-  Switch: SwitchServiceType
-} as const;
-
-/* One accessory. Carries an AccessoryInformation service from construction (every HomeKit accessory has one); subsequent addService calls append more. addService
- * and getService mirror HAP's own rule and HAP's own lookup: HAP refuses a service of a type the accessory already carries unless the new one has a subtype no
- * service of that type shares, and HAP's getService matches by type alone, whatever the subtype. The double carries both because the suite must see what the runtime
- * would do - the double refuses an add as HAP's own addService does, which is the refusal the library's make-room works around, and a lookup that leans on getService
- * skipping a subtyped sibling fails here as it would there. getServiceById is the lookup that matches type and subtype together. The mutable context and displayName
- * are the fields the production accessory path reads; the _associatedHAPAccessory mirror is retained for HAP-shape parity.
- */
-export class TestAccessory {
-
-  public context: Record<string, unknown> = {};
-  public displayName: string;
-  public readonly UUID: string;
-  public readonly _associatedHAPAccessory: { displayName: string };
-  public readonly services: TestService[] = [];
-
-  public constructor(displayName: string, uuid: string) {
-
-    this.displayName = displayName;
-    this.UUID = uuid;
-    this._associatedHAPAccessory = { displayName };
-    this.services.push(new TestService(Service.AccessoryInformation, displayName, undefined));
-  }
-
-  /* Add a new service in either form HAP's real addService accepts: a service INSTANCE (what acquireService passes after constructing a namespace marker), or the
-   * legacy (type, name?, subtype?) form. The instanceof check is sound because a marker CLASS is never an instance of TestService - only constructed services
-   * are. Returns the service so production can immediately bind characteristics on it.
-   *
-   * Before it appends, the double refuses as HAP's addService does, in HAP's own words: a service of a type the accessory already carries is admitted only when it
-   * has a subtype and no service of that type shares it. The suite must see an add order that would throw at runtime, and a double that appended anything would
-   * let such an order pass here and fail only in the field.
-   */
-  public addService(service: TestService): TestService;
-  public addService(type: ServiceType, name?: string, subtype?: string): TestService;
-  public addService(typeOrService: ServiceType | TestService, name?: string, subtype?: string): TestService {
-
-    const service = (typeOrService instanceof TestService) ? typeOrService : new TestService(typeOrService, name ?? this.displayName, subtype);
-
-    for(const existing of this.services) {
-
-      if(existing.type !== service.type) {
-
-        continue;
-      }
-
-      if(!service.subtype) {
-
-        throw new Error("Cannot add a Service with the same UUID '" + existing.UUID +
-          "' as another Service in this Accessory without also defining a unique 'subtype' property.");
-      }
-
-      if(service.subtype === existing.subtype) {
-
-        throw new Error("Cannot add a Service with the same UUID '" + existing.UUID + "' and subtype '" + existing.subtype + "' as another Service in this Accessory.");
-      }
-    }
-
-    this.services.push(service);
-
-    return service;
-  }
-
-  // Find the first service of the given type, whatever its subtype. HAP's getService matches by type alone, so a test reading a service through this lookup gets
-  // what production would: the first service of the type the accessory carries, which is a subtyped sibling when that sibling was added first.
-  public getService(type: ServiceType): TestService | undefined {
-
-    return this.services.find((service) => service.type === type);
-  }
-
-  // Find the service of the given type AND subtype. Production uses subtypes to disambiguate among multiple Switch services on one accessory.
-  public getServiceById(type: ServiceType, subtype: string): TestService | undefined {
-
-    return this.services.find((service) => (service.type === type) && (service.subtype === subtype));
-  }
-
-  // Remove a service instance, mirroring HAP's PlatformAccessory.removeService - the path the real validService takes when an existing service fails validation.
-  public removeService(service: TestService): void {
-
-    const index = this.services.indexOf(service);
-
-    if(index !== -1) {
-
-      this.services.splice(index, 1);
-    }
-  }
-}
-
-/**
- * Build a TestAccessory with a sensible default name and UUID. Pass overrides when a test needs a specific identity.
- *
- * @param displayName - the accessory's display name. Defaults to "Test Ratgdo".
- * @param uuid        - the accessory's UUID. Defaults to a stable all-zero value so tests get reproducible identity by default.
- *
- * @returns a fresh TestAccessory pre-populated with an AccessoryInformation service.
- */
-export function makeTestAccessory(displayName = "Test Ratgdo", uuid = "00000000-0000-0000-0000-000000000000"): TestAccessory {
-
-  return new TestAccessory(displayName, uuid);
-}
+// The runtime's HAP Service and Characteristic namespaces, the one source the suites read HAP's service and characteristic classes and their constants from.
+export const { Characteristic, Service } = runtime.hap;
 
 // A recorded esphome-client command dispatch. id is the branded entity id the device resolved through its registry; payload is the command options object.
 export interface RecordedCommand {
@@ -594,6 +98,9 @@ export class TestEspHomeClient implements Disposable {
   // A counter rather than a boolean, because one counter answers both "was it disposed" and "how many times", where a boolean beside a counter would be two statements
   // of one fact and a double-dispose would read the same as a single one.
   public disposeCount = 0;
+  // Whether the client holds a live session, the one fact health() reports. A client the open factory returned is connected, so it starts live; a lifecycle connect
+  // or disconnect driven through emit keeps it in step, and a test sets it directly to model a client between sessions that has announced nothing.
+  public live = true;
   private readonly capabilitiesValue: { encryption: { active: boolean } };
   private readonly deviceInfoValue: Nullable<DeviceInfo>;
   private readonly entities: { objectId: string; type: string }[];
@@ -663,6 +170,15 @@ export class TestEspHomeClient implements Disposable {
     return this.isEncryptedValue;
   }
 
+  /* Mirror the ESPHome client's health(): a real health record, so isConnectionLive reads the library's own union. A live client answers a connected record carrying
+   * its encryption state, and any other answers the library's disconnected baseline.
+   */
+  public health(): ConnectionHealth {
+
+    return this.live ? { connectedAtMs: 0, consecutiveStalls: 0, encrypted: this.isEncryptedValue, lastInboundActivityAt: 0, state: HealthState.CONNECTED } :
+      disconnectedHealth();
+  }
+
   // Record a manual disconnect.
   public disconnect(): void {
 
@@ -711,11 +227,24 @@ export class TestEspHomeClient implements Disposable {
     } };
   }
 
-  // Drive every handler registered for an event. Tests use this to deliver a lifecycle / telemetry / log event through the same path production wired.
+  /* Drive every handler registered for an event. Tests use this to deliver a lifecycle / telemetry / log event through the same path production wired. A lifecycle
+   * connect or disconnect moves the live state first, as the real client publishes its health record before it announces the session boundary, so a handler reading
+   * health() sees the session the event describes.
+   */
   public emit(event: "lifecycle", data: LifecycleEvent): void;
   public emit(event: "telemetry", data: TelemetryEvent): void;
   public emit(event: "log", data: LogEventData): void;
   public emit(event: string, data: unknown): void {
+
+    if(event === "lifecycle") {
+
+      const kind = (data as LifecycleEvent).kind;
+
+      if([ "connect", "disconnect" ].includes(kind)) {
+
+        this.live = kind === "connect";
+      }
+    }
 
     for(const handler of this.handlers.get(event) ?? []) {
 
@@ -991,10 +520,11 @@ export function makeRatgdoService(txt: Partial<Record<RatgdoTxtKey, Nullable<str
 }
 
 // The platform double's read surface, as the accessory and its configure chain consume it. The construction-boundary cast to RatgdoPlatform happens
-// in buildRatgdoAccessory.
+// in constructRatgdo.
 export interface TestPlatform {
 
-  api: { hap: TestHap };
+  // The kit's Homebridge API double: the accessory reaches HAP through its `hap`, and the harness makes the accessory under test through its platformAccessory.
+  api: TestHomebridgeApi;
   // The time source every timer the accessory arms reads, standing in for the production platform's own clock. Typed as the production Clock because that is the whole
   // of what the accessory consumes; the handles that drive it are typed TestClock where a test holds them.
   clock: Clock;
@@ -1003,18 +533,10 @@ export interface TestPlatform {
   config: RatgdoResolvedConfig;
   featureOptions: FeatureOptions;
   getEspHomeClient: (mac: string) => TestEspHomeClient | undefined;
-  hap: TestHap;
+  hap: HAP;
   log: HomebridgePluginLogging;
   mqtt: Nullable<TestMqttClient>;
   resolveLogName: (mac: string) => string | undefined;
-}
-
-// The HAP namespace shape the platform double exposes: the Service / Characteristic test namespaces plus a deterministic uuid generator.
-interface TestHap {
-
-  Characteristic: typeof Characteristic;
-  Service: typeof Service;
-  uuid: { generate: (data: string) => string };
 }
 
 /* Options for makeTestPlatform: the fake client to back getEspHomeClient, the clock the platform double publishes, the platform config, whether to attach a recording
@@ -1041,14 +563,17 @@ export interface MakeTestPlatformResult {
   platform: TestPlatform;
 }
 
-/* Build a platform double around a REAL FeatureOptions engine seeded with the supplied userOptions, so the production feature-option logic (test / value / getInteger /
- * logFeature) runs unchanged. A capturing log records every line; an optional recording MQTT double captures subscriptions and publishes; a fake esphome-client backs
- * getEspHomeClient. resolveLogName mirrors the production platform method exactly (empty string collapses to undefined). A TestClock stands in for the production
- * platform's time source, so every deadline an accessory built on this double arms is driven by advancing that clock. The returned handles let a test assert on the
- * captured logs, the recorded commands, and the MQTT traffic, and drive the clock.
+/* Build a platform double around the kit's Homebridge API and a REAL FeatureOptions engine seeded with the supplied userOptions, so the production feature-option
+ * logic (test / value / getInteger / logFeature) runs unchanged. The API comes from the file's server-warning builder, so a warning Homebridge logs on its account
+ * fails the test that drew it, and its HAP namespace is the platform double's own, as production's platform reads `api.hap`. A capturing log records every line; an
+ * optional recording MQTT double captures subscriptions and publishes; a fake esphome-client backs getEspHomeClient. resolveLogName mirrors the production platform
+ * method exactly (empty string collapses to undefined). A TestClock stands in for the production platform's time source, so every deadline an accessory built on
+ * this double arms is driven by advancing that clock. The returned handles let a test assert on the captured logs, the recorded commands, and the MQTT traffic, and
+ * drive the clock.
  */
 export function makeTestPlatform(options: MakeTestPlatformOptions = {}): MakeTestPlatformResult {
 
+  const api = makeApi();
   const log = capturingLog();
   const client = options.client ?? new TestEspHomeClient();
   const clock = options.clock ?? new TestClock();
@@ -1056,15 +581,14 @@ export function makeTestPlatform(options: MakeTestPlatformOptions = {}): MakeTes
   // would log it and a test can read it there rather than reaching into the double.
   const mqtt = options.mqtt ? new TestMqttClient({ log }) : null;
   const fo = new FeatureOptions(featureOptionCategories, featureOptions, options.userOptions);
-  const hap: TestHap = { Characteristic, Service, uuid: { generate: (data: string): string => data } };
   const platform: TestPlatform = {
 
-    api: { hap },
+    api,
     clock,
     config: options.config ?? { debug: false, options: undefined },
     featureOptions: fo,
     getEspHomeClient: (): TestEspHomeClient | undefined => (options.clientUnavailable ? undefined : client),
-    hap,
+    hap: api.hap,
     log,
     mqtt,
     resolveLogName: (mac: string): string | undefined => {
@@ -1078,28 +602,28 @@ export function makeTestPlatform(options: MakeTestPlatformOptions = {}): MakeTes
   return { client, clock, entries: log.entries, mqtt, platform };
 }
 
-/* Options for buildRatgdoAccessory: the accessory to construct against, device fields to override, initial-state snapshot, the clock the accessory's timers arm on,
- * platform config, client availability, MQTT double, and feature-option strings. The accessory member is how a test describes an install Homebridge restored from
- * its cache - a TestAccessory the test has pre-seeded with the services a previous run wired on - so the configure chain runs against an accessory that already
- * carries them; left unset, the harness builds a fresh accessory, which is the first-run case every other test wants. The clock carries makeTestPlatform's typing
- * and its omit-for-a-fresh-one behavior.
+/* Options for buildRatgdoAccessory: device fields to override, initial-state snapshot, the clock the accessory's timers arm on, platform config, client availability,
+ * MQTT double, feature-option strings, and a seed. The seed is how a test describes an install Homebridge restored from its cache: it receives the accessory before
+ * the restore and gives it the services a previous run wired on, so the configure chain runs against an accessory that already carries them; left unset, the
+ * accessory carries only what Homebridge's own PlatformAccessory is born with, which is the first-run case every other test wants. The clock carries
+ * makeTestPlatform's typing and its omit-for-a-fresh-one behavior.
  */
 export interface BuildRatgdoAccessoryOptions {
 
-  accessory?: TestAccessory;
   clientUnavailable?: boolean;
   clock?: TestClock;
   config?: TestPlatform["config"];
   device?: Partial<RatgdoDevice>;
   initialState?: Map<EntityId, TelemetryEvent>;
   mqtt?: boolean;
+  seed?: (accessory: TestPlatformAccessory) => void;
   userOptions?: string[];
 }
 
 // The handles buildRatgdoAccessory returns: the constructed production accessory plus the underlying doubles and capture buffer a test asserts against.
 export interface BuildRatgdoAccessoryResult {
 
-  accessory: TestAccessory;
+  accessory: TestPlatformAccessory;
   client: TestEspHomeClient;
   clock: TestClock;
   entries: readonly TestLogEntry[];
@@ -1108,22 +632,210 @@ export interface BuildRatgdoAccessoryResult {
   ratgdo: RatgdoAccessory;
 }
 
-/* Construct a REAL RatgdoAccessory against the doubles - the device-test workhorse, analogous to HBPU's per-suite construction helpers. The construction-boundary casts
- * (platform, accessory) are the only casts a device test needs; everything the accessory then does runs the real production code against the doubles. Returns the
- * constructed accessory plus every handle a test asserts on: the underlying TestAccessory (to read services / characteristics), the captured log entries, the fake
- * client (to read recorded commands), the clock the accessory's timers arm on (to reach a deadline without waiting), and the recording MQTT double (when enabled).
+/* Construct a REAL RatgdoAccessory against the doubles - the device-test workhorse, analogous to HBPU's per-suite construction helpers. The accessory is Homebridge's
+ * own PlatformAccessory, made through the platform double's API with the display name and the identity production gives it, and everything the accessory then does
+ * runs the real production code against real HAP. Returns the constructed accessory plus every handle a test asserts on: the PlatformAccessory (to read services /
+ * characteristics and the changes HAP raised), the captured log entries, the fake client (to read recorded commands), the clock the accessory's timers arm on (to
+ * reach a deadline without waiting), and the recording MQTT double (when enabled).
+ *
+ * The accessory is on the API double's bridge before the RatgdoAccessory sees it, as it is in production, where a cached accessory joins the bridge at its restore
+ * and the platform constructs the RatgdoAccessory afterward. The restore runs Homebridge's own order: the accessory is cached and given Homebridge's FirmwareRevision
+ * placeholder, handed to configureAccessory, and bridged once that call returns. No ratgdo platform is constructed here, so a stand-in whose configureAccessory does
+ * nothing takes its place.
  */
 export function buildRatgdoAccessory(options: BuildRatgdoAccessoryOptions = {}): BuildRatgdoAccessoryResult {
 
   const device = makeTestDevice(options.device);
   const { client, clock, entries, mqtt, platform } = makeTestPlatform({ clientUnavailable: options.clientUnavailable, clock: options.clock, config: options.config,
     mqtt: options.mqtt, userOptions: options.userOptions });
-  const accessory = options.accessory ?? makeTestAccessory(device.name, platform.hap.uuid.generate(device.mac));
+  const accessory = new platform.api.platformAccessory(device.name, platform.hap.uuid.generate(device.mac));
   const initialState = options.initialState ?? ((device.variant === RatgdoVariant.KONNECTED) ? makeKonnectedInitialState() : makeRatgdoInitialState());
 
-  // The construction-boundary casts (platform, accessory) bridge the doubles to the production constructor's parameter types - the only casts a device test needs.
-  const ratgdo = new RatgdoAccessory(platform as unknown as ConstructorParameters<typeof RatgdoAccessory>[0],
-    accessory as unknown as ConstructorParameters<typeof RatgdoAccessory>[1], device, initialState);
+  options.seed?.(accessory);
+
+  platform.api.restorePlatformAccessories({ accessories: [accessory], platform: { configureAccessory: (): void => undefined }, platformName: PLATFORM_NAME,
+    pluginIdentifier: PLUGIN_NAME });
+
+  const ratgdo = constructRatgdo(platform, accessory, device, initialState);
 
   return { accessory, client, clock, entries, mqtt, platform, ratgdo };
+}
+
+// Construct a REAL RatgdoAccessory on the platform double. The platform cast bridges the double to the production constructor's parameter type, the one cast a
+// device's construction needs, held here so every construction the harness makes goes through it.
+function constructRatgdo(platform: TestPlatform, accessory: TestPlatformAccessory, device: RatgdoDevice, initialState: ReadonlyMap<EntityId, TelemetryEvent>):
+RatgdoAccessory {
+
+  return new RatgdoAccessory(platform as unknown as ConstructorParameters<typeof RatgdoAccessory>[0], accessory, device, initialState);
+}
+
+/* Options for makeCachedAccessory: the API the accessory is made through, and the opener and configuration the previous run served it under.
+ *
+ * @property api         - The API double of the platform the suite will restore the accessory into.
+ * @property mac         - The opener's MAC in the plugin's identity form, from which the accessory's UUID is derived as the platform derives it.
+ * @property userOptions - The feature-option strings the previous run carried, which decide the services its construction attached.
+ * @property variant     - The opener's variant.
+ */
+export interface MakeCachedAccessoryOptions {
+
+  api: TestHomebridgeApi;
+  mac?: string;
+  userOptions?: string[];
+  variant?: RatgdoVariant;
+}
+
+/* An accessory a previous run left in Homebridge's cache, for a platform suite to restore: made through the given API under the UUID the platform derives for the
+ * opener, and given every service and characteristic that run's construction attached by constructing a RatgdoAccessory over it on a device-side platform double
+ * and disposing it. What a suite restores is therefore what a real run caches, rather than a list of services kept by hand. Nothing is restored here.
+ */
+export function makeCachedAccessory({ api, mac = "AABBCCDDEEFF", userOptions, variant = RatgdoVariant.RATGDO }: MakeCachedAccessoryOptions): TestPlatformAccessory {
+
+  const device = makeTestDevice({ mac, name: "Garage", variant });
+  const accessory = new api.platformAccessory(device.name, api.hap.uuid.generate(colonMac(mac)));
+  const previous = constructRatgdo(makeTestPlatform({ userOptions }).platform, accessory, device, (variant === RatgdoVariant.KONNECTED) ?
+    makeKonnectedInitialState() : makeRatgdoInitialState());
+
+  previous[Symbol.dispose]();
+
+  return accessory;
+}
+
+/* The MAC a device-info record carries, from the plugin's identity form: the wire spells it with colons and the pipeline keys on the stripped form, so this is the
+ * one place a suite turns one into the other.
+ */
+export function colonMac(mac: string): string {
+
+  return (mac.match(/../g) ?? []).join(":");
+}
+
+/* Options for makeOpenerClient: the opener the client stands for, and the session it opens.
+ *
+ * @property deviceInfo - Members of the device-info record beyond the MAC, as a session of this opener reports them.
+ * @property encrypted  - Whether the session negotiated encryption.
+ * @property mac        - The opener's MAC in the plugin's identity form, which the record reports in the wire's colon form.
+ * @property variant    - The opener's variant, which decides the initial-state snapshot the client already holds.
+ */
+export interface MakeOpenerClientOptions {
+
+  deviceInfo?: Partial<DeviceInfo>;
+  encrypted?: boolean;
+  mac?: string;
+  variant?: RatgdoVariant;
+}
+
+/* The client double an opener's dial answers with: a device-info record naming the opener, so admission reads the MAC the connection is for, and an initial-state
+ * snapshot already complete for the variant, so the capture resolves at once and the accessory is born from it.
+ */
+export function makeOpenerClient({ deviceInfo = {}, encrypted = false, mac = "AABBCCDDEEFF", variant = RatgdoVariant.RATGDO }: MakeOpenerClientOptions = {}):
+TestEspHomeClient {
+
+  const snapshot = (variant === RatgdoVariant.KONNECTED) ? makeKonnectedInitialState() : makeRatgdoInitialState();
+
+  return new TestEspHomeClient({ capabilities: { encryption: { active: encrypted } },
+    deviceInfo: { esphomeVersion: "2.0.0", macAddress: colonMac(mac), projectVersion: "1.0.0", ...deviceInfo }, isEncrypted: encrypted, snapshot });
+}
+
+/* The advertisement an opener answers discovery with, for a platform suite: a Ratgdo or Konnected record carrying the opener's MAC at the given address, in the
+ * shape makeRatgdoService builds from the TXT fields the classify reads.
+ *
+ * @param options.address - The address the opener advertises.
+ * @param options.mac     - The opener's MAC in the plugin's identity form.
+ * @param options.variant - The opener's variant, which decides the project name it advertises.
+ *
+ * @returns The resolved service the browser double delivers.
+ */
+export function makeOpenerService({ address = "192.0.2.10", mac = "AABBCCDDEEFF", variant = RatgdoVariant.RATGDO }: { address?: string; mac?: string;
+  variant?: RatgdoVariant; } = {}): MdnsService {
+
+  const project = (variant === RatgdoVariant.KONNECTED) ? "konnected.garage-door-gdov2-s" : "ratgdo.esp32";
+
+  /* eslint-disable camelcase */
+  return makeRatgdoService({ esphome_version: "2.0.0", friendly_name: "Garage", mac, project_name: project, project_version: "1.0.0" }, [address]);
+  /* eslint-enable camelcase */
+}
+
+/* Options for buildPlatform: how the platform's dials are answered, whether its configuration names a broker, and the feature-option strings it carries.
+ *
+ * @property mqtt        - Name a broker in the configuration, so the platform builds its MQTT client, which the builder's factory answers with the MQTT double.
+ * @property openClient  - The client factory every dial the platform makes opens through. Defaults to one refusing every dial, so no row reaches a network.
+ * @property userOptions - The feature-option strings the configuration carries.
+ */
+export interface BuildPlatformOptions {
+
+  mqtt?: boolean;
+  openClient?: OpenEspHomeClient;
+  userOptions?: string[];
+}
+
+// The handles buildPlatform returns: the real platform, the API double and the doubles its defaults were set to, and the platform's captured log entries.
+export interface BuildPlatformResult {
+
+  api: TestHomebridgeApi;
+  // The browser the platform's discovery built, once Homebridge has finished launching.
+  browser: () => TestMdnsBrowser;
+  clock: TestClock;
+  entries: readonly TestLogEntry[];
+  // Emit Homebridge's didFinishLaunching, which starts the platform's discovery, and answer the browser that discovery built.
+  launch: () => TestMdnsBrowser;
+  // The MQTT double the platform's factory built and the lifetime signal the platform handed that factory, each null when the configuration names no broker.
+  mqtt: Nullable<TestMqttClient>;
+  mqttSignal: Nullable<AbortSignal>;
+  platform: RatgdoPlatform;
+}
+
+/* Construct a REAL RatgdoPlatform on the kit's API with every injectable default set to a double - the platform-lifecycle workhorse. The clock is a TestClock, the
+ * discovery's browser is the library's double, every dial opens through the factory the caller supplies, and the MQTT client is the MQTT double, so a suite drives
+ * discovery, admission, the bridge, restore and shutdown through the platform's own code with no socket and no real time. Constructing it starts nothing: discovery
+ * begins only once a suite emits didFinishLaunching, and a configuration naming no broker builds no MQTT client.
+ *
+ * The MQTT double lives on the signal the platform hands its factory, as the client lives on it, so the platform's abort tears the double down too. The double is
+ * cast to the client type here, the one cast the MQTT factory needs, and the log and API casts are the ones a platform constructor needs, because the kit's API
+ * deliberately omits registerPlatform, user and version.
+ */
+export function buildPlatform({ mqtt = false, openClient = makeFakeOpenClient(new ConnectionError("No device answers in this suite.", "CONNECT_FAILED")),
+  userOptions }: BuildPlatformOptions = {}): BuildPlatformResult {
+
+  const api = makeApi();
+  const browserFactory = new TestMdnsBrowserFactory();
+  const clock = new TestClock();
+  const log = capturingLog();
+  const doubles: { mqtt: Nullable<TestMqttClient>; mqttSignal: Nullable<AbortSignal> } = { mqtt: null, mqttSignal: null };
+
+  const mqttFactory: NonNullable<RatgdoPlatformDefaults["mqttFactory"]> = (config, init) => {
+
+    const double = new TestMqttClient({ clock, log: config.log });
+    const signal = init?.signal;
+
+    if(signal) {
+
+      onAbort(signal, () => double.abort(signal.reason));
+    }
+
+    doubles.mqtt = double;
+    doubles.mqttSignal = signal ?? null;
+
+    return double as unknown as MqttClient;
+  };
+
+  const config = { options: userOptions, platform: PLATFORM_NAME, ...(mqtt ? { mqttUrl: "mqtt://broker.test:1883" } : {}) };
+  const platform = new RatgdoPlatform(log as unknown as Logging, config, api as unknown as API, { browserFactory, clock, mqttFactory, openClient });
+  const browser = (): TestMdnsBrowser => expectAt(browserFactory.createCalls, browserFactory.createCalls.length - 1, "the browser the platform's discovery built")
+    .browser;
+
+  return {
+
+    api,
+    browser,
+    clock,
+    entries: log.entries,
+    launch: (): TestMdnsBrowser => {
+
+      api.emit("didFinishLaunching");
+
+      return browser();
+    },
+    mqtt: doubles.mqtt,
+    mqttSignal: doubles.mqttSignal,
+    platform
+  };
 }

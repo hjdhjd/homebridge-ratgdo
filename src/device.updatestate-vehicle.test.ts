@@ -33,7 +33,8 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
       const service = accessory.getServiceById(Service.ContactSensor, RatgdoService.CONTACT_DISCO_VEHICLE_ARRIVING);
 
       assert.ok(service, "the vehicle arriving contact sensor service exists when the feature is enabled");
-      assert.equal(service.getCharacteristic(Characteristic.ContactSensorState).value, true, "an ON arriving event writes true to the ContactSensorState characteristic");
+      assert.equal(service.getCharacteristic(Characteristic.ContactSensorState).value, Characteristic.ContactSensorState.CONTACT_NOT_DETECTED,
+        "an ON arriving event writes true to the ContactSensorState characteristic, which HAP stores as CONTACT_NOT_DETECTED");
       assert.equal(loggedAt(entries, "info", "Vehicle arriving detected."), true,
         "an arriving transition logs at info when Log.VehiclePresence is enabled");
       assert.equal(mqtt.published.find((entry) => entry.topic.endsWith("vehiclearriving"))?.payload, "true",
@@ -51,8 +52,8 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       const service = accessory.getServiceById(Service.ContactSensor, RatgdoService.CONTACT_DISCO_VEHICLE_ARRIVING);
 
-      assert.equal(service?.getCharacteristic(Characteristic.ContactSensorState).value, false,
-        "the following OFF arriving event writes false to the ContactSensorState characteristic");
+      assert.equal(service?.getCharacteristic(Characteristic.ContactSensorState).value, Characteristic.ContactSensorState.CONTACT_DETECTED,
+        "the following OFF arriving event writes false to the ContactSensorState characteristic, which HAP stores as CONTACT_DETECTED");
       assert.equal(loggedAt(entries, "info", "Vehicle arriving no longer detected."), true,
         "the OFF arriving transition logs the no-longer-detected message at info");
       assert.equal(mqtt.published.filter((entry) => entry.topic.endsWith("vehiclearriving")).at(-1)?.payload, "false",
@@ -83,7 +84,8 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       assert.equal(entries.some((entry) => formatLogEntry(entry).includes("Vehicle arriving detected.")), false,
         "disabling Log.VehiclePresence suppresses the arriving detection log entirely");
-      assert.equal(service?.getCharacteristic(Characteristic.ContactSensorState).value, true, "the characteristic still flips to true with logging disabled");
+      assert.equal(service?.getCharacteristic(Characteristic.ContactSensorState).value, Characteristic.ContactSensorState.CONTACT_NOT_DETECTED,
+        "the characteristic still flips to CONTACT_NOT_DETECTED with logging disabled");
       assert.equal(mqtt.published.find((entry) => entry.topic.endsWith("vehiclearriving"))?.payload, "true", "MQTT still publishes with logging disabled");
     });
 
@@ -112,7 +114,8 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
       const service = accessory.getServiceById(Service.ContactSensor, RatgdoService.CONTACT_DISCO_VEHICLE_LEAVING);
 
       assert.ok(service, "the vehicle leaving contact sensor service exists when the feature is enabled");
-      assert.equal(service.getCharacteristic(Characteristic.ContactSensorState).value, true, "an ON leaving event writes true to the ContactSensorState characteristic");
+      assert.equal(service.getCharacteristic(Characteristic.ContactSensorState).value, Characteristic.ContactSensorState.CONTACT_NOT_DETECTED,
+        "an ON leaving event writes true to the ContactSensorState characteristic, which HAP stores as CONTACT_NOT_DETECTED");
       assert.equal(loggedAt(entries, "info", "Vehicle leaving detected."), true,
         "a leaving transition logs at info when Log.VehiclePresence is enabled");
       assert.equal(mqtt.published.find((entry) => entry.topic.endsWith("vehicleleaving"))?.payload, "true",
@@ -156,8 +159,8 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
       const service = accessory.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_DISCO_VEHICLE_PRESENCE);
 
       assert.ok(service, "the vehicle presence occupancy sensor service exists when the feature is enabled");
-      assert.equal(service.getCharacteristic(Characteristic.OccupancyDetected).value, true,
-        "an ON vehicle-detected event writes true to the OccupancyDetected characteristic");
+      assert.equal(service.getCharacteristic(Characteristic.OccupancyDetected).value, Characteristic.OccupancyDetected.OCCUPANCY_DETECTED,
+        "an ON vehicle-detected event writes true to the OccupancyDetected characteristic, which HAP stores as OCCUPANCY_DETECTED");
       assert.equal(loggedAt(entries, "info", "Vehicle detected."), true,
         "a presence transition logs at info when Log.VehiclePresence is enabled");
       assert.equal(mqtt.published.find((entry) => entry.topic.endsWith("vehiclepresence"))?.payload, "true",
@@ -175,8 +178,8 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
       const service = accessory.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_DISCO_VEHICLE_PRESENCE);
 
-      assert.equal(service?.getCharacteristic(Characteristic.OccupancyDetected).value, false,
-        "the following OFF event writes false to the OccupancyDetected characteristic");
+      assert.equal(service?.getCharacteristic(Characteristic.OccupancyDetected).value, Characteristic.OccupancyDetected.OCCUPANCY_NOT_DETECTED,
+        "the following OFF event writes false to the OccupancyDetected characteristic, which HAP stores as OCCUPANCY_NOT_DETECTED");
       assert.equal(loggedAt(entries, "info", "Vehicle no longer detected."), true,
         "the OFF presence transition logs the no-longer-detected message at info");
       assert.equal(mqtt.published.filter((entry) => entry.topic.endsWith("vehiclepresence")).at(-1)?.payload, "false",

@@ -14,12 +14,12 @@
  * never touches raw wire semantics.
  *
  * A warm under which a session's key would no longer be the one it was offered reconnects that session, except a healthy, connected, negotiated-plaintext one, which
- * adopts the new key in place - a transport that never used the key has nothing to reconnect for, and the reconnect would only flash the panel. Mid-connect, offline,
- * and encrypted sessions reconnect instead; an auth-failed device reconnects only on a changed key, never on a resend of the key that failed; disposal tears down
- * everything. Which MAC a key is read at is the connection core's rule and how a key is inherited is the engine's, so neither lives in this module. A session is never
- * torn down on the word of a transient device-list read - a mac merely absent from a re-warm keeps its live connection. The pool holds per-mac outcome memory because
- * connects happen while no device is selected and their pushes are unrenderable, so a later view of a device that failed while unselected must re-surface the classified
- * failure rather than a permanent "Connecting...".
+ * adopts the new key in place - a transport that never used the key has nothing to reconnect for, and the reconnect would only flash the panel. Mid-connect,
+ * disconnected, and encrypted sessions reconnect instead; an auth-failed device reconnects only on a changed key, never on a resend of the key that failed; disposal
+ * tears down everything. Which MAC a key is read at is the connection core's rule and how a key is inherited is the engine's, so neither lives in this module. A
+ * session is never torn down on the word of a transient device-list read - a mac merely absent from a re-warm keeps its live connection. The pool holds per-mac
+ * outcome memory because connects happen while no device is selected and their pushes are unrenderable, so a later view of a device that failed while unselected
+ * must re-surface the classified failure rather than a permanent "Connecting...".
  *
  * The warm set and its route are ratgdo's extension to the shared protocol: the warm route declared in homebridge-ui/public/status-routes.mjs, where both halves of the
  * settings surface can read it, and narrowStatusWarmRequest here carry the sidebar's devices and the edited configuration to the pool, while the shared contract
@@ -41,7 +41,9 @@ import { openConnection, openManualConnection } from "./connection.ts";
 import type { DiscoveredRatgdo } from "./discovery.ts";
 import type { EspHomeEvent } from "./types.ts";
 import { RatgdoVariant } from "./types.ts";
+import { isConnectionLive } from "esphome-client";
 import { parseRatgdoService } from "./discovery.ts";
+import { translateLifecycle } from "./protocol/lifecycle.ts";
 import { translateTelemetry } from "./protocol/telemetry.ts";
 
 // The panel's row identities, a closed union used internally to type the label and sizer records exhaustively. The wire carries a row id as a plain string; this closed
@@ -148,11 +150,12 @@ const PROBE_DEADLINE = Object.freeze({ reason: "probe-deadline" });
  * session holds the dialed one, and the address projection reads the dialed one because that is where the panel's connection is; `client` is null until the connection
  * opens; `controller` cancels every in-flight step; `encryptedTransport` records the negotiated transport captured once at connect resolution - true when the client
  * negotiated encryption - and backs the key diff in place of the live isEncrypted getter, which reads false during the client's own reconnect windows; `online`
- * tracks connect and disconnect through the lifecycle listener; `offered` records what the diff last reconciled - what the connection was offered, or the key a healthy
- * plaintext session adopted in place - and, because key choice is pure, what the session's own client offers on its reconnects; it is undefined only on the record a
- * failed address dial mints when that dial failed before any key was chosen; `rowMap` is the entity-id-to-row-id map computed at connect resolution and retained
- * because view() rebuilds a snapshot from it long after the connect; `stack` holds the client and then each retained listener, so teardown releases the listeners
- * before the client's disconnect; `token` is the session's monotonic identity.
+ * is the device's availability as the client's verdicts state it, through the lifecycle translation the platform applies too - set when the connection is adopted,
+ * cleared on `lost` and on a permanent-cause disconnect, set again on `recovered`; `offered` records what the diff last reconciled - what the connection was offered,
+ * or the key a healthy plaintext session adopted in place - and, because key choice is pure, what the session's own client offers on its reconnects; it is undefined
+ * only on the record a failed address dial mints when that dial failed before any key was chosen; `rowMap` is the entity-id-to-row-id map computed at connect
+ * resolution and retained because view() rebuilds a snapshot from it long after the connect; `stack` holds the client and then each retained listener, so teardown
+ * releases the listeners before the client's disconnect; `token` is the session's monotonic identity.
  */
 interface DeviceSession {
 
@@ -587,14 +590,15 @@ export class StatusFeed implements Disposable {
       // A live or in-flight session whose key has not moved is left untouched, which is the whole point of the pool. A session whose key has moved adopts the new key
       // in place - with no teardown - ONLY when it is healthy, connected, and negotiated plaintext: such a transport genuinely does not use the key, so adopting ends
       // the cosmetic Connecting flash an unencrypted device would otherwise show on a global key edit. Every other moved-key session - mid-connect (client still null),
-      // offline (dropped since its last connect), or encrypted - tears down and reconnects against the new key. The branch reads session.encryptedTransport and
-      // session.online, both captured at well-defined moments, never the live client.isEncrypted getter: that getter is connection-phase state that reads false
-      // during any transient disconnect of the client's own auto-reconnect cycle, so a live read would misclassify a mid-blip encrypted device, adopt the key in place,
-      // and permanently desync the still-old-keyed client. An offline plaintext session's reconnect re-captures the transport truth on arrival, which also covers a
-      // device whose firmware later enables encryption: it drops offline on its reboot and rejoins through the reconnect path against the then-current key.
+      // disconnected (its client between sessions, whether or not a verdict has followed), or encrypted - tears down and reconnects against the new key. The branch
+      // reads the client's live health for whether a session is up, because session.online follows the availability verdict and stays true through the window before
+      // one, and reads session.encryptedTransport, captured once at connect resolution, never the live client.isEncrypted getter: that getter is connection-phase state
+      // that reads false during any transient disconnect of the client's own auto-reconnect cycle, so a live read would misclassify a mid-blip encrypted device, adopt
+      // the key in place, and permanently desync the still-old-keyed client. A disconnected plaintext session's reconnect re-captures the transport truth on arrival,
+      // which also covers a device whose firmware later enables encryption: it drops on its reboot and rejoins through the reconnect path against the then-current key.
       if(this.#keyMoved(session.offered)) {
 
-        if((session.client !== null) && session.online && !session.encryptedTransport) {
+        if((session.client !== null) && isConnectionLive(session.client.health()) && !session.encryptedTransport) {
 
           session.offered = { key: this.#keyFor(session.offered?.mac), mac: session.offered?.mac };
         } else {
@@ -607,7 +611,8 @@ export class StatusFeed implements Disposable {
   }
 
   /* Switch the panel's view to one device. A live session re-pushes its snapshot from the client's cache through the retained row map, so a switch between two live
-   * devices constructs and disposes nothing. A still-connecting session pushes "connecting". Otherwise the stored outcome decides: a transient failure (timeout or
+   * devices constructs and disposes nothing, while a session whose device the client has reported lost re-pushes its offline availability instead, because a
+   * snapshot states the device online. A still-connecting session pushes "connecting". Otherwise the stored outcome decides: a transient failure (timeout or
    * unreachable), or a not-found for a device that has since been discovered, retries with a fresh connect, so a temporary outage clears the moment the user reselects
    * the device rather than requiring the panel to be reopened; a key failure, an unsupported firmware, and a misconfigured address each re-push their error, because
    * retrying is pointless until a person changes something and the warm owns that; a warmed-but-undiscovered mac with no outcome pushes "connecting" and lets its timer
@@ -625,6 +630,13 @@ export class StatusFeed implements Disposable {
     if(session) {
 
       if(session.client) {
+
+        if(!session.online) {
+
+          this.#pushOffline(session);
+
+          return;
+        }
 
         this.#pushSnapshot(session, session.client.snapshot());
 
@@ -970,8 +982,9 @@ export class StatusFeed implements Disposable {
 
     /* Register the session's listeners onto its stack. The client is already on it, so each listener goes on after the client and teardown releases the listeners
      * before the client's disconnect, and an intentional reconnect never pushes a spurious "Disconnected" availability event. The telemetry listener translates each
-     * event and pushes a row only for a present panel entity; the lifecycle listener - the canonical typed connect/disconnect channel - drives the availability row.
-     * After a reconnect cycle the device re-bursts full state through the retained telemetry listener, so rows self-heal without a fresh snapshot.
+     * event and pushes a row only for a present panel entity; the lifecycle listener drives the availability row through the translation the platform applies too,
+     * so the row follows the client's reachability verdicts rather than its session boundaries. After a reconnect cycle the device re-bursts full state through the
+     * retained telemetry listener, so rows self-heal without a fresh snapshot.
      */
     session.stack.use(
 
@@ -994,35 +1007,41 @@ export class StatusFeed implements Disposable {
 
       client.on("lifecycle", (lifecycle: LifecycleEvent): void => {
 
-        switch(lifecycle.kind) {
+        const statement = translateLifecycle(lifecycle);
 
-          case "connect":
+        switch(statement) {
 
-            session.online = true;
-            this.#pushForSession(session, { encrypted: lifecycle.encrypted, kind: "availability", online: true, serialNumber: session.mac, session: session.token });
+          case "offline":
+
+            session.online = false;
+            this.#pushOffline(session);
 
             return;
 
-          case "disconnect":
+          case "online":
 
-            session.online = false;
-            this.#pushForSession(session, { encrypted: false, kind: "availability", online: false, serialNumber: session.mac, session: session.token });
+            session.online = true;
+            this.#pushForSession(session, { encrypted: client.isEncrypted, kind: "availability", online: true, serialNumber: session.mac, session: session.token });
+
+            return;
+
+          case null:
 
             return;
 
           default: {
 
-            // Compile-time exhaustiveness: a new LifecycleEvent kind fails to type-check here until it is handled.
-            lifecycle satisfies never;
+            // Compile-time exhaustiveness: a new availability statement fails to type-check here until it is handled.
+            statement satisfies never;
 
             return;
           }
         }
       }));
 
-    // Capture the negotiated transport ONCE, here at connect resolution, and mark the session connected. The initial connect fired inside the connect call before this
-    // listener was registered, so online is set explicitly here and maintained by the lifecycle listener thereafter. warm()'s key diff reads these two session-tracked
-    // fields, never the live isEncrypted getter, for the disconnect-window reason spelled out at that branch.
+    // Capture the negotiated transport ONCE, here at connect resolution, and mark the session online. The initial connect fired inside the connect call before this
+    // listener was registered, so online is set explicitly here and the lifecycle listener's verdicts maintain it thereafter. warm()'s key diff reads
+    // encryptedTransport and the client's live health, never the live isEncrypted getter, for the disconnect-window reason spelled out at that branch.
     session.client = client;
     session.encryptedTransport = client.isEncrypted;
     session.online = true;
@@ -1690,6 +1709,12 @@ export class StatusFeed implements Disposable {
     const encrypted = session.client?.isEncrypted ?? false;
 
     this.#pushForSession(session, { encrypted, kind: "snapshot", online: true, rows, serialNumber: session.mac, session: session.token });
+  }
+
+  // Push a session's offline availability. It carries encrypted false because no transport exists while the device cannot be reached.
+  #pushOffline(session: DeviceSession): void {
+
+    this.#pushForSession(session, { encrypted: false, kind: "availability", online: false, serialNumber: session.mac, session: session.token });
   }
 
   /* Push an event only while its session is still the one installed for its mac. A superseded or torn-down session's late continuation must not reach the panel, so the

@@ -2,17 +2,19 @@
  *
  * testing.helpers.test.ts: Self-test for the shared test harness in testing.helpers.ts.
  *
- * The harness is the foundation every other unit test builds on - the hand-built HAP double, the platform / ESPHome / MQTT doubles, the telemetry factories, and the
- * buildRatgdoAccessory workhorse. A bug here would cascade into misleading pass/fail signals across the whole suite, so this file locks in the harness's own contract:
- * the guarantees the real homebridge-plugin-utils service helpers and the production accessory depend on (a marker service seeds its primary characteristic;
- * getCharacteristic returns a stable instance; triggerSet runs the handler then caches; on/emit/dispose drive and detach; the telemetry factories key the snapshot the
- * way the device reads it; makeTestPlatform wires a REAL FeatureOptions engine). It exercises the harness directly rather than through a production accessory.
+ * The harness is the foundation every other unit test builds on - the platform / ESPHome / MQTT doubles over the shared Homebridge test double, the telemetry
+ * factories, and the buildRatgdoAccessory workhorse. A bug here would cascade into misleading pass/fail signals across the whole suite, so this file locks in the
+ * harness's own contract: the guarantees the production accessory and its tests depend on (on/emit/dispose drive and detach; the telemetry factories key the snapshot
+ * the way the device reads it; makeTestPlatform wires the kit's API and a REAL FeatureOptions engine; buildRatgdoAccessory constructs on Homebridge's own
+ * PlatformAccessory, bridged before construction). It exercises the harness directly rather than through a production accessory.
  */
-import { Characteristic, Service, TestEspHomeClient, TestService, asEspHomeClient, buildRatgdoAccessory, makeBinarySensorEvent,
-  makeCoverEvent, makeFakeOpenClient, makeKonnectedInitialState, makeLightEvent, makeLockEvent, makeRatgdoInitialState, makeRatgdoService, makeSwitchEvent,
-  makeTelemetry, makeTestAccessory, makeTestDevice, makeTestPlatform, openThroughHello, resolverOf } from "./testing.helpers.ts";
-import { ConnectionError, CoverOperation, EncryptionKeyMissingError, EncryptionRequiredError, LockState, NegotiationFailedError, entityId } from "esphome-client";
-import { TestMqttClient, logCount, loggedAt } from "homebridge-plugin-utils/testing";
+import { ConnectionError, CoverOperation, EncryptionKeyMissingError, EncryptionRequiredError, LockState, NegotiationFailedError, entityId,
+  isConnectionLive } from "esphome-client";
+import { PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
+import { Service, TestEspHomeClient, asEspHomeClient, buildRatgdoAccessory, makeBinarySensorEvent, makeCoverEvent, makeFakeOpenClient, makeKonnectedInitialState,
+  makeLightEvent, makeLockEvent, makeRatgdoInitialState, makeRatgdoService, makeSwitchEvent, makeTelemetry, makeTestDevice, makeTestPlatform, openThroughHello,
+  resolverOf } from "./testing.helpers.ts";
+import { TestHomebridgeApi, TestMqttClient, logCount, loggedAt } from "homebridge-plugin-utils/testing";
 import { describe, test } from "node:test";
 import type { LifecycleEvent } from "esphome-client";
 import { RatgdoVariant } from "./types.ts";
@@ -34,236 +36,6 @@ interface EventFields {
 }
 
 const eventFields = (value: unknown): EventFields => value as EventFields;
-
-describe("TestCharacteristic", () => {
-
-  test("updateValue stores the written value and value returns it", () => {
-
-    const char = new TestService(Service.Switch, "s", undefined).getCharacteristic(Characteristic.On);
-
-    char.updateValue(true);
-
-    assert.equal(char.value, true, "the cached value reflects the last updateValue write");
-  });
-
-  test("triggerGet returns the bound getter's result over the cached value", async () => {
-
-    const char = new TestService(Service.Switch, "s", undefined).getCharacteristic(Characteristic.On);
-
-    char.updateValue(false);
-    char.onGet(() => true);
-
-    assert.equal(await char.triggerGet(), true, "the bound onGet handler wins over the cached value");
-  });
-
-  test("triggerGet falls back to the cached value when no getter is bound", async () => {
-
-    const char = new TestService(Service.Switch, "s", undefined).getCharacteristic(Characteristic.On);
-
-    char.updateValue(true);
-
-    assert.equal(await char.triggerGet(), true, "with no onGet bound, triggerGet reads the cache (HAP read-from-cache semantics)");
-  });
-
-  test("triggerSet runs the bound setter and then caches the value", async () => {
-
-    const char = new TestService(Service.Switch, "s", undefined).getCharacteristic(Characteristic.On);
-    let observed;
-
-    char.onSet((value) => {
-
-      observed = value;
-    });
-
-    await char.triggerSet(true);
-
-    assert.equal(observed, true, "the onSet handler runs with the supplied value");
-    assert.equal(char.value, true, "the value is cached after the setter resolves (HAP set-then-cache semantics)");
-  });
-
-  test("setCharacteristic fires the bound onSet handler", () => {
-
-    const service = new TestService(Service.Switch, "s", undefined);
-    let observed;
-
-    service.getCharacteristic(Characteristic.On).onSet((value) => {
-
-      observed = value;
-    });
-
-    service.setCharacteristic(Characteristic.On, true);
-
-    // setCharacteristic routes through triggerSet, whose handler body runs synchronously before the first await, so the side effect is observable without a tick.
-    assert.equal(observed, true, "setCharacteristic drives the onSet handler (the path production MQTT set handlers use)");
-  });
-});
-
-describe("TestService", () => {
-
-  test("getCharacteristic lazily creates and returns a stable instance across calls", () => {
-
-    const service = new TestService(Service.Switch, "s", undefined);
-    const first = service.getCharacteristic(Characteristic.On);
-    const second = service.getCharacteristic(Characteristic.On);
-
-    assert.equal(first, second, "repeated getCharacteristic returns the same instance so a bound onGet/onSet persists");
-  });
-
-  test("characteristics exposes the seed characteristic first in insertion order", () => {
-
-    const service = new Service.GarageDoorOpener("door");
-
-    assert.equal(service.characteristics[0]?.type, Characteristic.CurrentDoorState,
-      "the marker's seed characteristic is first - what the real acquireService destructures to recover the Characteristic constructor");
-  });
-
-  test("testCharacteristic is a pure predicate that never creates", () => {
-
-    const service = new TestService(Service.Switch, "s", undefined);
-    const before = service.characteristics.length;
-
-    assert.equal(service.testCharacteristic(Characteristic.MotionDetected), false, "an unmaterialized characteristic reports absent");
-    assert.equal(service.characteristics.length, before, "testCharacteristic does not lazily create the characteristic it probes");
-  });
-
-  test("addOptionalCharacteristic materializes the characteristic", () => {
-
-    const service = new TestService(Service.Switch, "s", undefined);
-
-    service.addOptionalCharacteristic(Characteristic.StatusActive);
-
-    assert.equal(service.testCharacteristic(Characteristic.StatusActive), true, "addOptionalCharacteristic materializes the characteristic for a later bind");
-  });
-
-  test("removeCharacteristic deletes the materialized characteristic", () => {
-
-    const service = new TestService(Service.Switch, "s", undefined);
-
-    service.getCharacteristic(Characteristic.On);
-    service.removeCharacteristic(service.getCharacteristic(Characteristic.On));
-
-    assert.equal(service.testCharacteristic(Characteristic.On), false, "removeCharacteristic deletes the instance (the path validService takes on a failed service)");
-  });
-
-  test("UUID mirrors the marker's static and falls back to a non-empty sentinel for an unidentified kind", () => {
-
-    assert.equal(new Service.Switch("s").UUID, "Switch", "a namespace marker exposes its static UUID");
-
-    // A stand-in marker without a UUID static. It carries a field so it is not an extraneous (empty) class; the point is the absent static UUID that forces the fallback.
-    class UnknownKind {
-
-      public readonly hapKind = "unknown" as const;
-    }
-
-    assert.equal(new TestService(UnknownKind, "x", undefined).UUID, "unidentified-service-kind",
-      "a hand-rolled type with no UUID static resolves to the never-empty sentinel");
-  });
-
-  test("setPrimaryService records the primary flag", () => {
-
-    const service = new Service.GarageDoorOpener("door");
-
-    service.setPrimaryService(true);
-
-    assert.equal(service.isPrimary, true, "setPrimaryService records HAP's primary designation");
-  });
-});
-
-describe("TestAccessory and makeTestAccessory", () => {
-
-  test("a fresh accessory carries an AccessoryInformation service", () => {
-
-    const accessory = makeTestAccessory();
-
-    assert.ok(accessory.getService(Service.AccessoryInformation), "every accessory is born with an AccessoryInformation service");
-  });
-
-  test("makeTestAccessory applies stable default identity", () => {
-
-    const accessory = makeTestAccessory();
-
-    assert.equal(accessory.displayName, "Test Ratgdo", "the default display name is stable");
-    assert.equal(accessory.UUID, "00000000-0000-0000-0000-000000000000", "the default UUID is a stable all-zero value");
-  });
-
-  test("addService appends a service instance and returns it", () => {
-
-    const accessory = makeTestAccessory();
-    const service = new Service.GarageDoorOpener("door");
-    const returned = accessory.addService(service);
-
-    assert.equal(returned, service, "addService returns the same instance it was handed");
-    assert.equal(accessory.getService(Service.GarageDoorOpener), service, "the added service is findable by type");
-  });
-
-  test("the legacy addService(type, name, subtype) form creates a characteristic-empty service", () => {
-
-    const accessory = makeTestAccessory();
-    const service = accessory.addService(Service.Switch, "extra", "sub");
-
-    assert.equal(service.characteristics.length, 0, "the legacy form produces a plain service with no seeded characteristic");
-    assert.equal(service.subtype, "sub", "the subtype is carried through");
-  });
-
-  test("getService and getServiceById disambiguate by subtype", () => {
-
-    const accessory = makeTestAccessory();
-    const bare = accessory.addService(new Service.Switch("bare"));
-    const subtyped = accessory.addService(new TestService(Service.Switch, "tagged", "tag"));
-
-    assert.equal(accessory.getService(Service.Switch), bare, "getService returns the no-subtype service of the type");
-    assert.equal(accessory.getServiceById(Service.Switch, "tag"), subtyped, "getServiceById returns the service matching both type and subtype");
-  });
-
-  test("addService refuses a subtype-less service beside a same-type subtyped one, as HAP does, and admits a distinct subtype", () => {
-
-    const accessory = makeTestAccessory();
-
-    accessory.addService(new Service.Lightbulb("dimmer", "dimmer"));
-
-    const before = accessory.services.length;
-
-    assert.throws(() => accessory.addService(new Service.Lightbulb("light")), { message: /^Cannot add a Service with the same UUID/ });
-    assert.equal(accessory.services.length, before, "the refused service is never appended");
-    assert.doesNotThrow(() => accessory.addService(new Service.Lightbulb("other", "other")), "a second subtyped service with a distinct subtype is admitted");
-  });
-
-  test("removeService removes the instance", () => {
-
-    const accessory = makeTestAccessory();
-    const service = accessory.addService(new Service.GarageDoorOpener("door"));
-
-    accessory.removeService(service);
-
-    assert.equal(accessory.getService(Service.GarageDoorOpener), undefined, "the removed service is no longer findable");
-  });
-});
-
-describe("HAP marker namespaces", () => {
-
-  test("each service marker seeds its primary characteristic", () => {
-
-    assert.equal(new Service.GarageDoorOpener("x").characteristics[0]?.type, Characteristic.CurrentDoorState, "GarageDoorOpener seeds CurrentDoorState");
-    assert.equal(new Service.Battery("x").characteristics[0]?.type, Characteristic.ChargingState, "Battery seeds ChargingState");
-    assert.equal(new Service.Lightbulb("x").characteristics[0]?.type, Characteristic.On, "Lightbulb seeds On");
-    assert.equal(new Service.MotionSensor("x").characteristics[0]?.type, Characteristic.MotionDetected, "MotionSensor seeds MotionDetected");
-    assert.equal(new Service.OccupancySensor("x").characteristics[0]?.type, Characteristic.OccupancyDetected, "OccupancySensor seeds OccupancyDetected");
-    assert.equal(new Service.ContactSensor("x").characteristics[0]?.type, Characteristic.ContactSensorState, "ContactSensor seeds ContactSensorState");
-    assert.equal(new Service.AccessoryInformation("x").characteristics[0]?.type, Characteristic.Name, "AccessoryInformation seeds Name");
-  });
-
-  test("characteristic statics mirror the real HAP integer constants production compares against", () => {
-
-    assert.equal(Characteristic.CurrentDoorState.OPEN, 0, "CurrentDoorState.OPEN is 0");
-    assert.equal(Characteristic.CurrentDoorState.CLOSED, 1, "CurrentDoorState.CLOSED is 1");
-    assert.equal(Characteristic.CurrentDoorState.STOPPED, 4, "CurrentDoorState.STOPPED is 4");
-    assert.equal(Characteristic.TargetDoorState.OPEN, 0, "TargetDoorState.OPEN is 0");
-    assert.equal(Characteristic.LockCurrentState.SECURED, 1, "LockCurrentState.SECURED is 1");
-    assert.equal(Characteristic.LockCurrentState.UNSECURED, 0, "LockCurrentState.UNSECURED is 0");
-    assert.equal(Characteristic.ChargingState.CHARGING, 1, "ChargingState.CHARGING is 1");
-    assert.equal(Characteristic.ChargingState.NOT_CHARGING, 0, "ChargingState.NOT_CHARGING is 0");
-  });
-});
 
 describe("TestEspHomeClient", () => {
 
@@ -401,6 +173,36 @@ describe("TestEspHomeClient", () => {
     client[Symbol.dispose]();
 
     assert.equal(seen.length, 1, "a listener released before the disposal hears no disconnect");
+  });
+
+  test("health reads a live session by default, follows the lifecycle connect and disconnect emit drives, and answers the live field a test sets", () => {
+
+    const client = new TestEspHomeClient({ isEncrypted: true });
+
+    assert.equal(isConnectionLive(client.health()), true, "a client the open factory returned holds a live session");
+    assert.equal(client.health().encrypted, true, "the live record carries the seeded encryption state");
+
+    client.emit("lifecycle", { kind: "disconnect" });
+
+    assert.equal(isConnectionLive(client.health()), false, "a disconnect leaves the client between sessions");
+
+    client.emit("lifecycle", { cause: new ConnectionError("The reconnect attempt failed.", "CONNECT_FAILED"), kind: "lost" });
+
+    assert.equal(isConnectionLive(client.health()), false, "a lost verdict is no session boundary, so the client stays between sessions");
+
+    client.emit("lifecycle", { encrypted: true, kind: "connect" });
+
+    assert.equal(isConnectionLive(client.health()), true, "a connect begins a live session again");
+
+    client.live = false;
+
+    assert.equal(isConnectionLive(client.health()), false, "a test models a client between sessions that has announced nothing by setting the field");
+    assert.equal(client.health().encrypted, false, "the down record is the library's disconnected baseline, never on an encrypted wire");
+
+    client.live = true;
+    client[Symbol.dispose]();
+
+    assert.equal(isConnectionLive(client.health()), false, "disposal's disconnect goes through emit, so it ends the session too");
   });
 
   test("isEncrypted reads false by default and reflects the seeded value", () => {
@@ -697,6 +499,15 @@ describe("makeTestPlatform", () => {
       "a configured Device.LogName resolves to its value");
     assert.equal(makeTestPlatform().platform.resolveLogName("AABBCCDDEEFF"), undefined, "an unset Device.LogName resolves to undefined");
   });
+
+  test("carries the kit's Homebridge API double, whose HAP namespace is the platform double's own", () => {
+
+    const { platform } = makeTestPlatform();
+
+    assert.ok(platform.api instanceof TestHomebridgeApi, "the platform double's API is the kit's Homebridge API double");
+    assert.equal(platform.hap, platform.api.hap, "the platform double's HAP namespace is its API's, as production's platform reads it");
+    assert.equal(platform.hap.Service.GarageDoorOpener, Service.GarageDoorOpener, "the API runs on the one runtime whose Service namespace the harness exports");
+  });
 });
 
 describe("buildRatgdoAccessory", () => {
@@ -716,6 +527,26 @@ describe("buildRatgdoAccessory", () => {
     const { accessory } = buildRatgdoAccessory({ device: { variant: RatgdoVariant.KONNECTED } });
 
     assert.ok(accessory.getService(Service.GarageDoorOpener), "a Konnected build uses the Konnected snapshot and constructs without throwing");
+  });
+
+  /* The accessory is Homebridge's own PlatformAccessory, made through the platform double's API, and it is on the bridge before the RatgdoAccessory sees it. The seed
+   * runs first, on an accessory not yet bridged, which is the order a cached accessory's services reach Homebridge's restore in.
+   */
+  test("seeds, restores and bridges Homebridge's own PlatformAccessory before constructing on it", () => {
+
+    const seeded: boolean[] = [];
+    const { accessory, platform } = buildRatgdoAccessory({ seed: (cached) => {
+
+      seeded.push(cached._associatedHAPAccessory.bridged);
+    } });
+
+    assert.deepEqual(seeded, [false], "the seed runs once, on the accessory before Homebridge's restore bridges it");
+    assert.deepEqual(platform.api.accessories, [accessory], "the accessory is the one the platform double's API made");
+    assert.equal(accessory.UUID, platform.hap.uuid.generate("AABBCCDDEEFF"), "the accessory's identity is the HAP UUID of the device MAC");
+    assert.equal(accessory._associatedHAPAccessory.bridged, true, "the restore bridged the accessory before construction");
+    assert.deepEqual(platform.api.calls, [], "a restore is Homebridge's own act, so the accessory reaches the bridge with no plugin call recorded");
+    assert.deepEqual([ accessory._associatedPlatform, accessory._associatedPlugin ], [ PLATFORM_NAME, PLUGIN_NAME ],
+      "the restore stamps the accessory with the plugin's own platform name and identifier, as Homebridge's restore of a cached accessory does");
   });
 
   /* The accessory's logger is a gate wrapped around a prefix wrapped around the platform's own gated logger, so a debug call crosses two gates on its way to the

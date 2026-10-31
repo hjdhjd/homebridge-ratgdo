@@ -7,7 +7,7 @@
  * capture budget is injected the same way, but its deadline is the connection core's own timer, so a row that lets it fire waits it out in real milliseconds. The
  * doubles follow the testing.helpers conventions - counters, not booleans, wherever a no-op-versus-double-call distinction matters.
  */
-import { CoverOperation, LockState, entityId } from "esphome-client";
+import { ConnectionError, CoverOperation, LockState, entityId } from "esphome-client";
 import type { DeviceInfo, EntityId, TelemetryEvent } from "esphome-client";
 import { HbpuAbortError, dnsNameKey, formatValueList } from "homebridge-plugin-utils";
 import type { MdnsBrowserLike, MdnsBrowserOptions, MdnsService, Nullable, StatusEvent } from "homebridge-plugin-utils";
@@ -439,8 +439,8 @@ describe("StatusFeed key diff", () => {
 
     // A healthy, connected, negotiated-plaintext session genuinely does not use the key, so a changed key adopts in place with no teardown and no reconnect - this is
     // what ends the cosmetic Connecting flash an unencrypted device would otherwise show on a global key edit. A follow-up re-warm then proves the adopted key was
-    // actually stored: take the session offline and re-warm the SAME adopted key. A build that skipped the record's write would re-diff its stale key and reconnect
-    // through the offline path, so a flat factory count across both re-warms proves the adoption both happened and persisted.
+    // actually stored: disconnect the session and re-warm the SAME adopted key. A build that skipped the record's write would re-diff its stale key and reconnect
+    // through the disconnected path, so a flat factory count across both re-warms proves the adoption both happened and persisted.
     const client = makeClient({ snapshot: restingCache() });
     const openClient = makeFakeOpenClient(async () => client);
     const { browser, feed } = makeFeed({ openClient });
@@ -461,22 +461,22 @@ describe("StatusFeed key diff", () => {
     assert.equal(openClient.calls.length, 1, "a healthy plaintext session adopts the changed key in place - no reconnect, no second factory call");
     assert.equal(client.disposeCount, 0, "the adopting session keeps its live client undisposed");
 
-    // The adoption proof: take the session offline, then re-warm the SAME key it adopted. The stored key now matches, so even the offline path no-ops; a build that
+    // The adoption proof: disconnect the session, then re-warm the SAME key it adopted. The stored key now matches, so even the disconnected path no-ops; a build that
     // never wrote the adopted key would re-diff a stale "k1" here and reconnect.
     client.emit("lifecycle", { cause: undefined, kind: "disconnect" });
     feed.warm(warmOf([MAC], { keys: { [MAC]: "k2" } }));
 
     await settle();
 
-    assert.equal(openClient.calls.length, 1, "the adopted key was stored, so a re-warm carrying it makes no factory call even after the session went offline");
-    assert.equal(client.disposeCount, 0, "no teardown follows the matching-key re-warm on the offline session");
+    assert.equal(openClient.calls.length, 1, "the adopted key was stored, so a re-warm carrying it makes no factory call even after the session disconnected");
+    assert.equal(client.disposeCount, 0, "no teardown follows the matching-key re-warm on the disconnected session");
   });
 
-  test("reconnects an offline plaintext session on a changed key rather than adopting in place", async () => {
+  test("reconnects a disconnected plaintext session on a changed key rather than adopting in place", async () => {
 
-    // In-place adoption is for a HEALTHY session only. A plaintext session that has gone offline does not qualify: it reconnects on a changed key exactly as an encrypted
-    // or mid-connect session does - the conservative fallback that re-captures the transport truth on arrival, covering a device that later enables encryption. Take the
-    // session offline with a disconnect, then re-warm a changed key and assert the reconnect.
+    // In-place adoption is for a HEALTHY session only. A plaintext session whose client has disconnected does not qualify: it reconnects on a changed key exactly as an
+    // encrypted or mid-connect session does - the conservative fallback that re-captures the transport truth on arrival, covering a device that later enables
+    // encryption. Disconnect the session, then re-warm a changed key and assert the reconnect.
     const client1 = makeClient({ snapshot: restingCache() });
     const client2 = makeClient({ snapshot: restingCache() });
     let call = 0;
@@ -502,8 +502,8 @@ describe("StatusFeed key diff", () => {
 
     await settle();
 
-    assert.equal(openClient.calls.length, 2, "an offline plaintext session reconnects on the changed key - no in-place adoption for an unhealthy session");
-    assert.equal(client1.disposeCount, 1, "the offline session's old client is torn down on the reconnect");
+    assert.equal(openClient.calls.length, 2, "a disconnected plaintext session reconnects on the changed key - no in-place adoption for an unhealthy session");
+    assert.equal(client1.disposeCount, 1, "the disconnected session's old client is torn down on the reconnect");
     assert.equal(offeredKey(callsForHost(openClient, ADDR)[1]), "k2", "the reconnect offers the changed key");
   });
 
@@ -1159,29 +1159,117 @@ describe("StatusFeed snapshot sizers", () => {
 
 describe("StatusFeed availability", () => {
 
-  test("pushes an availability event for each lifecycle transition, in order, with the boolean values", async () => {
+  // Connect one warmed device through its discovery and answer the feed and the client, so each availability row starts from a live session.
+  const connectedFeed = async (client: TestEspHomeClient): Promise<ReturnType<typeof makeFeed>> => {
+
+    const built = makeFeed({ openClient: makeFakeOpenClient(async () => client) });
+
+    built.feed.startDiscovery();
+    built.browser().found(makeService());
+
+    await settle();
+
+    built.feed.warm(warmOf([MAC]));
+
+    await settle();
+
+    return built;
+  };
+
+  test("pushes an availability event for each availability verdict, in order, with the boolean values", async () => {
+
+    const client = makeClient({ isEncrypted: true, snapshot: restingCache() });
+    const { pushes } = await connectedFeed(client);
+
+    client.emit("lifecycle", { cause: undefined, kind: "disconnect" });
+    client.emit("lifecycle", { cause: new ConnectionError("The reconnect attempt failed.", "CONNECT_FAILED"), kind: "lost" });
+    client.emit("lifecycle", { encrypted: true, kind: "connect" });
+    client.emit("lifecycle", { kind: "recovered" });
+
+    const availability = pushes.filter((event) => event.kind === "availability");
+
+    assert.deepEqual(availability.map((event) => event.online), [ false, true ],
+      "an outage pushes availability online false at lost and true at recovered, values and order both, and the session boundaries push nothing");
+    assert.deepEqual(availability.map((event) => event.encrypted), [ false, true ],
+      "the lost verdict carries encrypted false and the recovered verdict threads the client's isEncrypted true");
+  });
+
+  test("pushes nothing for a drop the client heals on its first attempt", async () => {
 
     const client = makeClient({ snapshot: restingCache() });
-    const { browser, feed, pushes } = makeFeed({ openClient: makeFakeOpenClient(async () => client) });
+    const { pushes } = await connectedFeed(client);
+    const before = pushes.length;
+
+    client.emit("lifecycle", { cause: undefined, kind: "disconnect" });
+    client.emit("lifecycle", { encrypted: false, kind: "connect" });
+
+    assert.deepEqual(pushes.slice(before), [], "a disconnect and the connect that heals it reach no verdict, so the row stays online with nothing pushed");
+  });
+
+  test("pushes offline for a permanent-cause disconnect that no verdict preceded", async () => {
+
+    const client = makeClient({ snapshot: restingCache() });
+    const { pushes } = await connectedFeed(client);
+    const before = pushes.length;
+
+    client.emit("lifecycle", { cause: new TestPermanentError("A permanent failure."), kind: "disconnect" });
+
+    assert.deepEqual(pushes.slice(before).map((event) => (event.kind === "availability") && !event.online), [true],
+      "a cause the client will not retry pushes the offline availability, since no verdict would ever follow it");
+  });
+
+  test("re-pushes the offline availability rather than a snapshot when the reselected device has been reported lost", async () => {
+
+    const client = makeClient({ snapshot: restingCache() });
+    const { feed, pushes } = await connectedFeed(client);
+
+    client.emit("lifecycle", { cause: new ConnectionError("The reconnect attempt failed.", "CONNECT_FAILED"), kind: "lost" });
+
+    const before = pushes.length;
+
+    feed.view(MAC);
+
+    const emitted = pushes.slice(before);
+
+    assert.equal(emitted.length, 1, "view emits one push for the lost device");
+    assert.ok((emitted[0]?.kind === "availability") && !emitted[0].online, "the push is the offline availability, which keeps the panel's rows marked disconnected");
+    assert.equal(emitted.some((event) => event.kind === "snapshot"), false, "no snapshot is pushed, since a snapshot states the device online");
+  });
+
+  test("reads the connection's live health for the key diff, so a plaintext session dropped inside the patience window reconnects on a changed key", async () => {
+
+    // The drop makes no availability statement, so the session still reads online, while its client holds no live session: the diff must read the client's
+    // health and reconnect, rather than read the availability and adopt a key into a connection that is not there.
+    const client1 = makeClient({ snapshot: restingCache() });
+    const client2 = makeClient({ snapshot: restingCache() });
+    let call = 0;
+    const openClient = makeFakeOpenClient(async () => {
+
+      call++;
+
+      return (call === 1) ? client1 : client2;
+    });
+    const { browser, feed, pushes } = makeFeed({ openClient });
 
     feed.startDiscovery();
     browser().found(makeService());
 
     await settle();
 
-    feed.warm(warmOf([MAC]));
+    feed.warm(warmOf([MAC], { keys: { [MAC]: "k1" } }));
 
     await settle();
 
-    client.emit("lifecycle", { cause: undefined, kind: "disconnect" });
-    client.emit("lifecycle", { encrypted: true, kind: "connect" });
+    client1.emit("lifecycle", { cause: undefined, kind: "disconnect" });
 
-    const availability = pushes.filter((event) => event.kind === "availability");
+    assert.equal(pushes.some((event) => (event.kind === "availability") && !event.online), false, "the drop inside the patience window pushes no offline row");
 
-    assert.deepEqual(availability.map((event) => event.online), [ false, true ],
-      "a disconnect then a reconnect push availability online false then true, values and order both");
-    assert.deepEqual(availability.map((event) => event.encrypted), [ false, true ],
-      "the disconnect carries encrypted false and the reconnect threads lifecycle.encrypted true");
+    feed.warm(warmOf([MAC], { keys: { [MAC]: "k2" } }));
+
+    await settle();
+
+    assert.equal(openClient.calls.length, 2, "the dropped plaintext session reconnects on the changed key rather than adopting it in place");
+    assert.equal(offeredKey(callsForHost(openClient, ADDR)[1]), "k2", "the reconnect offers the changed key");
   });
 });
 

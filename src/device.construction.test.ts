@@ -9,13 +9,18 @@
  * at all) is asserted here through the default and a representative disable; the full hints derivation is netted in device.hints.test.ts.
  */
 import { Characteristic, Service, buildRatgdoAccessory, makeBinarySensorEvent, makeCoverEvent, makeKonnectedInitialState, makeLightEvent, makeLockEvent,
-  makeRatgdoInitialState, makeTestAccessory } from "./testing.helpers.ts";
+  makeRatgdoInitialState } from "./testing.helpers.ts";
 import { CoverOperation, LockState } from "esphome-client";
 import { RatgdoService, RatgdoVariant } from "./types.ts";
 import { describe, test } from "node:test";
-import type { TestAccessory } from "./testing.helpers.ts";
+import { present, triggerGet } from "homebridge-plugin-utils/testing";
+import type { Mock } from "node:test";
+import type { TestPlatformAccessory } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
 import { ratgdoInitialStateEntityIds } from "./entities.ts";
+
+// A HAP service as the runtime's namespace constructs it, the type a seed's added service carries.
+type HapService = InstanceType<typeof Service>;
 
 describe("RatgdoAccessory construction", () => {
 
@@ -27,7 +32,7 @@ describe("RatgdoAccessory construction", () => {
       const door = accessory.getService(Service.GarageDoorOpener);
 
       assert.ok(door, "the garage door opener service is created at construction");
-      assert.equal(door.isPrimary, true, "the garage door is marked the accessory's primary service");
+      assert.equal(door.isPrimaryService, true, "the garage door is marked the accessory's primary service");
       assert.equal(door.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED,
         "a resting (position 0) cover snapshot lands as a CLOSED current door state");
       assert.equal(door.getCharacteristic(Characteristic.TargetDoorState).value, Characteristic.TargetDoorState.CLOSED,
@@ -55,10 +60,10 @@ describe("RatgdoAccessory construction", () => {
     test("reflects an obstruction from the initial snapshot", async () => {
 
       const { accessory } = buildRatgdoAccessory({ initialState: makeRatgdoInitialState([makeBinarySensorEvent("obstruction", true)]) });
-      const door = accessory.getService(Service.GarageDoorOpener);
+      const door = present(accessory.getService(Service.GarageDoorOpener), "the garage door service");
 
       // Obstruction is exposed through onGet rather than an initial updateCharacteristic write, so we read it the way HomeKit does - by invoking the bound getter.
-      assert.equal(await door?.getCharacteristic(Characteristic.ObstructionDetected).triggerGet(), true,
+      assert.equal(await triggerGet(door.getCharacteristic(Characteristic.ObstructionDetected)), true,
         "an obstruction-detected snapshot is reported through the ObstructionDetected getter");
     });
   });
@@ -109,8 +114,8 @@ describe("RatgdoAccessory construction", () => {
     test("sits ahead of the automation dimmer on a fresh accessory with the dimmer enabled, which carries both", () => {
 
       const { accessory } = buildRatgdoAccessory({ userOptions: ["Enable.Opener.Dimmer"] });
-      const lightIndex = accessory.services.findIndex((service) => (service.type === Service.Lightbulb) && (service.subtype === undefined));
-      const dimmerIndex = accessory.services.findIndex((service) => (service.type === Service.Lightbulb) &&
+      const lightIndex = accessory.services.findIndex((service) => (service.UUID === Service.Lightbulb.UUID) && (service.subtype === undefined));
+      const dimmerIndex = accessory.services.findIndex((service) => (service.UUID === Service.Lightbulb.UUID) &&
         (service.subtype === RatgdoService.DIMMER_OPENER_AUTOMATION));
 
       assert.notEqual(lightIndex, -1, "the fresh accessory carries the light's own Lightbulb, with no subtype");
@@ -122,12 +127,15 @@ describe("RatgdoAccessory construction", () => {
     // already be on the accessory when the light joins, and the library would detach and re-add it to make room, which is the detach this row counts.
     test("goes on a fresh accessory with the dimmer enabled without detaching any service", (t) => {
 
-      const accessory = makeTestAccessory();
-      const removeService = t.mock.method(accessory, "removeService");
+      let removeService: Mock<TestPlatformAccessory["removeService"]> | undefined;
 
-      buildRatgdoAccessory({ accessory, userOptions: ["Enable.Opener.Dimmer"] });
+      buildRatgdoAccessory({ seed: (accessory) => {
 
-      assert.equal(removeService.mock.callCount(), 0, "constructing a fresh accessory with the dimmer enabled detaches no service");
+        removeService = t.mock.method(accessory, "removeService");
+      }, userOptions: ["Enable.Opener.Dimmer"] });
+
+      assert.equal(present(removeService, "the removeService spy the seed installed").mock.callCount(), 0,
+        "constructing a fresh accessory with the dimmer enabled detaches no service");
     });
 
     /* An accessory restored from the cache can carry the dimmer's subtyped Lightbulb without the light's. The library makes room for the light by detaching the
@@ -136,16 +144,18 @@ describe("RatgdoAccessory construction", () => {
      */
     test("joins a cached accessory that carries only the automation dimmer, ahead of the same dimmer instance", () => {
 
-      const accessory = makeTestAccessory();
-      const dimmer = accessory.addService(Service.Lightbulb, accessory.displayName, RatgdoService.DIMMER_OPENER_AUTOMATION);
+      let dimmer: HapService | undefined;
 
-      buildRatgdoAccessory({ accessory, userOptions: ["Enable.Opener.Dimmer"] });
+      const { accessory } = buildRatgdoAccessory({ seed: (cached) => {
 
-      const lightIndex = accessory.services.findIndex((service) => (service.type === Service.Lightbulb) && (service.subtype === undefined));
-      const dimmerIndex = accessory.services.findIndex((service) => (service.type === Service.Lightbulb) &&
+        dimmer = cached.addService(Service.Lightbulb, cached.displayName, RatgdoService.DIMMER_OPENER_AUTOMATION);
+      }, userOptions: ["Enable.Opener.Dimmer"] });
+
+      const lightIndex = accessory.services.findIndex((service) => (service.UUID === Service.Lightbulb.UUID) && (service.subtype === undefined));
+      const dimmerIndex = accessory.services.findIndex((service) => (service.UUID === Service.Lightbulb.UUID) &&
         (service.subtype === RatgdoService.DIMMER_OPENER_AUTOMATION));
 
-      assert.equal(accessory.getServiceById(Service.Lightbulb, RatgdoService.DIMMER_OPENER_AUTOMATION), dimmer,
+      assert.equal(accessory.getServiceById(Service.Lightbulb, RatgdoService.DIMMER_OPENER_AUTOMATION), present(dimmer, "the dimmer the seed added"),
         "the dimmer on the constructed accessory is the instance the cache handed back, not a newly created one");
       assert.notEqual(lightIndex, -1, "the cached accessory gains the light's own Lightbulb, with no subtype");
       assert.ok(lightIndex < dimmerIndex, "the light's Lightbulb sits ahead of the dimmer's on the cached accessory");
@@ -158,7 +168,7 @@ describe("RatgdoAccessory construction", () => {
       const { accessory } = buildRatgdoAccessory({ userOptions: [ "Disable.Light", "Enable.Opener.Dimmer" ] });
 
       assert.ok(accessory.getServiceById(Service.Lightbulb, RatgdoService.DIMMER_OPENER_AUTOMATION), "the dimmer's subtyped Lightbulb survives the light's off verdict");
-      assert.equal(accessory.services.some((service) => (service.type === Service.Lightbulb) && (service.subtype === undefined)), false,
+      assert.equal(accessory.services.some((service) => (service.UUID === Service.Lightbulb.UUID) && (service.subtype === undefined)), false,
         "the accessory carries no Lightbulb without a subtype, since the light is disabled");
     });
   });
@@ -188,7 +198,7 @@ describe("RatgdoAccessory construction", () => {
       });
       const presence = accessory.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_DISCO_VEHICLE_PRESENCE);
 
-      assert.equal(presence?.getCharacteristic(Characteristic.OccupancyDetected).value, true,
+      assert.equal(presence?.getCharacteristic(Characteristic.OccupancyDetected).value, Characteristic.OccupancyDetected.OCCUPANCY_DETECTED,
         "a present vehicle in the captured snapshot lands on OccupancyDetected at construction rather than a stale clear");
     });
 
@@ -197,36 +207,33 @@ describe("RatgdoAccessory construction", () => {
       const { accessory } = buildRatgdoAccessory({ userOptions: ["Enable.Disco.OccupancySensor.Vehicle.Presence"] });
       const presence = accessory.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_DISCO_VEHICLE_PRESENCE);
 
-      assert.equal(presence?.getCharacteristic(Characteristic.OccupancyDetected).value, false,
+      assert.equal(presence?.getCharacteristic(Characteristic.OccupancyDetected).value, Characteristic.OccupancyDetected.OCCUPANCY_NOT_DETECTED,
         "an absent vehicle leaves OccupancyDetected clear at construction");
     });
   });
 
   describe("the motion services on an accessory restored from the cache", () => {
 
-    /* The accessory Homebridge hands back for a device it has seen before, carrying the two motion services a previous run wired onto it. Each is seeded through the
-     * same service type and subtype the production configure path looks it up by, so the presence gate finds what a real restore would hand it - seeded any other way,
-     * the lookup would miss and the removal assertion below would hold for the wrong reason.
+    /* Give the accessory Homebridge hands back for a device it has seen before the motion sensor and the motion occupancy sensor a previous run wired onto it. Each is
+     * seeded through the same service type and subtype the production configure path looks it up by, so the presence gate finds what a real restore would hand it -
+     * seeded any other way, the lookup would miss and the removal assertion below would hold for the wrong reason.
      */
-    const restoredAccessory = (): TestAccessory => {
-
-      const accessory = makeTestAccessory();
+    const seedMotionServices = (accessory: TestPlatformAccessory): void => {
 
       accessory.addService(Service.MotionSensor, accessory.displayName);
       accessory.addService(Service.OccupancySensor, accessory.displayName, RatgdoService.OCCUPANCY_SENSOR_MOTION);
-
-      return accessory;
     };
 
     test("keeps both on a Ratgdo device, whose firmware drives them", () => {
 
-      const accessory = restoredAccessory();
+      const { accessory } = buildRatgdoAccessory({ seed: (cached) => {
 
-      assert.ok(accessory.getService(Service.MotionSensor), "the restored accessory carries the motion sensor before construction");
-      assert.ok(accessory.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_SENSOR_MOTION),
-        "the restored accessory carries the motion occupancy sensor before construction");
+        seedMotionServices(cached);
 
-      buildRatgdoAccessory({ accessory, userOptions: ["Enable.Motion.OccupancySensor"] });
+        assert.ok(cached.getService(Service.MotionSensor), "the restored accessory carries the motion sensor before construction");
+        assert.ok(cached.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_SENSOR_MOTION),
+          "the restored accessory carries the motion occupancy sensor before construction");
+      }, userOptions: ["Enable.Motion.OccupancySensor"] });
 
       assert.ok(accessory.getService(Service.MotionSensor), "a Ratgdo device keeps the restored motion sensor, since its hint stays true");
       assert.ok(accessory.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_SENSOR_MOTION),
@@ -235,14 +242,14 @@ describe("RatgdoAccessory construction", () => {
 
     test("strips both from a Konnected device, whose firmware reports no motion", () => {
 
-      const accessory = restoredAccessory();
+      const { accessory } = buildRatgdoAccessory({ device: { variant: RatgdoVariant.KONNECTED }, initialState: makeKonnectedInitialState(), seed: (cached) => {
 
-      assert.ok(accessory.getService(Service.MotionSensor), "the restored accessory carries the motion sensor before construction");
-      assert.ok(accessory.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_SENSOR_MOTION),
-        "the restored accessory carries the motion occupancy sensor before construction");
+        seedMotionServices(cached);
 
-      buildRatgdoAccessory({ accessory, device: { variant: RatgdoVariant.KONNECTED }, initialState: makeKonnectedInitialState(),
-        userOptions: ["Enable.Motion.OccupancySensor"] });
+        assert.ok(cached.getService(Service.MotionSensor), "the restored accessory carries the motion sensor before construction");
+        assert.ok(cached.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_SENSOR_MOTION),
+          "the restored accessory carries the motion occupancy sensor before construction");
+      }, userOptions: ["Enable.Motion.OccupancySensor"] });
 
       assert.equal(accessory.getService(Service.MotionSensor), undefined, "the variant gate takes the cached motion sensor off a Konnected accessory at construction");
       assert.equal(accessory.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_SENSOR_MOTION), undefined,

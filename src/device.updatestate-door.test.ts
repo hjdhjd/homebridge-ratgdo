@@ -124,13 +124,13 @@ describe("RatgdoAccessory.updateState() cover events", () => {
 
       ratgdo.updateState(coverEvent("cover-door", "IDLE", "OPEN", 1));
 
-      assert.equal(occupancy?.getCharacteristic(Characteristic.OccupancyDetected).value, false,
+      assert.equal(occupancy?.getCharacteristic(Characteristic.OccupancyDetected).value, Characteristic.OccupancyDetected.OCCUPANCY_NOT_DETECTED,
         "a freshly-opened door has not yet been open long enough to raise occupancy");
       assert.equal(await mqtt?.invokeGet("dooropenoccupancy" + MQTT_GET_SUFFIX), "false", "the MQTT door-open occupancy getter reports the not-yet-raised state");
 
       clock.advance(RATGDO_OCCUPANCY_DURATION * 1000);
 
-      assert.equal(occupancy.getCharacteristic(Characteristic.OccupancyDetected).value, true,
+      assert.equal(occupancy.getCharacteristic(Characteristic.OccupancyDetected).value, Characteristic.OccupancyDetected.OCCUPANCY_DETECTED,
         "the OccupancyDetected characteristic is raised once the door has been continuously open for the configured duration");
       assert.equal(await mqtt?.invokeGet("dooropenoccupancy" + MQTT_GET_SUFFIX), "true", "the door-open occupancy status flips true and the MQTT getter reflects it");
       assert.ok(mqtt?.published.some((entry) => entry.topic.endsWith("dooropenoccupancy") && (entry.payload === "true")),
@@ -147,7 +147,7 @@ describe("RatgdoAccessory.updateState() cover events", () => {
 
       clock.advance(RATGDO_OCCUPANCY_DURATION * 1000);
 
-      assert.equal(occupancy?.getCharacteristic(Characteristic.OccupancyDetected).value, false,
+      assert.equal(occupancy?.getCharacteristic(Characteristic.OccupancyDetected).value, Characteristic.OccupancyDetected.OCCUPANCY_NOT_DETECTED,
         "closing the door before the duration elapses cancels the pending timer, so occupancy is never raised");
       assert.equal(await mqtt?.invokeGet("dooropenoccupancy" + MQTT_GET_SUFFIX), "false",
         "the MQTT getter still reports the unraised state after the cancelled timer's deadline passes");
@@ -167,7 +167,7 @@ describe("RatgdoAccessory.updateState() cover events", () => {
       clock.advance(RATGDO_OCCUPANCY_DURATION * 1000);
       ratgdo.updateState(coverEvent("cover-door", "IDLE", "CLOSED", 0));
 
-      assert.equal(occupancy?.getCharacteristic(Characteristic.OccupancyDetected).value, false,
+      assert.equal(occupancy?.getCharacteristic(Characteristic.OccupancyDetected).value, Characteristic.OccupancyDetected.OCCUPANCY_NOT_DETECTED,
         "leaving the open state clears the OccupancyDetected characteristic");
       assert.equal(await mqtt?.invokeGet("dooropenoccupancy" + MQTT_GET_SUFFIX), "false",
         "the door-open occupancy status flips back to false when the door is no longer open");

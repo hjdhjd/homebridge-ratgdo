@@ -3,18 +3,19 @@
  * platform.ts: homebridge-ratgdo platform class.
  */
 import type { API, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
-import type { Clock, HomebridgePluginLogging, MdnsDiscovery, MdnsDiscoveryEvent, MqttClient, Nullable } from "homebridge-plugin-utils";
-import { CoalescingTask, FeatureOptions, HbpuAbortError, MQTT_AVAILABILITY_OFFLINE, WakeableWait, createMqttClient, debugGatedLog, discoverServices,
-  formatErrorMessage, isAdvertisedAt, mqttConnectionSettings, mqttTopic, prefixedLog, sanitizeName, superviseLoop, systemClock } from "homebridge-plugin-utils";
+import type { Clock, HomebridgePluginLogging, MdnsBrowserFactory, MdnsDiscovery, MdnsDiscoveryEvent, MqttClient, Nullable } from "homebridge-plugin-utils";
+import { CoalescingTask, FeatureOptions, HbpuAbortError, MQTT_AVAILABILITY_OFFLINE, Perms, WakeableWait, createMqttClient, debugGatedLog, discoverServices,
+  formatErrorMessage, isAdvertisedAt, mdnsBrowserFactory, mqttConnectionSettings, mqttTopic, notResponding, prefixedLog, sanitizeName, superviseLoop,
+  systemClock } from "homebridge-plugin-utils";
 import { DeviceIdentityError, applyDeviceInfo, isEncryptionError, openConnection, openManualConnection } from "./connection.ts";
+import type { EncryptionKeyLookup, OpenEspHomeClient } from "./connection.ts";
 import type { EntityId, EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
+import { LogLevel, openEspHomeClient } from "esphome-client";
 import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_MANUAL_RETRY_INTERVAL, RATGDO_MDNS_SERVICE_TYPE } from "./settings.ts";
 import { featureOptionCategories, featureOptions, normalizeConfig } from "./options.ts";
 import { governingAddress, isZonedAddress, manualAddressList, runManualAddress } from "./manual.ts";
 import { normalizeMac, parseRatgdoService } from "./discovery.ts";
 import type { DiscoveredRatgdo } from "./discovery.ts";
-import type { EncryptionKeyLookup } from "./connection.ts";
-import { LogLevel } from "esphome-client";
 import type { ManualDialOutcome } from "./manual.ts";
 import { RatgdoAccessory } from "./device.ts";
 import type { RatgdoDevice } from "./types.ts";
@@ -22,6 +23,7 @@ import type { RatgdoResolvedConfig } from "./options.ts";
 import { mqttTopics } from "./mqtt.ts";
 import { parseBatteryState } from "./protocol/battery.ts";
 import { ratgdoInitialStateEntityIds } from "./entities.ts";
+import { translateLifecycle } from "./protocol/lifecycle.ts";
 import { translateTelemetry } from "./protocol/telemetry.ts";
 import util from "node:util";
 
@@ -55,6 +57,31 @@ interface AdmitConnectionOptions {
   initialState: ReadonlyMap<EntityId, TelemetryEvent>;
 }
 
+/* The platform's injectable defaults: the boundaries a suite substitutes to drive the real lifecycle with no network and no real time. Homebridge constructs the
+ * platform with three arguments, so every member takes its production default and the field never sees anything else.
+ *
+ * @property browserFactory - How the mDNS browser underneath discovery is built. Defaults to the library's real browser.
+ * @property clock          - The time source every timer the plugin arms reads. Defaults to the system clock.
+ * @property mqttFactory    - How the MQTT client is built, handed the broker settings and the platform's lifetime signal. Defaults to the library's guarded factory.
+ * @property openClient     - How an ESPHome client is opened, for every dial the platform makes. Defaults to esphome-client's own factory.
+ */
+export interface RatgdoPlatformDefaults {
+
+  browserFactory?: MdnsBrowserFactory;
+  clock?: Clock;
+  mqttFactory?: typeof createMqttClient;
+  openClient?: OpenEspHomeClient;
+}
+
+/* The encryption indicator a connection announcement leads with, read from the client's current session: a lock glyph followed by U+FE0E (the text-presentation
+ * variation selector, which forces a monochrome glyph rather than a color emoji in the Homebridge log) and the padding before the message, or nothing for a plaintext
+ * session. The selector is required - stripping it lets terminals render a wide color emoji.
+ */
+function encryptionGlyph(client: EspHomeClient): string {
+
+  return client.capabilities().encryption.active ? "\u{1F512}\u{FE0E}  " : "";
+}
+
 export class RatgdoPlatform implements DynamicPlatformPlugin {
 
   // Cached platform accessories keyed by HAP UUID. Map storage matches the rest of the platform's per-device stores (configuredDevices, connections) and gives O(1)
@@ -64,8 +91,10 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   // twice would be nagging rather than informing.
   private readonly announcedElsewhere: Set<string>;
   public readonly api: API;
+  // How the mDNS browser underneath discovery is built, the production browser in the field and a suite's double under test.
+  private readonly browserFactory: MdnsBrowserFactory;
   /* The one time source every timer the plugin arms reads: each accessory's timer registry and the discovery stream's own deadlines. It is the production clock in the
-   * field and a controllable one under a platform double, so a suite drives every deadline on a virtual timeline instead of serving it out in real seconds.
+   * field and a controllable one a suite injects, so a suite drives every deadline on a virtual timeline instead of serving it out in real seconds.
    */
   public readonly clock: Clock;
   public readonly config: RatgdoResolvedConfig;
@@ -83,16 +112,20 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   // The wakeable pause each address's loop is sitting in, keyed by that address, so the admit chokepoint can end a pause whose address has just been served.
   private readonly manualPauses: Map<string, WakeableWait>;
   public readonly mqtt: Nullable<MqttClient>;
+  // How every dial this platform makes opens its ESPHome client, the production factory in the field and a suite's fake under test.
+  private readonly openClient: OpenEspHomeClient;
   // AbortController scoped to the platform's lifetime. Aborted on Homebridge shutdown so that every signal-aware resource we own (the MQTT client, any future
   // signal-driven primitive) tears itself down through one composed signal instead of per-resource imperative cleanup.
   private readonly shutdownController: AbortController;
 
-  constructor(log: Logging, config: PlatformConfig | undefined, api: API) {
+  constructor(log: Logging, config: PlatformConfig | undefined, api: API, { browserFactory = mdnsBrowserFactory, clock = systemClock,
+    mqttFactory = createMqttClient, openClient = openEspHomeClient }: RatgdoPlatformDefaults = {}) {
 
     this.accessories = new Map();
     this.announcedElsewhere = new Set();
     this.api = api;
-    this.clock = systemClock;
+    this.browserFactory = browserFactory;
+    this.clock = clock;
 
     const legacy = normalizeConfig(config);
 
@@ -122,6 +155,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
      */
     this.log = debugGatedLog(log, (): boolean => this.config.debug);
     this.mqtt = null;
+    this.openClient = openClient;
     this.shutdownController = new AbortController();
 
     // We can't start without being configured.
@@ -137,7 +171,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
      */
     const settings = mqttConnectionSettings({ config: legacy, featureOptions: this.featureOptions });
 
-    this.mqtt = settings && createMqttClient({ ...settings, log: this.log }, { signal: this.shutdownController.signal });
+    this.mqtt = settings && mqttFactory({ ...settings, log: this.log }, { signal: this.shutdownController.signal });
 
     // On every broker session, state each opener this run holds but has not configured as unreachable. The client's lifetime is the platform's, so the registration
     // carries no signal of its own.
@@ -214,11 +248,40 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     }
   }
 
-  // This gets called when homebridge restores cached accessories at startup. We intentionally avoid doing anything significant here, and save all that logic for device
-  // discovery.
+  /* Homebridge calls this for each cached accessory it restores at startup, before the first discovery pass and long before this run can reach the opener behind it.
+   * Until this run's construction claims the accessory, it answers HomeKit with No Response: every characteristic of every service but AccessoryInformation is bound
+   * here, a read and, where the characteristic takes writes, a write, each refusing while the claim is absent. The claim is `configuredDevices`, the one set the MQTT
+   * unconfigured statement reads too, so HomeKit and MQTT cannot disagree about a restored opener, and a device this run never reaches keeps refusing for the run.
+   *
+   * Construction's own bindings replace these wherever it binds, and it binds nothing on some characteristics - a sensor's state, StatusActive, the door's target
+   * read, every ConfiguredName. Each of those keeps its restore binding once the claim stands, and the binding answers the live value for a read and does nothing for
+   * a write, so HAP stores a write exactly as it would with no handler at all, which is what keeps a Home app rename working. That leaves a restored accessory with
+   * read handlers a fresh one never has: after a refused write, a fresh characteristic with no read handler keeps HAP's stored refusal until the next update writes
+   * a value over it, while a restored one answers its value.
+   */
   public configureAccessory(accessory: PlatformAccessory): void {
 
     this.accessories.set(accessory.UUID, accessory);
+
+    const unclaimed = notResponding({ errorClass: this.hap.HapStatusError, unavailable: () => !this.configuredDevices.has(accessory.UUID) });
+
+    for(const service of accessory.services) {
+
+      if(service.UUID === this.hap.Service.AccessoryInformation.UUID) {
+
+        continue;
+      }
+
+      for(const characteristic of service.characteristics) {
+
+        characteristic.onGet(unclaimed(() => characteristic.value));
+
+        if(characteristic.props.perms.includes(Perms.PAIRED_WRITE)) {
+
+          characteristic.onSet(unclaimed(() => undefined));
+        }
+      }
+    }
   }
 
   // Public accessor for an ESPHome client by device MAC. Wraps the internal connections map so the device class can dispatch commands without reaching into platform
@@ -332,6 +395,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       host: address,
       keyFor: this.keyFor,
       log: prefixedLog(log, () => address),
+      openClient: this.openClient,
       shutdownSignal: this.shutdownController.signal
     });
 
@@ -393,8 +457,8 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
    */
   private async runDiscovery(): Promise<void> {
 
-    await using discovery = discoverServices<DiscoveredRatgdo>({ classify: parseRatgdoService, clock: this.clock, log: this.log,
-      serviceType: RATGDO_MDNS_SERVICE_TYPE, signal: this.shutdownController.signal });
+    await using discovery = discoverServices<DiscoveredRatgdo>({ browserFactory: this.browserFactory, classify: parseRatgdoService, clock: this.clock,
+      log: this.log, serviceType: RATGDO_MDNS_SERVICE_TYPE, signal: this.shutdownController.signal });
 
     /* One reconciliation pass at a time, over the discovery's own snapshot. Every event asks for a pass, and a burst of events arriving during a pass buys exactly
      * one follow-up rather than one pass apiece, so an address change that lands while a device is mid-connect is applied after that connect settles instead of
@@ -478,8 +542,8 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
    * real state, and bind the connection. Each phase is a single block; the function reads top-to-bottom as a timeline.
    *
    * The central design choice: `RatgdoAccessory` is constructed AFTER the ESPHome client has connected AND the LatestStateCache has populated with the device's
-   * initial state. The "we do not know yet" window is eliminated rather than modeled - the accessory is born with real telemetry data, configureXxx writes real
-   * values to HAP from frame zero, and no Not-Responding / placeholder-default machinery is needed.
+   * initial state. The accessory is born with real telemetry data and configureXxx writes real values to HAP from frame zero, so no placeholder default ever reaches
+   * HomeKit. A cached accessory waiting on this point answers No Response through the bindings configureAccessory gave it, until this construction claims it.
    *
    * @param discovered - The recognized identity the classify derived from the device's advertisement.
    */
@@ -533,6 +597,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
         keyFor: this.keyFor,
         log: connectLog,
         mac: device.mac,
+        openClient: this.openClient,
         shutdownSignal: this.shutdownController.signal
       });
 
@@ -824,12 +889,13 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       stack.use(client.on("log", this.buildLogListener(ratgdo)));
     }
 
-    /* Run the post-connect setup through the same `onConnect()` chokepoint the lifecycle "connect" handler uses on every subsequent reconnect. Both initial discovery
-     * and reconnect therefore funnel through one path - markOnline() (refresh the identity fields, log the connection, dispatch availability=online) plus
-     * setupBatteryLogs() (re-issue the per-connection SUBSCRIBE_LOGS_REQUEST for Disco variants). Any future post-connect concern gets added to `onConnect()` once and
-     * lights up on both paths automatically.
+    /* Bridge the fresh client's first session. The client emitted that session's connect before the lifecycle listener existed, and a fresh client never emits
+     * recovered, so this runs what the listener runs for the sessions that follow - the per-session identity refresh, and the online statement `recovered` makes -
+     * plus the battery-log subscription, which the client keeps and re-sends itself on every reconnect, so it is made once per client, here.
      */
-    this.onConnect(ratgdo, client, client.capabilities().encryption.active);
+    this.refreshIdentity(ratgdo, client);
+    this.markOnline(ratgdo, client);
+    this.setupBatteryLogs(ratgdo, client);
     this.connections.set(ratgdo.device.mac, { client, stack });
   }
 
@@ -862,8 +928,8 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     }
 
     // A live connection at an address the device still advertises needs nothing, whether or not that address is the one the pick now favors: a re-advertisement
-    // carrying only a changed TXT record, a changed port, or a changed address list lands here, and the identity fields it might have moved are refreshed through
-    // markOnline on the client's own next connect.
+    // carrying only a changed TXT record, a changed port, or a changed address list lands here, and the identity fields it might have moved are refreshed by the
+    // per-session refresh on the client's own next connect.
     if(this.connections.has(ratgdo.device.mac) && isAdvertisedAt(discovered.addresses, ratgdo.device.address)) {
 
       return;
@@ -892,6 +958,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       keyFor: this.keyFor,
       log: prefixedLog(this.log, () => ratgdo.device.name),
       mac: ratgdo.device.mac,
+      openClient: this.openClient,
       shutdownSignal: this.shutdownController.signal
     });
 
@@ -988,7 +1055,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     /* The address is written only once the binding has returned. `bindConnection` runs the post-connect chain, and a fault anywhere in it - the listener
      * registration, the online announcement, the battery-log subscription - leaves this call without a connection. Writing the address first would leave the device
      * claiming an address nothing is connected at, and the listed-address loop reads exactly that field to decide it has nothing left to do: the device would be
-     * passed over on every later attempt and sit disconnected for the run. Nothing inside `bindConnection` or the `onConnect` chain reads `device.address`, so
+     * passed over on every later attempt and sit disconnected for the run. Nothing inside `bindConnection` or the session work it runs reads `device.address`, so
      * moving the write after it costs those callers nothing.
      */
     ratgdo.device.address = address;
@@ -1006,26 +1073,62 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     }
   }
 
-  /* Lifecycle subscription. The lifecycle event is a discriminated union over connect/disconnect transitions. Switching on `kind` with a never-typed default gives
-   * us compile-time exhaustiveness: any future LifecycleEvent variant added upstream surfaces here as a type error rather than silently falling into the disconnect
-   * path. The "connect" branch fires only on RECONNECTS - the connect that opened this client emitted its lifecycle event before this subscription existed, so
-   * `bindConnection` invokes `onConnect()` directly after registering the listeners to bridge that gap. Both paths therefore funnel through `onConnect()`.
+  /* Lifecycle subscription. Availability follows the client's reachability verdicts through the one translation the webUI applies too (protocol/lifecycle.ts), and
+   * the statement is applied before anything else so a diagnostic line lands after the disconnect it explains. The work that belongs to a session rather than to
+   * availability is this listener's own. Every `connect` refreshes the identity fields, because a session can begin on new firmware whether or not an outage came
+   * before it, and a `connect` that finds the opener still online is a drop the client healed on its first attempt, which the log reports at info so a flaky link
+   * stays visible without a false offline. A `connect` after `lost` says nothing of its own, since `recovered` follows it and makes the announcement. A `disconnect`
+   * carries the encryption and identity diagnostics: only the terminal disconnect is sure to hold a permanent cause, because `lost` carries the first failed
+   * attempt's error and a permanent one can arrive on a later attempt. The connect that opened this client emitted before this subscription existed, so
+   * `bindConnection` runs that first session's work itself.
    */
   private buildLifecycleListener(ratgdo: RatgdoAccessory, client: EspHomeClient): (event: LifecycleEvent) => void {
 
     return (event: LifecycleEvent): void => {
 
+      const statement = translateLifecycle(event);
+
+      switch(statement) {
+
+        case "offline":
+
+          ratgdo.updateState({ id: "availability", state: "offline" });
+
+          break;
+
+        case "online":
+
+          this.markOnline(ratgdo, client);
+
+          break;
+
+        case null:
+
+          break;
+
+        default: {
+
+          // Compile-time exhaustiveness: if a new availability statement is added, this statement fails to type-check and forces us to handle it explicitly.
+          statement satisfies never;
+
+          break;
+        }
+      }
+
       switch(event.kind) {
 
         case "connect":
 
-          this.onConnect(ratgdo, client, event.encrypted);
+          this.refreshIdentity(ratgdo, client);
+
+          if(ratgdo.isOnline) {
+
+            ratgdo.log.info("%sRatgdo reconnected after a brief connection drop.", encryptionGlyph(client));
+          }
 
           return;
 
         case "disconnect":
-
-          ratgdo.updateState({ id: "availability", state: "offline" });
 
           // Disconnect cause narrows through the typed error hierarchy. The auto-reconnect supervisor already filters PermanentError subclasses out of the retry
           // budget, so the encryption-key and wrong-device cases below are diagnostic only - the reconnect loop has ended, and the device will not come back without
@@ -1039,6 +1142,11 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
             ratgdo.log.error("The wrong device answered, so the connection is refused: %s", event.cause.message);
           }
+
+          return;
+
+        case "lost":
+        case "recovered":
 
           return;
 
@@ -1070,8 +1178,8 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   }
 
   /* Log subscription. The Disco firmware variant only - we extract battery state from verbose log lines because ESPHome does not expose it as an entity. The
-   * wire-level SUBSCRIBE_LOGS_REQUEST that backs this listener is owned by `setupBatteryLogs()`, which `onConnect()` invokes on every connect and reconnect (the log
-   * subscription is per-connection wire state and must be re-issued).
+   * wire-level SUBSCRIBE_LOGS_REQUEST that backs this listener is owned by `setupBatteryLogs()`, which the fresh client's bridge invokes once; the client re-sends
+   * the subscribed level itself on every reconnect.
    */
   private buildLogListener(ratgdo: RatgdoAccessory): (event: LogEventData) => void {
 
@@ -1095,35 +1203,30 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     };
   }
 
-  /* Single source of truth for the post-connect setup sequence. Called from the initial-connect bridge (after openEspHomeClient resolves) AND from the lifecycle
-   * "connect" branch (every subsequent reconnect). Future post-connect concerns (e.g., re-publishing device metadata to MQTT, re-subscribing to additional feature
-   * channels) get added here in one place rather than duplicated across both call sites.
+  /* The per-session work: refresh the identity fields - the model and the firmware version - from the session's device info, and push them to the accessory's
+   * information service. It runs on every session, the fresh client's first through its bridge and each later one through the lifecycle `connect`, because a
+   * firmware upgrade is the case the refresh exists for and the device can reboot into one over a drop the client heals on its first attempt, which makes no
+   * availability statement at all.
    */
-  private onConnect(ratgdo: RatgdoAccessory, client: EspHomeClient, encrypted: boolean): void {
-
-    this.markOnline(ratgdo, client, encrypted);
-    this.setupBatteryLogs(ratgdo, client);
-  }
-
-  /* Shared online-transition path. Refreshes both identity fields - the model and the firmware version - from the latest deviceInfo, announces the connection in the
-   * log (with the encryption indicator), and dispatches availability=online so HomeKit's StatusActive characteristics light up. A firmware upgrade is the case both
-   * refreshes exist for: the device comes back over a reconnect cycle carrying a new version, and the availability event that follows is what carries both fields
-   * into HomeKit. The log fires unconditionally rather than gating on a status transition: initial discovery already set `status.availability = true` in
-   * buildInitialStatus, so a transition check would suppress the log on first connect. Owning the announcement here keeps the "we connected" signal at exactly one
-   * site, regardless of whether the caller is the initial-discovery path or the lifecycle "connect" handler firing on a reconnect.
-   */
-  private markOnline(ratgdo: RatgdoAccessory, client: EspHomeClient, encrypted: boolean): void {
+  private refreshIdentity(ratgdo: RatgdoAccessory, client: EspHomeClient): void {
 
     applyDeviceInfo(ratgdo.device, client);
+    ratgdo.refreshInfo();
+  }
 
-    // The encryption indicator is a lock glyph followed by U+FE0E (the text-presentation variation selector, which forces a monochrome glyph rather than a color emoji
-    // in the Homebridge log) and two spaces of padding before the message. The selector is required - stripping it lets terminals render a wide color emoji.
-    ratgdo.log.info("%sRatgdo connected.", encrypted ? "\u{1F512}︎  " : "");
+  /* The online statement: announce the connection in the log, with the encryption indicator, and dispatch availability=online so the accessory answers HomeKit
+   * again. It runs at each moment the opener becomes reachable - the fresh client's bridge and the client's `recovered` verdict - so a reconnect after an outage
+   * announces exactly once and a drop the client heals before any verdict announces nothing here. The log fires unconditionally rather than gating on a status
+   * transition: initial discovery already set `status.availability = true` in buildInitialStatus, so a transition check would suppress the log on first connect.
+   */
+  private markOnline(ratgdo: RatgdoAccessory, client: EspHomeClient): void {
+
+    ratgdo.log.info("%sRatgdo connected.", encryptionGlyph(client));
     ratgdo.updateState({ id: "availability", state: "online" });
   }
 
-  /* Re-issue the per-connection SUBSCRIBE_LOGS_REQUEST when the Disco firmware variant is in play. The Disco does not expose battery state as a dedicated entity - we
-   * extract it from verbose log lines instead - and ESPHome's log subscription is per-connection wire state, so it must be re-issued on every connect cycle.
+  /* Subscribe the client to verbose logs when the Disco firmware variant is in play. The Disco does not expose battery state as a dedicated entity - we extract it
+   * from verbose log lines instead. The client keeps the subscribed level and re-sends it itself on every reconnect, so the fresh client's bridge subscribes once.
    */
   private setupBatteryLogs(ratgdo: RatgdoAccessory, client: EspHomeClient): void {
 

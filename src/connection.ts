@@ -399,8 +399,9 @@ resolveWaitList: (client: EspHomeClient) => WaitListOutcome<TIdentity, TRefusal>
 
 /* Refresh a device's identity fields from the connected client's device info. The mDNS TXT record seeds both the model and the firmware version at discovery, but the
  * client's deviceInfo() is the authoritative source for each and a firmware upgrade can change either, so both are refreshed from it here. The platform applies this
- * before it constructs the accessory, so the accessory's first characteristic write is already correct, and again on every connect through markOnline, which is what
- * carries a post-upgrade version into HomeKit. A field whose member the record omits keeps whatever discovery seeded, so a partial record never blanks an identity.
+ * before it constructs the accessory, so the accessory's first characteristic write is already correct, and again on every session through the platform's per-session
+ * identity refresh, which is what carries a post-upgrade version into HomeKit. A field whose member the record omits keeps whatever discovery seeded, so a partial
+ * record never blanks an identity.
  *
  * @param device - The device record whose model and firmware version are refreshed in place.
  * @param client - The connected client whose device info is read.

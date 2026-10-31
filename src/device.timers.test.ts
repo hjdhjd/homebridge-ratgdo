@@ -14,6 +14,7 @@ import { describe, test } from "node:test";
 import type { EspHomeEvent } from "./types.ts";
 import { RatgdoService } from "./types.ts";
 import assert from "node:assert/strict";
+import { triggerSet } from "homebridge-plugin-utils/testing";
 
 // The motion timer is armed for RATGDO_MOTION_DURATION seconds; the production code multiplies the seconds constant by 1000 to reach the setTimeout delay, so the tests
 // mirror that conversion exactly rather than hardcoding a magic millisecond literal.
@@ -121,7 +122,8 @@ describe("RatgdoAccessory timers", () => {
       // Arm the occupancy timer at t=0: a motion event raises motion occupancy immediately and schedules its release for occupancyMs.
       ratgdo.updateState({ id: "binary_sensor-motion", state: "ON" });
 
-      assert.equal(occupancy.getCharacteristic(Characteristic.OccupancyDetected).value, true, "the leading motion event raises motion occupancy immediately");
+      assert.equal(occupancy.getCharacteristic(Characteristic.OccupancyDetected).value, Characteristic.OccupancyDetected.OCCUPANCY_DETECTED,
+        "the leading motion event raises motion occupancy immediately");
 
       // Advance partway, then deliver a second motion event. The occupancy timer restarts from this point rather than firing at its original instant.
       clock.advance(occupancyMs - 2000);
@@ -130,13 +132,13 @@ describe("RatgdoAccessory timers", () => {
       // Cross the moment the ORIGINAL occupancy timer would have fired. Because it was restarted, occupancy must still be raised here.
       clock.advance(2000);
 
-      assert.equal(occupancy.getCharacteristic(Characteristic.OccupancyDetected).value, true,
+      assert.equal(occupancy.getCharacteristic(Characteristic.OccupancyDetected).value, Characteristic.OccupancyDetected.OCCUPANCY_DETECTED,
         "the original occupancy timer was restarted, so occupancy remains raised past its would-be fire instant");
 
       // Advance to the restarted timer's due instant. The single surviving timer fires exactly once, releasing occupancy.
       clock.advance(occupancyMs - 2000);
 
-      assert.equal(occupancy.getCharacteristic(Characteristic.OccupancyDetected).value, false,
+      assert.equal(occupancy.getCharacteristic(Characteristic.OccupancyDetected).value, Characteristic.OccupancyDetected.OCCUPANCY_NOT_DETECTED,
         "the restarted occupancy timer fires exactly once at its own due instant, releasing occupancy");
     });
   });
@@ -164,7 +166,7 @@ describe("RatgdoAccessory timers", () => {
       // Cross the ORIGINAL due instant. Because the window was never restarted, the timer fires here and raises occupancy.
       clock.advance(2000);
 
-      assert.equal(occupancy.getCharacteristic(Characteristic.OccupancyDetected).value, true,
+      assert.equal(occupancy.getCharacteristic(Characteristic.OccupancyDetected).value, Characteristic.OccupancyDetected.OCCUPANCY_DETECTED,
         "the door-open occupancy timer armed once and fired at its original deadline despite the repeated open");
     });
   });
@@ -233,7 +235,7 @@ describe("RatgdoAccessory timers", () => {
       const lockTarget = door.getCharacteristic(Characteristic.LockTargetState);
 
       // Fire the HomeKit set against LockTargetState.SECURED. The handler's command() fails (no client), so the optimistic value is cached and a revert is scheduled.
-      await lockTarget.triggerSet(Characteristic.LockTargetState.SECURED);
+      await triggerSet(lockTarget, Characteristic.LockTargetState.SECURED);
 
       assert.equal(lockTarget.value, Characteristic.LockTargetState.SECURED, "HomeKit's optimistic set caches the toggled value before the revert fires");
       assert.equal(client.commands.length, 0, "no command reached the device because the client was unavailable");
@@ -262,7 +264,7 @@ describe("RatgdoAccessory timers", () => {
 
       const lockTarget = door.getCharacteristic(Characteristic.LockTargetState);
 
-      await lockTarget.triggerSet(Characteristic.LockTargetState.SECURED);
+      await triggerSet(lockTarget, Characteristic.LockTargetState.SECURED);
 
       assert.equal(client.commands.length, 1, "a successful lock onSet dispatches exactly one command to the device");
 

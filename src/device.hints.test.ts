@@ -13,7 +13,7 @@
  */
 import { Characteristic, Service, buildRatgdoAccessory, makeKonnectedInitialState, makeRatgdoInitialState } from "./testing.helpers.ts";
 import { describe, test } from "node:test";
-import { formatLogEntry, loggedAt } from "homebridge-plugin-utils/testing";
+import { formatLogEntry, loggedAt, triggerSet } from "homebridge-plugin-utils/testing";
 import { LockCommand } from "esphome-client";
 import { RATGDO_OCCUPANCY_DURATION } from "./settings.ts";
 import { RatgdoAccessory } from "./device.ts";
@@ -283,8 +283,8 @@ describe("RatgdoAccessory hints", () => {
       assert.equal(service.testCharacteristic(Characteristic.LockTargetState), true,
         "the first pass leaves the pair present, so the second pass below is the one that meets an already-carried characteristic");
 
-      /* Stand in for the handler the previous process bound with one that dispatches nothing, which is what makes this test able to tell the two outcomes apart: the
-       * characteristic double keeps a single handler, so a pass that skipped the bind would leave this inert one in place and the set below would reach no device.
+      /* Stand in for the handler the previous process bound with one that dispatches nothing, which is what makes this test able to tell the two outcomes apart: a
+       * HAP characteristic keeps a single set handler, so a pass that skipped the bind would leave this inert one in place and the set below would reach no device.
        */
       let inertHandlerRan = false;
 
@@ -293,18 +293,18 @@ describe("RatgdoAccessory hints", () => {
         inertHandlerRan = true;
       });
 
-      /* A second accessory over the SAME TestAccessory is what a cached accessory restored after a Homebridge restart looks like: the service and its characteristics
-       * survive, and nothing bound in the previous process does. Constructing through the helper again would fabricate a fresh accessory and never reach that state,
-       * so this repeats the helper's own two construction casts against the handles it already returned.
+      /* A second accessory over the SAME PlatformAccessory is what a cached accessory restored after a Homebridge restart looks like: the service and its
+       * characteristics survive, and nothing bound in the previous process does. Constructing through the helper again would fabricate a fresh accessory and never
+       * reach that state, so this repeats the helper's own platform cast against the handles it already returned.
        */
-      const restored = new RatgdoAccessory(platform as unknown as ConstructorParameters<typeof RatgdoAccessory>[0],
-        accessory as unknown as ConstructorParameters<typeof RatgdoAccessory>[1], ratgdo.device, makeRatgdoInitialState());
+      const restored = new RatgdoAccessory(platform as unknown as ConstructorParameters<typeof RatgdoAccessory>[0], accessory, ratgdo.device,
+        makeRatgdoInitialState());
 
       assert.ok(restored, "the restored accessory configures over the service it inherited");
 
       client.commands.length = 0;
 
-      await service.getCharacteristic(Characteristic.LockTargetState).triggerSet(Characteristic.LockTargetState.SECURED);
+      await triggerSet(service.getCharacteristic(Characteristic.LockTargetState), Characteristic.LockTargetState.SECURED);
 
       assert.equal(inertHandlerRan, false, "the restored pass replaced the inert handler rather than leaving the characteristic bound to it");
       assert.deepEqual(client.commands, [{ id: "lock-lock_remotes", payload: { command: LockCommand.LOCK } }],

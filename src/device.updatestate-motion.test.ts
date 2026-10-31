@@ -11,7 +11,7 @@
 import { Characteristic, Service, buildRatgdoAccessory } from "./testing.helpers.ts";
 import { RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION } from "./settings.ts";
 import { describe, test } from "node:test";
-import { logCount, loggedAt } from "homebridge-plugin-utils/testing";
+import { logCount, loggedAt, present, triggerGet } from "homebridge-plugin-utils/testing";
 import { MQTT_GET_SUFFIX } from "homebridge-plugin-utils";
 import { RatgdoService } from "./types.ts";
 import assert from "node:assert/strict";
@@ -95,7 +95,8 @@ describe("RatgdoAccessory.updateState() motion and obstruction handling", () => 
       const occupancy = accessory.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_SENSOR_MOTION);
 
       assert.ok(occupancy, "the motion occupancy sensor service exists when Motion.OccupancySensor is enabled");
-      assert.equal(occupancy.getCharacteristic(Characteristic.OccupancyDetected).value, true, "a motion event raises OccupancyDetected on the motion occupancy sensor");
+      assert.equal(occupancy.getCharacteristic(Characteristic.OccupancyDetected).value, Characteristic.OccupancyDetected.OCCUPANCY_DETECTED,
+        "a motion event raises OccupancyDetected on the motion occupancy sensor");
       assert.equal(await mqtt.invokeGet("/occupancy" + MQTT_GET_SUFFIX), "true", "status.motionOccupancy is surfaced through the occupancy MQTT get handler");
 
       /* The expected list carries the transition's own 'true' followed by a second one the driver republished: running a getter through the client's get pattern
@@ -108,7 +109,8 @@ describe("RatgdoAccessory.updateState() motion and obstruction handling", () => 
 
       clock.advance(RATGDO_OCCUPANCY_DURATION * 1000);
 
-      assert.equal(occupancy.getCharacteristic(Characteristic.OccupancyDetected).value, false, "the motion occupancy timer clears OccupancyDetected after the duration");
+      assert.equal(occupancy.getCharacteristic(Characteristic.OccupancyDetected).value, Characteristic.OccupancyDetected.OCCUPANCY_NOT_DETECTED,
+        "the motion occupancy timer clears OccupancyDetected after the duration");
       assert.equal(await mqtt.invokeGet("/occupancy" + MQTT_GET_SUFFIX), "false", "status.motionOccupancy is cleared once the motion occupancy timer fires");
       assert.deepEqual(mqtt.published.filter((entry) => entry.topic.endsWith("/occupancy")).map((entry) => entry.payload), [ "true", "true", "false", "false" ],
         "the motion occupancy lifecycle publishes 'true' on detection and 'false' when the timer clears it, each beside its own getter republish");
@@ -174,10 +176,10 @@ describe("RatgdoAccessory.updateState() motion and obstruction handling", () => 
 
       ratgdo.updateState({ id: "binary_sensor-obstruction", state: "ON" });
 
-      const door = accessory.getService(Service.GarageDoorOpener);
+      const door = present(accessory.getService(Service.GarageDoorOpener), "the garage door service");
 
       // Obstruction is exposed through onGet rather than a cached value, so we read it the way HomeKit does - by invoking the bound getter.
-      assert.equal(await door?.getCharacteristic(Characteristic.ObstructionDetected).triggerGet(), true, "an obstruction-ON event reports true through the getter");
+      assert.equal(await triggerGet(door.getCharacteristic(Characteristic.ObstructionDetected)), true, "an obstruction-ON event reports true through the getter");
       assert.deepEqual(mqtt.published.filter((entry) => entry.topic.endsWith("/obstruction")).map((entry) => entry.payload), ["true"],
         "an obstruction transition publishes a single 'true' to MQTT");
       assert.equal(loggedAt(entries, "info", "Obstruction detected."), true, "an obstruction transition logs an info-level notice when Log.Obstruction is enabled");
@@ -192,9 +194,9 @@ describe("RatgdoAccessory.updateState() motion and obstruction handling", () => 
       ratgdo.updateState({ id: "binary_sensor-obstruction", state: "ON" });
       ratgdo.updateState({ id: "binary_sensor-obstruction", state: "OFF" });
 
-      const door = accessory.getService(Service.GarageDoorOpener);
+      const door = present(accessory.getService(Service.GarageDoorOpener), "the garage door service");
 
-      assert.equal(await door?.getCharacteristic(Characteristic.ObstructionDetected).triggerGet(), false, "clearing the obstruction reports false through the getter");
+      assert.equal(await triggerGet(door.getCharacteristic(Characteristic.ObstructionDetected)), false, "clearing the obstruction reports false through the getter");
       assert.deepEqual(mqtt.published.filter((entry) => entry.topic.endsWith("/obstruction")).map((entry) => entry.payload), [ "true", "false" ],
         "the obstruction lifecycle publishes 'true' on detection and 'false' when it clears");
       assert.equal(loggedAt(entries, "info", "Obstruction no longer detected."), true, "the obstruction-cleared transition logs an info-level no-longer-detected notice");
@@ -209,9 +211,9 @@ describe("RatgdoAccessory.updateState() motion and obstruction handling", () => 
       // The resting snapshot has the obstruction clear, so an OFF event is a no-op for the gated side effects.
       ratgdo.updateState({ id: "binary_sensor-obstruction", state: "OFF" });
 
-      const door = accessory.getService(Service.GarageDoorOpener);
+      const door = present(accessory.getService(Service.GarageDoorOpener), "the garage door service");
 
-      assert.equal(await door?.getCharacteristic(Characteristic.ObstructionDetected).triggerGet(), false, "an unchanged obstruction state remains clear");
+      assert.equal(await triggerGet(door.getCharacteristic(Characteristic.ObstructionDetected)), false, "an unchanged obstruction state remains clear");
       assert.equal(mqtt.published.filter((entry) => entry.topic.endsWith("/obstruction")).length, 0, "an unchanged obstruction state publishes nothing to MQTT");
       assert.equal(loggedAt(entries, "info", "Obstruction"), false, "an unchanged obstruction state logs no obstruction notice");
     });
