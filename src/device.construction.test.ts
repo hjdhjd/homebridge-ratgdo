@@ -62,9 +62,32 @@ describe("RatgdoAccessory construction", () => {
       const { accessory } = buildRatgdoAccessory({ initialState: makeRatgdoInitialState([makeBinarySensorEvent("obstruction", true)]) });
       const door = present(accessory.getService(Service.GarageDoorOpener), "the garage door service");
 
-      // Obstruction is exposed through onGet rather than an initial updateCharacteristic write, so we read it the way HomeKit does - by invoking the bound getter.
+      // The stored value is read before the getter runs, because HomeKit's read writes the getter's answer over it and would hide a construction that wrote none.
+      assert.equal(door.getCharacteristic(Characteristic.ObstructionDetected).value, true,
+        "an obstruction-detected snapshot is written to the stored ObstructionDetected as the accessory is built");
       assert.equal(await triggerGet(door.getCharacteristic(Characteristic.ObstructionDetected)), true,
-        "an obstruction-detected snapshot is reported through the ObstructionDetected getter");
+        "and the ObstructionDetected getter reports it too, agreeing with the stored value");
+    });
+
+    /* An accessory Homebridge restored from its cache carries the ObstructionDetected the previous run last stored, so the seed raises it on the garage door service
+     * the configure path then finds rather than creates. A clear snapshot clears it as the accessory is built, so Home's tile shows no stale obstruction until the
+     * next event or read. The row reads the stored value alone, because HomeKit's read writes the getter's answer over it and would hide a construction that wrote none.
+     */
+    test("clears an obstruction a restored accessory carries when built from a clear snapshot", () => {
+
+      let cachedDoor: HapService | undefined;
+
+      const { accessory } = buildRatgdoAccessory({ seed: (cached) => {
+
+        cachedDoor = cached.addService(Service.GarageDoorOpener, cached.displayName);
+        cachedDoor.updateCharacteristic(Characteristic.ObstructionDetected, true);
+      } });
+
+      const door = present(accessory.getService(Service.GarageDoorOpener), "the garage door service");
+
+      assert.equal(door, present(cachedDoor, "the garage door the seed added"), "the garage door on the built accessory is the one the cache handed back");
+      assert.equal(door.getCharacteristic(Characteristic.ObstructionDetected).value, false,
+        "a clear snapshot is written over the cached obstruction to the stored ObstructionDetected as the accessory is built");
     });
   });
 

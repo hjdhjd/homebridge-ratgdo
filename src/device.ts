@@ -724,6 +724,7 @@ export class RatgdoAccessory implements Disposable {
 
     service.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.status.door);
     service.updateCharacteristic(this.hap.Characteristic.TargetDoorState, this.doorTargetStateBias(this.status.door));
+    service.updateCharacteristic(this.hap.Characteristic.ObstructionDetected, this.status.obstruction);
 
     // The door target handler answers nothing. HAP reads a set handler's answer as a write response, and TargetDoorState supports none, so an answer here would only
     // earn a characteristic warning on every write.
@@ -1278,8 +1279,8 @@ export class RatgdoAccessory implements Disposable {
 
   /* Central per-telemetry-event state router, invoked for every inbound ESPHome event (many times per second during a door transition). We alias every service we
    * might touch into locals at method entry so the hot path costs one map read per service rather than repeated getService() lookups, and dispatch on event.id. Most
-   * branches guard the characteristic write on an actual state change; the obstruction and Disco vehicle-sensor branches instead write the characteristic
-   * unconditionally and gate only the status, log, and MQTT side effects on the transition.
+   * branches guard the characteristic write on an actual state change; the obstruction and Disco vehicle-sensor branches instead write the sensor's own
+   * characteristic unconditionally and gate everything else they do on the transition.
    */
   public updateState(event: EspHomeEvent): void {
 
@@ -1295,7 +1296,6 @@ export class RatgdoAccessory implements Disposable {
     const lightBulbService = this.services[RatgdoService.LIGHT];
     const lockoutService = this.services[RatgdoService.SWITCH_LOCKOUT];
     const motionService = this.services[RatgdoService.MOTION_SENSOR];
-    const switchService = this.services[RatgdoService.SWITCH_OPENER_AUTOMATION];
 
     switch(event.id) {
 
@@ -1417,7 +1417,19 @@ export class RatgdoAccessory implements Disposable {
         // Only act if we're not already at the state we're updating to.
         if(this.status.obstruction !== (event.state === "ON")) {
 
+          /* The door's target and the automation switch read the obstruction only through whether it holds the door open, so we re-state them only when this change
+           * moves that answer for the door's current state, read before the status write and again after it. A fully closed door's answer does not depend on the
+           * obstruction, so a beam break or its clearing there writes neither...re-stating them would put back what construction or the last door event wrote,
+           * overwriting a command the user has given before the door's first movement event arrives.
+           */
+          const heldOpen = this.obstructionHoldsOpen(this.status.door);
+
           this.status.obstruction = event.state === "ON";
+
+          if(this.obstructionHoldsOpen(this.status.door) !== heldOpen) {
+
+            this.updateDoorTargetAndSwitch();
+          }
 
           if(this.hints.logObstruction) {
 
@@ -1524,19 +1536,11 @@ export class RatgdoAccessory implements Disposable {
           }, this.hints.doorOpenOccupancyDuration * 1000);
         }
 
-        // We only update the target state if our current state is NOT stopped. If we are stopped, we are at the target state by definition. When the user resumes the
-        // door operation, it will complete the action. Put another way, when we enter a stopped state, HomeKit essentially is pausing the action. When we tell the
-        // opener to open/close, it will continue the action it had previously begun before stopping. Additionally, we always want to ensure we update TargetDoorState
-        // before updating CurrentDoorState in order to work around some notification sequencing quirks HomeKit occasionally has.
-        if(this.status.door !== this.hap.Characteristic.CurrentDoorState.STOPPED) {
-
-          garageDoorService?.updateCharacteristic(this.hap.Characteristic.TargetDoorState, this.doorTargetStateBias(this.status.door));
-        }
+        // We always want to ensure we update TargetDoorState before updating CurrentDoorState in order to work around some notification sequencing quirks HomeKit
+        // occasionally has, so the door's target and the automation switch are written first.
+        this.updateDoorTargetAndSwitch();
 
         garageDoorService?.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.status.door);
-
-        // Update our automation switch, if configured.
-        switchService?.updateCharacteristic(this.hap.Characteristic.On, this.isDoorOpen());
 
         if(this.hints.logOpener) {
 
@@ -1873,9 +1877,9 @@ export class RatgdoAccessory implements Disposable {
     return "unknown";
   }
 
-  /* Whether the door counts as open for the automation switch: in any state but closed, which covers open, stopped, and an obstructed door. The switch's read, its
-   * write at startup, its writes as the door moves, and its revert after a refused write answer by this one rule, so the switch is never put back to a state its own
-   * read would contradict.
+  /* Whether the door counts as open for the automation switch: open, opening or stopped, or any state but closed while an obstruction holds it open. The
+   * switch's read, its write at startup, its writes as the door moves and as an obstruction starts or stops holding the door open, and its revert after a refused
+   * write answer by this one rule, so the switch is never put back to a state its own read would contradict.
    */
   private isDoorOpen(): boolean {
 
@@ -1897,12 +1901,21 @@ export class RatgdoAccessory implements Disposable {
     return this.status.lock === this.hap.Characteristic.LockCurrentState.SECURED;
   }
 
+  /* Whether an obstruction holds the door open, the one condition the door's target and the automation switch each read, so their rules cannot disagree about an
+   * obstructed door. It holds at a door in any state but fully closed: a moving or stopped door with its beam broken reverses or is held open, so it is open in
+   * HomeKit's terms. A fully closed door with its beam broken has not moved, so it stays closed, and a beam break alone never shows Home a closed door as opening.
+   */
+  private obstructionHoldsOpen(state: CharacteristicValue): boolean {
+
+    return this.status.obstruction && (state !== this.hap.Characteristic.CurrentDoorState.CLOSED);
+  }
+
   // Utility function to return our bias for what the current door state should be. This backs the door-open rule the automation switch answers by.
   private doorCurrentStateBias(state: CharacteristicValue): CharacteristicValue {
 
     // Our current door state reflects our opinion on what open or closed means in HomeKit terms. For the obvious states, this is easy. For some of the edge cases, it can
-    // be less so. Our north star is that if we are in an obstructed state, we are open.
-    if(this.status.obstruction) {
+    // be less so. Our north star is that if an obstruction holds the door open, we are open.
+    if(this.obstructionHoldsOpen(state)) {
 
       return this.hap.Characteristic.CurrentDoorState.OPEN;
     }
@@ -1930,9 +1943,10 @@ export class RatgdoAccessory implements Disposable {
   private doorTargetStateBias(state: CharacteristicValue): CharacteristicValue {
 
     // We need to be careful with respect to the target state and we need to make some reasonable assumptions about where we intend to end up. If we are opening or
-    // closing, our target state needs to be the completion of those actions. If we're stopped or obstructed, we're going to assume the desired target state is to be
-    // open, since that is the typical opener behavior, and it's impossible for us to know with reasonable certainty what the original intention of the action was.
-    if(this.status.obstruction) {
+    // closing, our target state needs to be the completion of those actions. If we're stopped, or an obstruction holds the door open, we're going to assume the desired
+    // target state is to be open, since that is the typical opener behavior, and it's impossible for us to know with reasonable certainty what the original intention of
+    // the action was. A fully closed door with its beam broken has not moved, so it keeps targeting closed.
+    if(this.obstructionHoldsOpen(state)) {
 
       return this.hap.Characteristic.TargetDoorState.OPEN;
     }
@@ -1969,6 +1983,23 @@ export class RatgdoAccessory implements Disposable {
 
         return this.hap.Characteristic.LockTargetState.UNSECURED;
     }
+  }
+
+  /* Write the door's target and the automation switch from the door's state, the HomeKit values whose rules read the obstruction as well as the door. The door event
+   * calls this on each change to the door, and the obstruction event on each change that moves whether an obstruction holds the door open, so each re-states them by
+   * the same rules, and each call leaves the switch holding what its own read answers. We only update the target state if our current state is NOT stopped. If we are
+   * stopped, we are at the target state by definition. When the user resumes the door operation, it will complete the action. Put another way, when we enter a
+   * stopped state, HomeKit essentially is pausing the action. When we tell the opener to open/close, it will continue the action it had begun before stopping. A
+   * caller that also writes CurrentDoorState writes it after this, so the target always reaches HomeKit first.
+   */
+  private updateDoorTargetAndSwitch(): void {
+
+    if(this.status.door !== this.hap.Characteristic.CurrentDoorState.STOPPED) {
+
+      this.services[RatgdoService.GARAGE_DOOR]?.updateCharacteristic(this.hap.Characteristic.TargetDoorState, this.doorTargetStateBias(this.status.door));
+    }
+
+    this.services[RatgdoService.SWITCH_OPENER_AUTOMATION]?.updateCharacteristic(this.hap.Characteristic.On, this.isDoorOpen());
   }
 
   /* Utility function to move a switch's status field, its characteristic, and its MQTT topic together on a state change. Used by the switch-* event handlers in

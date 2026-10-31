@@ -81,6 +81,45 @@ describe("RatgdoAccessory.updateState() cover events", () => {
       assert.equal(accessory.getService(Service.GarageDoorOpener)?.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.STOPPED,
         "an IDLE OPEN cover parked strictly between 0 and 1 is treated as stopped-at-partial rather than fully open");
     });
+
+    test("writes the door's target ahead of its current state on a transition", () => {
+
+      const { accessory, ratgdo } = buildRatgdoAccessory();
+      const door = present(accessory.getService(Service.GarageDoorOpener), "the garage door service");
+
+      accessory.clearObservations();
+
+      ratgdo.updateState(coverEvent("cover-door", "OPENING", "OPEN", 0.5));
+
+      assert.deepEqual(accessory.changesOn(door, Characteristic.TargetDoorState, Characteristic.CurrentDoorState).map((change) => change.characteristic.UUID),
+        [ Characteristic.TargetDoorState.UUID, Characteristic.CurrentDoorState.UUID ],
+        "TargetDoorState reaches HomeKit before CurrentDoorState, the order HomeKit's notifications need");
+    });
+
+    test("writes the door's target as the door opens and closes, and writes no target when the door stops", () => {
+
+      const { accessory, ratgdo } = buildRatgdoAccessory();
+      const door = present(accessory.getService(Service.GarageDoorOpener), "the garage door service");
+      const target = door.getCharacteristic(Characteristic.TargetDoorState);
+
+      accessory.clearObservations();
+
+      ratgdo.updateState(coverEvent("cover-door", "OPENING", "OPEN", 0.5));
+
+      assert.equal(target.value, Characteristic.TargetDoorState.OPEN, "an opening door's event targets open, the completion of the action under way");
+
+      ratgdo.updateState(coverEvent("cover-door", "CLOSING", "OPEN", 0.5));
+
+      assert.equal(target.value, Characteristic.TargetDoorState.CLOSED, "a closing door's event targets closed");
+
+      ratgdo.updateState(coverEvent("cover-door", "IDLE", "OPEN", 0.5));
+
+      assert.equal(door.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.STOPPED, "the door idle at half travel has stopped");
+      assert.deepEqual(accessory.changesOn(door, Characteristic.TargetDoorState).map((change) => change.newValue),
+        [ Characteristic.TargetDoorState.OPEN, Characteristic.TargetDoorState.CLOSED ],
+        "the opening and closing events each write the target once, and the stopped door's event writes none, since a stopped door is at its target by definition");
+      assert.equal(target.value, Characteristic.TargetDoorState.CLOSED, "so the target HomeKit holds stays the close the door was carrying out when it stopped");
+    });
   });
 
   describe("the IDLE partial-open boundary", () => {
@@ -212,7 +251,7 @@ describe("RatgdoAccessory.updateState() cover events", () => {
       const dimmer = present(accessory.getServiceById(Service.Lightbulb, RatgdoService.DIMMER_OPENER_AUTOMATION), "the automation dimmer");
 
       assert.equal(dimmer.getCharacteristic(Characteristic.Brightness).value, 0, "the obstructed door stands at the closed position");
-      assert.equal(dimmer.getCharacteristic(Characteristic.On).value, false, "so the dimmer's startup write leaves it off, though the door counts as open");
+      assert.equal(dimmer.getCharacteristic(Characteristic.On).value, false, "so the dimmer's startup write leaves it off");
       assert.equal(await triggerGet(dimmer.getCharacteristic(Characteristic.On)), false, "and HomeKit's read answers off, never On at a Brightness of zero");
     });
 
