@@ -31,12 +31,13 @@ import { ConnectionError, CoverOperation, EncryptionKeyMissingError, EncryptionR
   entityId } from "esphome-client";
 import type { ConnectionHealth, DeviceInfo, EntityId, EspHomeClient, LifecycleEvent, LogEventData, NoiseServerHello, PskResolver, TelemetryEvent } from "esphome-client";
 import { FeatureOptions, onAbort } from "homebridge-plugin-utils";
-import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_MDNS_SERVICE_TYPE } from "./settings.ts";
+import { PLUGIN_NAME, RATGDO_MDNS_SERVICE_TYPE } from "./settings.ts";
 import { TestClock, TestMdnsBrowserFactory, TestMqttClient, capturingLog, expectAt, loadHomebridge, makeService, makeTxtStrings,
   watchServerWarnings } from "homebridge-plugin-utils/testing";
 import type { TestHomebridgeApi, TestLogEntry, TestMdnsBrowser, TestPlatformAccessory } from "homebridge-plugin-utils/testing";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import type { OpenEspHomeClient } from "./connection.ts";
+import { PLATFORM_NAME } from "./webui/settings.ts";
 import { RatgdoAccessory } from "./device.ts";
 import type { RatgdoDevice } from "./types.ts";
 import { RatgdoPlatform } from "./platform.ts";

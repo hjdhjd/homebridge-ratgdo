@@ -4,20 +4,20 @@
  * Covers the boot warm, the trailing debounce, the send-suppression diff, every forced-resend belt, the address-refresh latch and the identity strip it feeds, the
  * feature-options parameters the page declares, the legacy-settings migration's write path, and the shared route constants both halves address.
  *
- * The page is the real module, not a re-implementation: the harness routes its framework specifiers to the shipped browser files and its webUI shell to the double,
- * so the feature-option engine the card composes its writes through and the configuration session that stages the migration are the library's own. What the fakes observe
- * is therefore the page's behavior rather than a restatement of it - the host's request log, the listener records each fake keeps for what the page registered on
- * it, the double's counters, and the fake document's state.
+ * The page is the real module, not a re-implementation: the harness routes its framework specifiers to the shipped browser files, its own modules to their TypeScript
+ * sources, and its webUI shell to the double, so the feature-option engine the card composes its writes through and the configuration session that stages the
+ * migration are the library's own. What the fakes observe is therefore the page's behavior rather than a restatement of it - the host's request log, the listener
+ * records each fake keeps for what the page registered on it, the double's counters, and the fake document's state.
  */
 import type { DeviceListResult, FakeCatalog, FakeConfigEntry, FakeDevice, FakeElement, FakeValueControl, RecordedLog } from "./webui-double.helpers.ts";
 import { LIBRARY_UI_DIR, loadUi } from "./webui.helpers.ts";
-import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE, STATUS_WARM_ROUTE, defaultConfig, defaultDevices, fire, isValueControl, webUi } from "./webui-double.helpers.ts";
+import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE, STATUS_WARM_ROUTE } from "./webui/status-routes.ts";
 import { beforeEach, describe, test } from "node:test";
+import { defaultConfig, defaultDevices, fire, isValueControl, webUi } from "./webui-double.helpers.ts";
 import { expectAt, settle } from "homebridge-plugin-utils/testing";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import type { CommitConfigResult } from "homebridge-plugin-utils";
 import type { LoadedUi } from "./webui.helpers.ts";
-import { RATGDO_VARIANT_LABELS } from "./types.ts";
 import assert from "node:assert/strict";
 
 // The two fixture devices' macs, and the key configured against the first of them.
@@ -456,6 +456,20 @@ describe("the ratgdo settings page", () => {
       assert.equal(watched.length, 1, "the boot warm is the one request the panel's link-lost watchdog is watching");
       assert.equal(watched[0], warm?.answer, "the watchdog observes the warm request itself, so a rejection reaches it as a rejection");
     });
+
+    test("hands the panel the row templates as its placeholder skeleton, each with its label and width, and motion with its latch", async () => {
+
+      using page = await loadUi();
+
+      assert.deepEqual(page.double.params.statusPanel?.placeholderRows, [
+
+        { id: "door", label: "Door", sizer: "Stopped (100%)" },
+        { id: "lock", label: "Remotes", sizer: "Unlocked" },
+        { id: "motion", label: "Motion", latch: { seconds: 5, value: "Detected" }, sizer: "Detected" },
+        { id: "light", label: "Light", sizer: "Off" },
+        { id: "obstruction", label: "Obstruction", sizer: "Obstructed" }
+      ], "the skeleton lists every row in display order with its label and its widest value, and clears a detected motion back on the motion latch");
+    });
   });
 
   describe("the legacy-settings migration", () => {
@@ -607,15 +621,6 @@ describe("the ratgdo settings page", () => {
         "a Ratgdo device is offered the whole logging section, the vehicle-presence row included");
       assert.deepEqual(visibleOptions(page, undefined, "Log"), [ "Debug", "Opener", "Light", "Motion", "Obstruction", "VehiclePresence" ],
         "the global page is offered the whole logging section");
-    });
-
-    test("bridges a device's group word to a variant key by lowercasing it, which is the pairing the plugin declares", () => {
-
-      for(const [ variant, label ] of Object.entries(RATGDO_VARIANT_LABELS)) {
-
-        assert.equal(label.toLowerCase(), variant,
-          "the " + label + " family word lowercases to the variant key the catalog declares, which is the fold the page's visibility rule rests on");
-      }
     });
   });
 
@@ -1032,6 +1037,34 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       assert.equal(plaintext.findElement((element) => (element.textContent === "Encrypted: ")), null,
         "a device that negotiated no encryption shows no Encrypted row - its absence is not a fact worth a line");
+    });
+
+    test("waits out the page's own bound on a test nothing answers, and only then paints the unreachable verdict", async (t) => {
+
+      // A probe the server never answers, so the page's own bound on the round trip is the only thing that can end the test.
+      const answer = Promise.withResolvers<unknown>();
+
+      using page = await loadUi({ probe: () => answer.promise });
+
+      const card = openCard(page);
+
+      card.address.value = "10.0.0.20";
+      fire(card.test, "click");
+
+      await settle();
+
+      t.mock.timers.tick(14999);
+
+      await settle();
+
+      assert.equal(card.verdict.textContent, "Connecting to the device...", "a millisecond short of the page's bound, the test is still waiting on the server");
+
+      t.mock.timers.tick(1);
+
+      await settle();
+
+      assert.equal(card.verdict.textContent, "Nothing answered at that address. Check the address, and that the device is on the network.",
+        "the bound elapsing ends the wait with the unreachable verdict rather than leaving the card connecting");
     });
   });
 

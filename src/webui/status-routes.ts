@@ -1,12 +1,11 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * status-routes.mjs: The status-protocol routes ratgdo's settings page and its UI server both address.
+ * status-routes.ts: The status-protocol routes ratgdo's settings page and its UI server both address, defined once here for each of them to import.
  */
 
 /* The single home for ratgdo's own additions to the shared status protocol. Both halves of the settings surface address the bridge through these constants: the page
- * running in the browser and the UI server running in the Config UI X child process. This directory is the one place both halves can read a constant from - Config UI X
- * serves it to the page as static files, and the package ships it to Node alongside the server - while dist/ is a Node-only build output the browser is never served,
- * so a route declared there could only reach the page as a copied literal. Declaring the routes here instead makes the page and the server read the same characters.
+ * running in the browser loads the copy the build places beside it, and the UI server running in the Config UI X child process loads the same module from the plugin's
+ * build, so the page and the server read the same characters.
  *
  * The push-event name and the view route belong to homebridge-plugin-utils and are imported from the package root by both adapters, so what lives here is ratgdo's
  * own additions to the protocol and nothing else.

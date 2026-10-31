@@ -11,16 +11,18 @@ import type { Clock, HomebridgePluginLogging, MdnsBrowserFactory, MdnsDiscovery,
 import type { ConnectionFailureReason, EncryptionKeyLookup, ManualConnectionFailureReason, OpenEspHomeClient, PermanentCauseDescription } from "./connection.ts";
 import type { EntityId, EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
 import { LogLevel, PermanentError, openEspHomeClient } from "esphome-client";
-import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_MDNS_SERVICE_TYPE, RATGDO_RETRY_INTERVAL } from "./settings.ts";
+import { PLATFORM_NAME, RATGDO_ADDRESS_OPTION, RATGDO_DEBUG_OPTION, RATGDO_ENCRYPTION_KEY_OPTION } from "./webui/settings.ts";
+import { PLUGIN_NAME, RATGDO_MDNS_SERVICE_TYPE, RATGDO_RETRY_INTERVAL } from "./settings.ts";
 import { applyDeviceInfo, describePermanentCause, identityRefusal, openConnection, openManualConnection } from "./connection.ts";
 import { featureOptionCategories, featureOptions, normalizeConfig } from "./options.ts";
-import { governingAddress, isZonedAddress, manualAddressList, runManualAddress, runRetryLoop } from "./manual.ts";
+import { governingAddress, manualAddressList, runManualAddress, runRetryLoop } from "./manual.ts";
 import { normalizeMac, parseRatgdoService } from "./discovery.ts";
 import type { DialOutcome } from "./manual.ts";
 import type { DiscoveredRatgdo } from "./discovery.ts";
 import { RatgdoAccessory } from "./device.ts";
 import type { RatgdoDevice } from "./types.ts";
 import type { RatgdoResolvedConfig } from "./options.ts";
+import { isZonedAddress } from "./webui/manual-address.ts";
 import { mqttTopics } from "./mqtt.ts";
 import { parseBatteryState } from "./protocol/battery.ts";
 import { ratgdoInitialStateEntityIds } from "./entities.ts";
@@ -156,7 +158,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.connections = new Map();
     this.discoveredDevices = new Set();
     this.featureOptions = new FeatureOptions(featureOptionCategories, featureOptions, legacy.options);
-    this.manualAddresses = manualAddressList(this.featureOptions.valueList({ option: "Device.Address" }));
+    this.manualAddresses = manualAddressList(this.featureOptions.valueList({ option: RATGDO_ADDRESS_OPTION }));
     this.manualPauses = new Map();
 
     /* Assemble the effective configuration. This is where a raw configuration property and a configured feature option meet for every setting the plugin resolves
@@ -166,12 +168,12 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
      */
     this.config = {
 
-      debug: this.featureOptions.consolidatedFlag({ fallback: legacy.debug, option: "Log.Debug" }),
+      debug: this.featureOptions.consolidatedFlag({ fallback: legacy.debug, option: RATGDO_DEBUG_OPTION }),
       options: legacy.options
     };
 
     this.hap = api.hap;
-    this.keyFor = (mac?: string): Nullable<string | undefined> => this.featureOptions.value("Device.Encryption.Key", mac);
+    this.keyFor = (mac?: string): Nullable<string | undefined> => this.featureOptions.value(RATGDO_ENCRYPTION_KEY_OPTION, mac);
     /* Wrap the logger Homebridge handed us in the library's config-gated composition. The plugin offers a debug setting of its own, read live on every call, and the
      * gated channel emits through warn because Homebridge prints its DEBUG lines only when Homebridge's own global debug switch is on...warn is the level that
      * actually reaches the user's log. Wrapping rather than overwriting a method on Homebridge's own instance leaves that object exactly as Homebridge owns it.

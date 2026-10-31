@@ -5,12 +5,13 @@
  * library's persistence helper gathers into its window on the platform's TestClock, and the removal it makes for a device the user disabled.
  */
 import type { BuildPlatformResult, TestEspHomeClient } from "./testing.helpers.ts";
-import { PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import type { TestHomebridgeApiCall, TestPlatformAccessory } from "homebridge-plugin-utils/testing";
 import { buildPlatform, makeCachedAccessory, makeFakeOpenClient, makeOpenerClient, makeOpenerService } from "./testing.helpers.ts";
 import { describe, test } from "node:test";
 import { expectAt, logCount, present, settle, settleUntil } from "homebridge-plugin-utils/testing";
 import { ACCESSORY_SAVE_WINDOW_MS } from "homebridge-plugin-utils";
+import { PLATFORM_NAME } from "./webui/settings.ts";
+import { PLUGIN_NAME } from "./settings.ts";
 import assert from "node:assert/strict";
 
 // The openers this suite admits, each in the plugin's identity form, and the address each advertises.

@@ -9,9 +9,10 @@
  * the failure-revert path through a triggerSet against a client-unavailable accessory, so the command() failure branch that arms scheduleUiRevert runs unchanged.
  */
 import { Characteristic, Service, buildRatgdoAccessory } from "./testing.helpers.ts";
-import { RATGDO_MOTION_DURATION, RATGDO_UI_REVERT_DELAY } from "./settings.ts";
 import { describe, test } from "node:test";
 import type { EspHomeEvent } from "./types.ts";
+import { RATGDO_MOTION_DURATION } from "./webui/settings.ts";
+import { RATGDO_UI_REVERT_DELAY } from "./settings.ts";
 import { RatgdoService } from "./types.ts";
 import assert from "node:assert/strict";
 import { triggerSet } from "homebridge-plugin-utils/testing";

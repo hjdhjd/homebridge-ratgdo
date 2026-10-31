@@ -18,7 +18,7 @@
   },
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && homebridge-plugin-utils copy-webui",
     "build-docs": "npm run build && homebridge-plugin-utils prepare-docs dist/options.js && homebridge-plugin-utils prepare-mqtt dist/mqtt.js && homebridge-plugin-utils prepare-chrome docChrome.json",
     "build-ui": "homebridge-plugin-utils prepare-ui homebridge-ui/public/lib",
     "check-docs": "homebridge-plugin-utils prepare-docs dist/options.js --check && homebridge-plugin-utils prepare-mqtt dist/mqtt.js --check && homebridge-plugin-utils prepare-chrome docChrome.json --check --offline",
@@ -28,7 +28,7 @@
     "prebuild": "npm run clean && npm run build-ui",
     "prelint": "npm run build-ui",
     "prepublishOnly": "npm run lint && npm run typecheck && npm run build",
-    "test": "node --test --experimental-test-coverage --test-coverage-include=\"src/**/*.ts\" --test-coverage-include=\"homebridge-ui/public/*.mjs\" --test-coverage-exclude=\"src/**/*.test.ts\" --test-coverage-exclude=\"src/**/*.helpers.ts\" --test-coverage-exclude=\"src/platform.ts\" --test-coverage-exclude=\"homebridge-ui/public/ui.mjs\" --test-coverage-lines=85 --test-coverage-branches=80 --test-coverage-functions=85 --test-timeout=15000 \"src/**/*.test.ts\"",
+    "test": "node --test --experimental-test-coverage --test-coverage-include=\"src/**/*.ts\" --test-coverage-exclude=\"src/**/*.test.ts\" --test-coverage-exclude=\"src/**/*.helpers.ts\" --test-coverage-exclude=\"src/platform.ts\" --test-coverage-lines=85 --test-coverage-branches=80 --test-coverage-functions=85 --test-timeout=15000 \"src/**/*.test.ts\"",
     "test:watch": "node --test --watch \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit"
   },

@@ -10,8 +10,10 @@ import { LockCommand, LockState, isConnectionLive } from "esphome-client";
 import { MQTT_AVAILABILITY_OFFLINE, MQTT_AVAILABILITY_ONLINE, TimerRegistry, acquireService, debugGatedLog, mqttTopic, notResponding, prefixedLog, validCharacteristic,
   validService } from "homebridge-plugin-utils";
 import { RATGDO_ENTITIES, idFor } from "./entities.ts";
-import { RATGDO_KONNECTED_PCW_DURATION, RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION, RATGDO_UI_REVERT_DELAY } from "./settings.ts";
-import { RATGDO_VARIANT_LABELS, RatgdoService, RatgdoVariant } from "./types.ts";
+import { RATGDO_KONNECTED_PCW_DURATION, RATGDO_OCCUPANCY_DURATION, RATGDO_UI_REVERT_DELAY } from "./settings.ts";
+import { RatgdoService, RatgdoVariant } from "./types.ts";
+import { RATGDO_MOTION_DURATION } from "./webui/settings.ts";
+import { RATGDO_VARIANT_LABELS } from "./webui/variants.ts";
 import type { RatgdoEntityRef } from "./entities.ts";
 import type { RatgdoPlatform } from "./platform.ts";
 import { mqttTopics } from "./mqtt.ts";

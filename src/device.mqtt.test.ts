@@ -11,12 +11,13 @@
  * driven through the double's connection lever.
  */
 import { MQTT_GET_SUFFIX, MQTT_SET_SUFFIX } from "homebridge-plugin-utils";
-import { RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION } from "./settings.ts";
 import type { TestMqttClient, TestMqttPublish } from "homebridge-plugin-utils/testing";
 import { buildRatgdoAccessory, makeBinarySensorEvent, makeCoverEvent, makeKonnectedInitialState, makeLightEvent, makeLockEvent,
   makeRatgdoInitialState, makeSwitchEvent } from "./testing.helpers.ts";
 import { describe, test } from "node:test";
 import { LockState } from "esphome-client";
+import { RATGDO_MOTION_DURATION } from "./webui/settings.ts";
+import { RATGDO_OCCUPANCY_DURATION } from "./settings.ts";
 import { RatgdoVariant } from "./types.ts";
 import assert from "node:assert/strict";
 import { loggedAt } from "homebridge-plugin-utils/testing";

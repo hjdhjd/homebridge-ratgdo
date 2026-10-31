@@ -11,18 +11,8 @@
  * and a test that varies one of them wants the rest to follow from the same description.
  */
 import type { CommitConfigResult, FeatureCategoryEntry, FeatureOptionEntry, Nullable } from "homebridge-plugin-utils";
+import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE } from "./webui/status-routes.ts";
 import { featureOptionCategories, featureOptions } from "./options.ts";
-
-/* The shared route module, read the way every browser module is read from TypeScript here: through a specifier held in a variable, so the import resolves at runtime
- * against a module that publishes no declarations. The fake host answers the addresses route by this identity rather than by a literal of its own, which is what keeps
- * each route spelled out in exactly one file across the whole repository.
- */
-const ROUTES_MODULE = "../homebridge-ui/public/status-routes.mjs";
-const sharedRoutes = (await import(ROUTES_MODULE)) as { STATUS_ADDRESSES_ROUTE: string; STATUS_PROBE_ROUTE: string; STATUS_WARM_ROUTE: string };
-
-export const STATUS_ADDRESSES_ROUTE = sharedRoutes.STATUS_ADDRESSES_ROUTE;
-export const STATUS_PROBE_ROUTE = sharedRoutes.STATUS_PROBE_ROUTE;
-export const STATUS_WARM_ROUTE = sharedRoutes.STATUS_WARM_ROUTE;
 
 // The option catalog the page reads, in the two members the framework's own accessor narrows a /getOptions response down to.
 export interface FakeCatalog {
@@ -335,7 +325,8 @@ export const makeHost = ({ addresses = {}, config = defaultConfig(), probe }: { 
   let held = config;
 
   // What each route answers with. The catalog is the served one, the addresses route hands back the staged discovery map, the probe route hands back whatever the
-  // fixture staged for it, and everything else answers null exactly as the plugin's own UI server does for its void-returning handlers.
+  // fixture staged for it, and everything else answers null exactly as the plugin's own UI server does for its void-returning handlers. Each of ratgdo's routes is
+  // matched by the constant the page and the server import rather than by a literal of its own, so each route is spelled out in exactly one file.
   const answerFor = (route: string): unknown => {
 
     switch(route) {

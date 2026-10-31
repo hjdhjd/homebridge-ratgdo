@@ -21,11 +21,12 @@
  * outcome memory because connects happen while no device is selected and their pushes are unrenderable, so a later view of a device that failed while unselected
  * must re-surface the classified failure rather than a permanent "Connecting...".
  *
- * The warm set and its route are ratgdo's extension to the shared protocol: the warm route declared in homebridge-ui/public/status-routes.mjs, where both halves of the
- * settings surface can read it, and narrowStatusWarmRequest here carry the sidebar's devices and the edited configuration to the pool, while the shared contract
- * carries the pushed status back. The configuration is read and never logged, because it can carry encryption keys. Everything the panel renders - rows, updates,
- * availability, and errors - crosses the bridge as ESPHome-free, variant-free, entity-id-free data, so the row vocabulary and the label choices stay ratgdo's while the
- * ESPHome details never reach the wire.
+ * The warm set and its route are ratgdo's extension to the shared protocol: the warm route declared in src/webui/status-routes.ts, which the page and the UI server both
+ * import, and narrowStatusWarmRequest here carry the sidebar's devices and the edited configuration to the pool, while the shared contract carries the pushed status
+ * back. The configuration is read and never logged, because it can carry encryption keys. Everything the panel renders - rows, updates, availability, and errors -
+ * crosses the bridge as ESPHome-free, variant-free, entity-id-free data, so the row vocabulary and the label choices stay ratgdo's while the ESPHome details never reach
+ * the wire. That vocabulary lives in src/webui/status-rows.ts, which the page reads too, so the skeleton the panel renders before a snapshot and the rows this pool
+ * pushes are built from the same templates.
  */
 import type { Clock, HomebridgePluginLogging, MdnsBrowserFactory, MdnsDiscovery, MdnsDiscoveryEvent, Nullable, StatusErrorReason, StatusEvent,
   StatusRow } from "homebridge-plugin-utils";
@@ -33,22 +34,21 @@ import type { EntityId, EspHomeClient, LifecycleEvent, TelemetryEvent } from "es
 import { FeatureOptions, HbpuAbortError, TimerRegistry, composeSignals, discoverServices, isAdvertisedAt, prefixedLog, superviseLoop,
   systemClock } from "homebridge-plugin-utils";
 import type { ManualConnectionFailureReason, OpenEspHomeClient } from "./connection.ts";
+import { RATGDO_ADDRESS_OPTION, RATGDO_ENCRYPTION_KEY_OPTION, RATGDO_WEBUI_PROBE_TIMEOUT } from "./webui/settings.ts";
 import { RATGDO_ENTITIES, idFor, presentEntityIds, ratgdoInitialStateEntityIds, ratgdoStatusEntityIds } from "./entities.ts";
-import { RATGDO_MDNS_SERVICE_TYPE, RATGDO_MOTION_DURATION, RATGDO_WEBUI_DISCOVERY_TIMEOUT, RATGDO_WEBUI_PROBE_TIMEOUT } from "./settings.ts";
-import { canonicalManualAddress, governingAddress, isRetryableFailure, isZonedAddress, manualAddressList } from "./manual.ts";
+import { RATGDO_MDNS_SERVICE_TYPE, RATGDO_WEBUI_DISCOVERY_TIMEOUT } from "./settings.ts";
+import { STATUS_ROW_ORDER, mapRowValue, statusRowTemplate } from "./webui/status-rows.ts";
+import { canonicalManualAddress, isZonedAddress } from "./webui/manual-address.ts";
 import { featureOptionCategories, featureOptions } from "./options.ts";
+import { governingAddress, isRetryableFailure, manualAddressList } from "./manual.ts";
 import { identityRefusal, openConnection, openManualConnection } from "./connection.ts";
 import type { DiscoveredRatgdo } from "./discovery.ts";
-import type { EspHomeEvent } from "./types.ts";
 import { RatgdoVariant } from "./types.ts";
+import type { StatusRowId } from "./webui/status-rows.ts";
 import { isConnectionLive } from "esphome-client";
 import { parseRatgdoService } from "./discovery.ts";
 import { translateLifecycle } from "./protocol/lifecycle.ts";
 import { translateTelemetry } from "./protocol/telemetry.ts";
-
-// The panel's row identities, a closed union used internally to type the label and sizer records exhaustively. The wire carries a row id as a plain string; this closed
-// union is ratgdo's own, so a new row must extend it here and gains its label and sizer entries at compile time.
-type StatusRowId = "door" | "light" | "lock" | "motion" | "obstruction";
 
 /* Construction options for StatusFeed. `browserFactory`, `clock`, and `openClient` default to the real implementations (the default-arg port pattern connection.ts
  * establishes), `discoveryTimeoutSeconds` defaults to RATGDO_WEBUI_DISCOVERY_TIMEOUT, and `captureTimeoutSeconds` is left undefined so openConnection's own
@@ -172,19 +172,10 @@ interface DeviceSession {
   token: number;
 }
 
-// The human-readable label for each row identity. The "Remotes" label reflects that the lock entity controls the opener's remote lockout rather than a physical deadbolt.
-const STATUS_ROW_LABELS: Record<StatusRowId, string> = {
-
-  door: "Door",
-  light: "Light",
-  lock: "Remotes",
-  motion: "Motion",
-  obstruction: "Obstruction"
-};
-
 /* The status entity universe for a variant: every status entity id mapped to its panel row id, derived from the RATGDO_ENTITIES registry so entity literals never leave
  * that module. The switch is exhaustive over RatgdoVariant, so adding a variant fails compilation here. Motion is a ratgdo-only momentary sensor - Konnected firmware
- * advertises none - so it appears in the ratgdo row set only. Insertion order fixes the panel's display order: Door, Remotes, Motion, Light, Obstruction.
+ * advertises none - so it appears in the ratgdo row set only. The map answers which row an entity feeds and nothing more: its insertion order carries no meaning,
+ * because the panel's display order is stated once, by STATUS_ROW_ORDER, and each snapshot lists its rows in that order.
  */
 function statusRowIndex(variant: RatgdoVariant): Map<EntityId, StatusRowId> {
 
@@ -218,100 +209,6 @@ function statusRowIndex(variant: RatgdoVariant): Map<EntityId, StatusRowId> {
     }
   }
 }
-
-/* Map a translated telemetry event to its display value for a given row. The switch is exhaustive over StatusRowId. The door reads current_operation first so a moving
- * door shows its transition, then falls back to position: a raw 0-1 cover position of >= 1 is Open, <= 0 is Closed (the translation reads the wire's omitted zero as
- * 0, so a closed door arrives at the closed position, and an absence the event's type still allows reads as Closed too), and anything strictly between is a partial
- * stop. The remaining rows are straight state translations.
- */
-function mapRowValue(rowId: StatusRowId, event: EspHomeEvent): string {
-
-  switch(rowId) {
-
-    case "door": {
-
-      if(event.current_operation === "OPENING") {
-
-        return "Opening";
-      }
-
-      if(event.current_operation === "CLOSING") {
-
-        return "Closing";
-      }
-
-      const position = event.position;
-
-      if((position === undefined) || (position <= 0)) {
-
-        return "Closed";
-      }
-
-      if(position >= 1) {
-
-        return "Open";
-      }
-
-      return "Stopped (" + String(Math.round(position * 100)) + "%)";
-    }
-
-    case "light": {
-
-      return (event.state === "ON") ? "On" : "Off";
-    }
-
-    case "lock": {
-
-      switch(event.state) {
-
-        case "LOCKED":
-
-          return "Locked";
-
-        case "UNLOCKED":
-
-          return "Unlocked";
-
-        default:
-
-          return "Unknown";
-      }
-    }
-
-    case "motion": {
-
-      return (event.state === "ON") ? "Detected" : "";
-    }
-
-    case "obstruction": {
-
-      return (event.state === "ON") ? "Obstructed" : "Clear";
-    }
-
-    default: {
-
-      // Compile-time exhaustiveness: a new StatusRowId fails to type-check here until it is handled.
-      rowId satisfies never;
-
-      return "";
-    }
-  }
-}
-
-/* The widest display value each row's vocabulary can produce, one entry per row id. This lives beside mapRowValue because the two share one vocabulary: a change to a
- * row's value set - a new lock state, a wider door label - must update the widest member here in the same edit. The frontend renders each as an invisible width
- * reservation so a column is born at its maximum-ever width and never truncates a value or shifts. The door's "Stopped (100%)" is its widest because the three-digit
- * percentage is the longest partial-position label; "Off", "Unlocked", "Detected", and "Obstructed" are each the longest member of their row's closed value set. Typing
- * the map as a Record over StatusRowId makes it fail to compile until every row id is covered.
- */
-const STATUS_ROW_SIZERS: Record<StatusRowId, string> = {
-
-  door: "Stopped (100%)",
-  light: "Off",
-  lock: "Unlocked",
-  motion: "Detected",
-  obstruction: "Obstructed"
-};
 
 /* Translate a connect failure into the panel's own classified reason, the single home for that mapping. Every dial this module makes - the discovered device's, the
  * manual address's, and the settings card's probe - answers with the same vocabulary, so a user reading a verdict cannot tell which path produced it.
@@ -472,7 +369,7 @@ export class StatusFeed implements Disposable {
    */
   readonly #keyFor = (mac?: string): string | undefined => {
 
-    const key = this.#engine.value("Device.Encryption.Key", mac);
+    const key = this.#engine.value(RATGDO_ENCRYPTION_KEY_OPTION, mac);
 
     return key?.length ? key : undefined;
   };
@@ -547,7 +444,7 @@ export class StatusFeed implements Disposable {
      * function. The pool then drops what nothing could dial - an entry whose canonical form is empty, and one naming a zone - since the platform refuses both before
      * dialing and the card refuses both before writing.
      */
-    this.#applyAddresses(manualAddressList(this.#engine.valueList({ option: "Device.Address" })).filter((address) => (address.length > 0) &&
+    this.#applyAddresses(manualAddressList(this.#engine.valueList({ option: RATGDO_ADDRESS_OPTION })).filter((address) => (address.length > 0) &&
       !isZonedAddress(address)));
 
     // Re-ensure the discovery stream before this warm applies. startDiscovery is a no-op while one runs, so a healthy stream pays nothing; a browser whose
@@ -973,8 +870,8 @@ export class StatusFeed implements Disposable {
     session.stack.use(client);
 
     // Compute the panel's row model BEFORE registering any listener, so the telemetry filter closure never observes an uninitialized set. The universe is the variant's
-    // status entities mapped to row ids; narrowing it to the device's advertised entities yields the present rows in a stable display order. The map is retained on the
-    // session so view() can rebuild a snapshot from it long after this connect.
+    // status entities mapped to row ids; narrowing it to the device's advertised entities yields the present rows. The map is retained on the session so view() can
+    // rebuild a snapshot from it long after this connect.
     const universe = statusRowIndex(variant);
     const present = new Set<EntityId>(presentEntityIds(client, ratgdoStatusEntityIds(variant)));
 
@@ -1702,11 +1599,12 @@ export class StatusFeed implements Disposable {
 
   /* Build the snapshot rows from a state cache through a session's row map and push them. Shared by the connect path (reading the captured initial-state cache) and by
    * view() (reading the live client cache), so both render the exact same row set the session advertised. A present panel entity with no cache entry is omitted, and
-   * every value renders only through translateTelemetry.
+   * every value renders only through translateTelemetry. The rows are listed in the panel's one display order rather than the row map's, so a snapshot's rows sit
+   * where the page's skeleton placed them.
    */
   #pushSnapshot(session: DeviceSession, cache: ReadonlyMap<EntityId, TelemetryEvent>): void {
 
-    const rows: StatusRow[] = [];
+    const values = new Map<StatusRowId, string>();
 
     for(const [ id, rowId ] of session.rowMap) {
 
@@ -1717,18 +1615,17 @@ export class StatusFeed implements Disposable {
         continue;
       }
 
-      const row: StatusRow = { id: rowId, label: STATUS_ROW_LABELS[rowId], sizer: STATUS_ROW_SIZERS[rowId], value: mapRowValue(rowId, translateTelemetry(cached)) };
-
-      // Motion is the one momentary row, so its snapshot value carries the latch that clears a detected state back to the placeholder after the configured duration; the
-      // steady-state rows carry none. The latch travels on the authoritative snapshot row, so the panel's clear-back runs on the server's duration rather than the
-      // skeleton's fallback.
-      if(rowId === "motion") {
-
-        row.latch = { seconds: RATGDO_MOTION_DURATION, value: "Detected" };
-      }
-
-      rows.push(row);
+      values.set(rowId, mapRowValue(rowId, translateTelemetry(cached)));
     }
+
+    // Each row is its shared template plus the value the device reports, so the motion row carries the same latch the page's skeleton does and the steady-state rows
+    // carry none.
+    const rows = STATUS_ROW_ORDER.flatMap((rowId): StatusRow[] => {
+
+      const value = values.get(rowId);
+
+      return (value === undefined) ? [] : [{ ...statusRowTemplate(rowId), value }];
+    });
 
     /* Read the transport's encryption state from the session's own record so the snapshot mirrors the connect log's encrypted-connection lock. The record, not the
      * client's live getter: view() re-pushes a snapshot for a session that is still online through the patience window before a verdict, when the client sits between

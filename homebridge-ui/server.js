@@ -2,7 +2,7 @@
  *
  * server.js: homebridge-ratgdo webUI server API.
  */
-import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE, STATUS_WARM_ROUTE } from "./public/status-routes.mjs";
+import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE, STATUS_WARM_ROUTE } from "../dist/webui/status-routes.js";
 import { STATUS_EVENT, STATUS_VIEW_ROUTE, consoleLog, narrowStatusViewRequest } from "homebridge-plugin-utils";
 import { StatusFeed, narrowStatusProbeRequest, narrowStatusWarmRequest } from "../dist/webui-status.js";
 import { featureOptionCategories, featureOptions } from "../dist/options.js";

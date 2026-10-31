@@ -7,9 +7,10 @@
 import type { BuildPlatformResult, TestEspHomeClient } from "./testing.helpers.ts";
 import { Characteristic, Service, buildPlatform, makeCachedAccessory, makeFakeOpenClient, makeOpenerClient, makeOpenerService } from "./testing.helpers.ts";
 import { HAPStatus, Perms } from "homebridge-plugin-utils";
-import { PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import { describe, test } from "node:test";
 import { drainClock, hapStatus, present, settle, settleUntil, triggerGet, triggerSet } from "homebridge-plugin-utils/testing";
+import { PLATFORM_NAME } from "./webui/settings.ts";
+import { PLUGIN_NAME } from "./settings.ts";
 import type { TestPlatformAccessory } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
 

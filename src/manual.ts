@@ -10,11 +10,13 @@
  * dialing on its own is dialed on one cadence and reported by one rule.
  *
  * Everything here is a free function over its inputs, and the loop takes its connect, its readiness test, and its pause as ports. The platform composes those ports
- * out of instance state; this module owns the policy - what counts as one canonical address, which failures the settings page dials again, which of two listed
- * addresses governs a device both reach, and how loudly a failure that repeats forever should be reported.
+ * out of instance state; this module owns the policy - which failures the settings page dials again, which of two listed addresses governs a device both reach, and
+ * how loudly a failure that repeats forever should be reported. What counts as one canonical address is the rule src/webui/manual-address.ts states once for the
+ * plugin and the settings page alike, and the list function here applies it.
  */
 import type { HomebridgePluginLogging, RepeatDemotedLog, WakeableWait } from "homebridge-plugin-utils";
 import type { ManualConnectionFailureReason } from "./connection.ts";
+import { canonicalManualAddress } from "./webui/manual-address.ts";
 import { repeatDemotedLog } from "homebridge-plugin-utils";
 
 /* What a dial attempt answers the loop. Deliberately not the connection outcome: by the time the loop sees an attempt, the platform's closure has already admitted,
@@ -64,49 +66,9 @@ export interface RunManualAddressOptions extends Omit<RetryLoopPorts, "pauseFirs
   log: HomebridgePluginLogging;
 }
 
-/* Reduce one address a user typed to the canonical form everything downstream uses: trimmed, lower-cased, and with one enclosing pair of square brackets removed.
- *
- * This is the ONE place an address takes its canonical form in the runtime. A hostname is case-insensitive by definition and an IPv6 literal is case-insensitive in
- * its hex digits, so two spellings of one address must not become two entries naming one device. The brackets matter for a different reason: a user typing an IPv6
- * literal reasonably reaches for the URL spelling, and the bracketed form is not an address at all to anything downstream - Node's own parser does not read it as an
- * IP literal, so a dial would resolve it as a hostname and fail forever. Every key, comparison, dial, and log line after this point reads this form.
- *
- * The rule is deliberately this short. No port is parsed off the end, and no IPv6 literal is compressed or expanded: both would mean interpreting an address rather
- * than spelling it one way, and the page has to mirror this rule character for character in a module that cannot import this one.
- *
- * @param address - The address as the user wrote it.
- *
- * @returns The canonical spelling of that address.
- */
-export function canonicalManualAddress(address: string): string {
-
-  const trimmed = address.trim();
-
-  // Only an ENCLOSING pair goes. A stray bracket on one end is left exactly where the user put it, because removing half a pair would quietly change an address into
-  // a different one rather than leaving a wrong entry visibly wrong.
-  const bare = (trimmed.startsWith("[") && trimmed.endsWith("]")) ? trimmed.slice(1, -1) : trimmed;
-
-  return bare.toLowerCase();
-}
-
-/* Whether a canonical address carries an IPv6 zone identifier, which is the one shape this plugin refuses to dial.
- *
- * A zone identifier names the interface a link-local address was heard on, and it means nothing without that link. Autodiscovery already drops a zoned candidate
- * before anything can choose it, for exactly this reason; an address a user types deserves the same answer rather than a dial that cannot work and a retry that
- * repeats forever. The user is told, and told what to list instead.
- *
- * @param address - A canonical address.
- *
- * @returns true when the address cannot be dialed because it names a zone.
- */
-export function isZonedAddress(address: string): boolean {
-
-  return address.includes("%");
-}
-
 /* Reduce the addresses a user listed to their canonical forms, dropping duplicates and preserving the user's order.
  *
- * Two spellings of one address must not become two loops dialing one device, which is what the canonical form above settles; and the list's order is what decides
+ * Two spellings of one address must not become two loops dialing one device, which is what the canonical form settles; and the list's order is what decides
  * which of two addresses governs a device they both reach, so the order the user wrote is the order that survives.
  *
  * @param values - The addresses as the feature-option engine read them, already trimmed with empties dropped.

@@ -12,19 +12,20 @@ import type { DeviceInfo, EntityId, TelemetryEvent } from "esphome-client";
 import { HbpuAbortError, dnsNameKey, formatValueList } from "homebridge-plugin-utils";
 import type { MdnsBrowserLike, MdnsBrowserOptions, MdnsService, Nullable, StatusEvent } from "homebridge-plugin-utils";
 import type { OpenClientHandler, RecordedOpenOptions, TestEspHomeClientOptions } from "./testing.helpers.ts";
-import { RATGDO_MOTION_DURATION, RATGDO_WEBUI_PROBE_TIMEOUT } from "./settings.ts";
+import { RATGDO_MOTION_DURATION, RATGDO_WEBUI_PROBE_TIMEOUT } from "./webui/settings.ts";
 import { StatusFeed, narrowStatusProbeRequest, narrowStatusWarmRequest } from "./webui-status.ts";
 import { TestClock, TestMdnsBrowserFactory, capturingLog, expectAt, formatLogEntry, settle, waitUntil } from "homebridge-plugin-utils/testing";
 import { TestEspHomeClient, TestPermanentError, makeBinarySensorEvent, makeCoverEvent, makeFakeOpenClient, makeLightEvent, makeLockEvent, makeRatgdoService,
   makeSwitchEvent, makeTelemetry, openThroughHello, resolverOf } from "./testing.helpers.ts";
 import type { TestLogEntry, TestMdnsBrowser } from "homebridge-plugin-utils/testing";
-import { canonicalManualAddress, manualAddressList } from "./manual.ts";
 import { describe, test } from "node:test";
 import type { OpenEspHomeClient } from "./connection.ts";
 import type { RatgdoTxtKey } from "./discovery.ts";
 import { RatgdoVariant } from "./types.ts";
 import type { StatusWarmRequest } from "./webui-status.ts";
 import assert from "node:assert/strict";
+import { canonicalManualAddress } from "./webui/manual-address.ts";
+import { manualAddressList } from "./manual.ts";
 
 /* This file constructs raw mDNS TXT payloads whose keys are the snake_case ESPHome wire names (esphome_version, project_name, ...), so camelcase is disabled for the
  * fixture factory below, matching the discovery-test convention.

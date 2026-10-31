@@ -8,6 +8,10 @@
  * beside this file. Everything else passes through untouched, so the pure library modules the page uses - the feature-option engine, the configuration session, the
  * liveness helpers - run as themselves rather than as stand-ins.
  *
+ * The page's own modules are the plugin's TypeScript under src/webui/, which the build compiles and copies into a content-hashed folder under the page's lib directory,
+ * and the page imports each one through the ./lib/webui/ path the loader's importmap maps to that folder. No file sits at that path on disk, so the hook routes each of
+ * the page's imports of a copied module to its TypeScript source instead, and the suite runs the source as it stands, with no build before it runs.
+ *
  * The page is imported once per test under a fresh query string, which is what gives each test its own module instance: the page holds its warm-set memory and its
  * debounce handle in module scope, and a second test reading the first test's memory would assert nothing at all.
  *
@@ -32,15 +36,30 @@ export const LIBRARY_UI_DIR = new URL("../node_modules/homebridge-plugin-utils/d
  */
 const LIBRARY_BROWSER_MODULE = /^homebridge-plugin-utils\/([\w./-]+\.m?js)$/;
 
+// The directory holding the page, and the source folder its copied modules are compiled from, each derived from this module's location.
+const PAGE_DIR = new URL("../homebridge-ui/public/", import.meta.url).href;
+const PAGE_MODULE_SOURCE_DIR = new URL("./webui/", import.meta.url).href;
+
+// How the page imports one of its own copied modules: the ./lib/webui/ path the loader maps to the folder the build copies it into, which names its source module.
+const PAGE_MODULE = /^\.\/lib\/webui\/([\w./-]+)\.js$/;
+
 /* Route the page's framework specifiers. The one module the page must not really construct is its webUi shell: constructing it would mount views into a document that
  * does not exist. Every other browser module resolves to the file the package ships, so the page runs against the real feature-option engine and the real configuration
- * session rather than against doubles of them.
+ * session rather than against doubles of them. An import of one of the page's own copied modules resolves to its TypeScript source, and only when the page itself
+ * makes it, so no other module's relative import of a like-named path is redirected.
  */
 registerHooks({ resolve: (specifier, context, nextResolve) => {
 
   if(specifier === "homebridge-plugin-utils/webUi.mjs") {
 
     return { shortCircuit: true, url: DOUBLE_URL };
+  }
+
+  const pageModule = PAGE_MODULE.exec(specifier)?.[1];
+
+  if(pageModule && context.parentURL?.startsWith(PAGE_DIR)) {
+
+    return { shortCircuit: true, url: PAGE_MODULE_SOURCE_DIR + pageModule + ".ts" };
   }
 
   const browserModule = LIBRARY_BROWSER_MODULE.exec(specifier)?.[1];

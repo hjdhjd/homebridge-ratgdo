@@ -5,9 +5,6 @@
 import type { MdnsProject } from "./types.ts";
 import { RatgdoVariant } from "./types.ts";
 
-// The platform the plugin creates.
-export const PLATFORM_NAME = "Ratgdo";
-
 // The name of our plugin.
 export const PLUGIN_NAME = "homebridge-ratgdo";
 
@@ -42,9 +39,6 @@ export const RATGDO_RETRY_INTERVAL = 300;
 // the platform and the webUI status feed - browse this one type, so the spelling lives here rather than in either of them.
 export const RATGDO_MDNS_SERVICE_TYPE = "_esphomelib._tcp.local";
 
-// Duration, in seconds, of a motion sensor event.
-export const RATGDO_MOTION_DURATION = 5;
-
 // Default MQTT topic to use when publishing events. The published topic is of the form ratgdo/<mac>/<event>, where <mac> is the device's colon-free MAC address.
 export const RATGDO_MQTT_TOPIC = "ratgdo";
 
@@ -60,8 +54,3 @@ export const RATGDO_UI_REVERT_DELAY = 50;
 // undiscovered, the pool classifies that device not-found and surfaces the verdict to the panel. The settings modal is a foreground, user-initiated context, so a bounded
 // wait keeps the panel responsive rather than waiting indefinitely on a device that is powered down or off the network.
 export const RATGDO_WEBUI_DISCOVERY_TIMEOUT = 10;
-
-// Duration, in seconds, the settings page's Add Device probe waits for a typed address to answer before it calls the attempt a timeout. A user who just typed an
-// address is watching the card, so the budget is short enough to answer them promptly and long enough to cover a device waking on a busy network. The page arms a
-// longer bound of its own around the request, so what a slow device produces is this classified answer rather than the browser giving up first.
-export const RATGDO_WEBUI_PROBE_TIMEOUT = 10;

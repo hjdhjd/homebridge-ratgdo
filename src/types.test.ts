@@ -11,10 +11,11 @@
  * The registration smoke drives index.ts's default export against a minimal fake Homebridge API whose registerPlatform is a node:test mock, asserting the entry point
  * wires the plugin name, platform name, and the RatgdoPlatform constructor through in a single call.
  */
-import { PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import { RatgdoService, RatgdoVariant } from "./types.ts";
 import { describe, mock, test } from "node:test";
 import type { API } from "homebridge";
+import { PLATFORM_NAME } from "./webui/settings.ts";
+import { PLUGIN_NAME } from "./settings.ts";
 import { RatgdoPlatform } from "./platform.ts";
 import assert from "node:assert/strict";
 import registerRatgdoPlatform from "./index.ts";

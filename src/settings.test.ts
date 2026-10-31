@@ -4,13 +4,25 @@
  * service type, and the family of duration / topic constants. These values are pure data with no runtime behavior, so the contract under test is the data itself:
  * the right regexes match the right project names, the service type is the fully qualified name the browser takes, the durations are sane positive numbers, and the
  * MQTT topic is the documented default. The variant assertions cross-check against the real RatgdoVariant const-object so a rename on either side surfaces here.
+ * The platform name is spelled again in config.schema.json, which as JSON cannot import the constant, so a row reads the schema and holds each of its spellings to it:
+ * the plugin alias, the default of the entry's name, and the default that name's description states.
  */
-import { RATGDO_AUTODISCOVERY_PROJECTS, RATGDO_INITIAL_STATE_TIMEOUT, RATGDO_KONNECTED_PCW_DURATION, RATGDO_MDNS_SERVICE_TYPE, RATGDO_MOTION_DURATION,
-  RATGDO_MQTT_TOPIC, RATGDO_OCCUPANCY_DURATION, RATGDO_RETRY_INTERVAL, RATGDO_UI_REVERT_DELAY, RATGDO_WEBUI_DISCOVERY_TIMEOUT,
-  RATGDO_WEBUI_PROBE_TIMEOUT } from "./settings.ts";
+import { PLATFORM_NAME, RATGDO_MOTION_DURATION, RATGDO_WEBUI_PROBE_TIMEOUT } from "./webui/settings.ts";
+import { RATGDO_AUTODISCOVERY_PROJECTS, RATGDO_INITIAL_STATE_TIMEOUT, RATGDO_KONNECTED_PCW_DURATION, RATGDO_MDNS_SERVICE_TYPE, RATGDO_MQTT_TOPIC,
+  RATGDO_OCCUPANCY_DURATION, RATGDO_RETRY_INTERVAL, RATGDO_UI_REVERT_DELAY, RATGDO_WEBUI_DISCOVERY_TIMEOUT } from "./settings.ts";
 import { describe, test } from "node:test";
 import { RatgdoVariant } from "./types.ts";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+
+/* The places config.schema.json spells the platform name: the plugin alias Config UI X ties a platform entry to this schema by, the default of the entry's name,
+ * which the settings page seeds an empty configuration with as well, and the closing sentence of that name's description, which states the default to the user.
+ */
+interface PlatformNameSpellings {
+
+  readonly pluginAlias: string;
+  readonly schema: { readonly properties: { readonly name: { readonly default: string; readonly description: string } } };
+}
 
 // We classify a project name exactly the way discovery does - a single `Array.find` over the project table that returns both the gate and the variant in one pass.
 const classify = (projectName: string): RatgdoVariant | undefined => RATGDO_AUTODISCOVERY_PROJECTS.find((project) => project.pattern.test(projectName))?.variant;
@@ -37,6 +49,18 @@ describe("RATGDO_AUTODISCOVERY_PROJECTS", () => {
   test("does not match a foreign ESPHome project name", () => {
 
     assert.equal(classify("esphome.generic"), undefined, "a non-Ratgdo, non-Konnected project name matches neither entry and is gated out of the configuration path");
+  });
+});
+
+describe("PLATFORM_NAME", () => {
+
+  test("is the platform name config.schema.json spells as its plugin alias, its name default, and the default its name's description states", async () => {
+
+    const schema = JSON.parse(await readFile(new URL("../config.schema.json", import.meta.url), "utf8")) as PlatformNameSpellings;
+
+    assert.equal(schema.pluginAlias, PLATFORM_NAME, "Config UI X ties a platform entry to the schema by its alias, the name the platform registers under");
+    assert.equal(schema.schema.properties.name.default, PLATFORM_NAME, "and the entry's name defaults to the name the settings page seeds an empty configuration with");
+    assert.ok(schema.schema.properties.name.description.endsWith("Default: " + PLATFORM_NAME + "."), "and the name's description tells the user that same default");
   });
 });
 

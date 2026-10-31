@@ -1,12 +1,17 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * ratgdo-config.mjs: Pure interpreter over the injected Ratgdo platform configuration.
+ * ratgdo-config.ts: Pure interpreter over the injected Ratgdo platform configuration, which the settings page loads to migrate legacy settings and to compose the Add
+ * Device card's writes. It lives in the folder the page and the plugin share because the address rule and the option names it reads are defined there.
  */
-"use strict";
+import type { FeatureCategoryEntry, FeatureOptionEntry, FeatureOptions, formatValueList } from "homebridge-plugin-utils";
+import { RATGDO_ADDRESS_OPTION, RATGDO_DEBUG_OPTION, RATGDO_ENCRYPTION_KEY_OPTION } from "./settings.ts";
+import { canonicalManualAddress, isZonedAddress } from "./manual-address.ts";
+import type { RatgdoOptions } from "../options.ts";
 
 /* The single home for our plugin-config shape. Every function here is a pure interpreter of the primary platform-config entry the webUI framework injects into our
- * hooks - no I/O, no global reach, and no imports, so the whole module is testable against the real feature-option engine by handing that engine in. The framework
- * owns reading and writing the persisted config through its session; this module owns the Ratgdo-specific knowledge of where a setting lives.
+ * hooks - no I/O and no global reach - and the feature-option engine it reads through is handed in rather than imported, so the whole module is testable against the
+ * real engine by handing that engine in. The framework owns reading and writing the persisted config through its session; this module owns the Ratgdo-specific
+ * knowledge of where a setting lives.
  *
  * Two settings substrates meet here. A feature option is where a setting lives, and a handful of configuration properties are a second home the plugin honors so that
  * a configuration nobody has opened the webUI on keeps working. Reconciling the two is one of this module's jobs: the migration moves a property's value into its
@@ -17,62 +22,103 @@
  * composition belongs here beside the rest of this plugin's knowledge of where a setting lives, rather than in the page that happens to draw the card.
  */
 
+// The configuration properties a legacy setting can still arrive on: every property the plugin's own configuration shape declares except the options array itself.
+type LegacyProperty = Exclude<keyof RatgdoOptions, "options">;
+
+/**
+ * The primary platform-configuration entry, as it actually arrives from the Homebridge UI. Every configuration property the plugin declares is an unknown-valued
+ * optional property here because that is the honest shape of an object read back from a user's `config.json`: a setting may be absent, may carry a hand-edited value of
+ * any type, and may have been staged to `undefined` by this module's own patch. Interpreting exactly that is what the module is for.
+ */
+export type RatgdoLegacyConfig = Partial<Record<keyof RatgdoOptions, unknown>>;
+
+/**
+ * The option catalog the plugin's UI server publishes, as the interpreter consumes it.
+ */
+export interface RatgdoConfigCatalog {
+
+  categories: FeatureCategoryEntry[];
+  options: Record<string, FeatureOptionEntry[]>;
+}
+
+/**
+ * The commit-shaped patch the interpreter produces. A consumed legacy property is carried here as a PRESENT key whose value is `undefined`, never as an omitted key:
+ * the session's shallow-merge commit treats those two shapes oppositely, deleting the first and leaving the second untouched, and the type system cannot state that
+ * difference. Assertions about this patch must therefore read own-property presence with `Object.hasOwn`, never compare against `undefined`. What actually holds the
+ * guarantee is migrate()'s single unconditional staging line and the test discipline that reads it.
+ */
+export interface RatgdoConfigPatch {
+
+  debug?: undefined;
+  mqttTopic?: undefined;
+  mqttUrl?: undefined;
+  options?: string[];
+}
+
+/**
+ * The manual device the Add Device card asks the interpreter to compose a write for: the address the user typed, the key they typed beside it, and the MAC the card's
+ * test learned, in the plugin's identity form, which is where the key is stored.
+ */
+export interface RatgdoManualDevice {
+
+  address: string;
+  key?: string;
+  mac: string;
+}
+
+/**
+ * The patch that adds a device by address. It carries only the options array, because both halves of a manual device - the listed address and the key stored at the
+ * device's MAC - live in it; no configuration property is involved either way.
+ */
+export interface RatgdoManualDevicePatch {
+
+  options: string[];
+}
+
+/**
+ * The interpreter over a fetched catalog: the legacy-settings migration, plus the reads and writes behind the page's Add Device card.
+ */
+export interface RatgdoConfigInterpreter {
+
+  globalKey(config?: RatgdoLegacyConfig): string | undefined;
+  manualAddresses(config?: RatgdoLegacyConfig): readonly string[];
+  migrate(config?: RatgdoLegacyConfig): RatgdoConfigPatch | null;
+  withManualDevice(config: RatgdoLegacyConfig | undefined, device: RatgdoManualDevice): RatgdoManualDevicePatch | null;
+}
+
+/* What the page hands the interpreter: the feature-option engine class, the served catalog, and the engine's list formatter. Named apart from the factory's parameter
+ * list because the factory binds the engine and the formatter under the same names their types are read from.
+ *
+ * @property FeatureOptions  - The feature-option engine class.
+ * @property catalog         - The served catalog, carrying its categories and its options record.
+ * @property formatValueList - The engine's own list formatter.
+ */
+interface RatgdoConfigInjected {
+
+  FeatureOptions: typeof FeatureOptions;
+  catalog: RatgdoConfigCatalog;
+  formatValueList: typeof formatValueList;
+}
+
 /* Every consolidated setting, as the configuration property that carries it paired with the feature option that supersedes it. This pairing is this module's policy
  * knowledge and the one address book the factory below reads, so the migration's writes can never disagree with themselves about where a setting lives.
  *
- * These option names live in three places at once: here at the wire, in the plugin runtime's TypeScript unions, and at the platform's own call sites. Nothing in the
- * language binds the three together, so the migration test suite's round trip through the real catalog is what holds them: a name that drifts here composes an entry
- * the runtime never reads, and the round trip fails on the resolved values rather than on the string.
+ * The record is typed over the plugin's own configuration properties, so a property the plugin adds fails to compile here until it is paired with its option. The debug
+ * option's name is the shared constant the platform resolves the setting by. The broker and topic options belong to homebridge-plugin-utils' MQTT group, which exports
+ * no constant for either name, so the migration test suite's round trip through the real catalog is what holds those: a name that drifts here composes an entry the
+ * runtime never reads, and the round trip fails on the resolved values rather than on the string.
  */
-const CONSOLIDATED_SETTINGS = {
+const CONSOLIDATED_SETTINGS: Readonly<Record<LegacyProperty, string>> = {
 
-  debug: "Log.Debug",
+  debug: RATGDO_DEBUG_OPTION,
   mqttTopic: "Mqtt.Topic",
   mqttUrl: "Mqtt.Url"
 };
 
-// The option a manually addressed device's address is listed under, and the one its key is stored under. Named here for the same reason the table above is: the
-// composition below must not be able to disagree with itself about where a manual device lives.
-const ADDRESS_OPTION = "Device.Address";
-const KEY_OPTION = "Device.Encryption.Key";
-
-/* Reduce one address a user typed to the canonical form everything downstream uses: trimmed, lower-cased, and with one enclosing pair of square brackets removed.
- *
- * This is the page's half of a rule the plugin's runtime states in src/manual.ts, character for character. It is written twice on purpose rather than by oversight:
- * this module is import-free by design so it can run in a browser, and the runtime's copy is a Node module a browser cannot load. What holds the two together is the
- * shared vector table in the test suite, which runs both halves over the same inputs and asserts they agree - a drift shows up there rather than as one address the
- * page and the plugin spell two different ways.
- *
- * The brackets matter because a user typing an IPv6 literal reasonably reaches for the URL spelling, and the bracketed form is not an address to anything
- * downstream: Node's own parser does not read it as an IP literal, so a dial resolves it as a hostname and fails forever. Only an ENCLOSING pair goes, so a stray
- * bracket on one end stays where the user put it rather than being half-removed into a different address. No port is parsed and no IPv6 literal is compressed.
- *
- * @param address - The address as the user wrote it.
- *
- * @returns The canonical spelling of that address.
- */
-export const canonicalManualAddress = (address) => {
-
-  const trimmed = ((typeof address === "string") ? address : "").trim();
-  const bare = (trimmed.startsWith("[") && trimmed.endsWith("]")) ? trimmed.slice(1, -1) : trimmed;
-
-  return bare.toLowerCase();
-};
-
-/* Whether a canonical address carries an IPv6 zone identifier, which is the one shape this plugin refuses to dial.
- *
- * A zone identifier names the interface a link-local address was heard on, and it means nothing without that link. Autodiscovery already drops a zoned candidate
- * before anything can choose it; an address a user types gets the same answer, told to them on the card rather than buried in a log.
- *
- * @param address - A canonical address.
- *
- * @returns true when the address cannot be dialed because it names a zone.
- */
-export const isZonedAddress = (address) => address.includes("%");
-
-/* Build the interpreter over an injected feature-option engine class, the option catalog the plugin's own UI server publishes, and the engine's list formatter the
- * composition needs. Injecting all of them is what keeps this module import-free and testable under node against the real engine and the real catalog, rather than
- * against a stand-in that could drift from either.
+/**
+ * Build the interpreter over an injected feature-option engine class, the option catalog the plugin's own UI server publishes, and the engine's list formatter the
+ * composition needs. The engine and its formatter are handed in because a module in this folder imports values only from the folder itself, and handing them in is
+ * also what keeps this module testable under node against the real engine and the real catalog, rather than against a stand-in that could drift from either.
  *
  * @param injected.FeatureOptions   - The feature-option engine class.
  * @param injected.catalog          - The served catalog, carrying its categories and its options record.
@@ -80,19 +126,21 @@ export const isZonedAddress = (address) => address.includes("%");
  *
  * @returns The interpreter: the legacy-settings migration, and the manual-device reads and writes.
  */
-export const makeRatgdoConfig = ({ FeatureOptions, catalog, formatValueList }) => {
+export const makeRatgdoConfig = ({ FeatureOptions, catalog, formatValueList }: RatgdoConfigInjected): RatgdoConfigInterpreter => {
 
   // A feature-option engine over the served catalog and the config's own entries. The array is handed in directly rather than copied: the engine's set-option path is
-  // a pure transform that composes a fresh array and reassigns its own field, so the array it was given is never written to.
-  const engineFor = (config) => new FeatureOptions(catalog.categories, catalog.options, Array.isArray(config?.options) ? config.options : []);
+  // a pure transform that composes a fresh array and reassigns its own field, so the array it was given is never written to. Its entries are the engine's to read,
+  // exactly as the host stored them.
+  const engineFor = (config: RatgdoLegacyConfig | undefined): FeatureOptions => new FeatureOptions(catalog.categories, catalog.options,
+    Array.isArray(config?.options) ? config.options as string[] : []);
 
   /* The value the catalog registers as an option's default, read from the served entry's own defaultValue field. The engine exposes a same-named method that answers a
    * different question - the boolean enabled-state default - so this walks the catalog data instead. The migration needs this to tell a value the user chose from a
    * value that merely restates what the option already does, and only the first is worth writing an entry for.
    */
-  const registeredDefault = (option) => {
+  const registeredDefault = (option: string): number | string | undefined => {
 
-    for(const [ category, entries ] of Object.entries(catalog?.options ?? {})) {
+    for(const [ category, entries ] of Object.entries(catalog.options)) {
 
       for(const entry of entries) {
 
@@ -115,9 +163,9 @@ export const makeRatgdoConfig = ({ FeatureOptions, catalog, formatValueList }) =
      *
      * @returns The global encryption key, or undefined when none is set.
      */
-    globalKey: (config) => {
+    globalKey: (config?: RatgdoLegacyConfig): string | undefined => {
 
-      const key = engineFor(config).value(KEY_OPTION);
+      const key = engineFor(config).value(RATGDO_ENCRYPTION_KEY_OPTION);
 
       return ((typeof key === "string") && key.length) ? key : undefined;
     },
@@ -129,7 +177,7 @@ export const makeRatgdoConfig = ({ FeatureOptions, catalog, formatValueList }) =
      *
      * @returns The listed addresses, in the user's own order.
      */
-    manualAddresses: (config) => engineFor(config).valueList({ option: ADDRESS_OPTION }),
+    manualAddresses: (config?: RatgdoLegacyConfig): readonly string[] => engineFor(config).valueList({ option: RATGDO_ADDRESS_OPTION }),
 
     /* Move any legacy configuration properties into their feature options, as a patch for the session to stage. This is transitional work with a planned end: once a
      * configuration has been through it, there is nothing left to find and every later pass answers null.
@@ -156,14 +204,15 @@ export const makeRatgdoConfig = ({ FeatureOptions, catalog, formatValueList }) =
      *
      * @returns The patch to commit, or null when there is nothing to do.
      */
-    migrate: (config) => {
+    migrate: (config?: RatgdoLegacyConfig): RatgdoConfigPatch | null => {
 
       if(!config || ((config.options !== undefined) && !Array.isArray(config.options))) {
 
         return null;
       }
 
-      const carried = Object.entries(CONSOLIDATED_SETTINGS).filter(([property]) => config[property] !== undefined);
+      // Object.entries widens a record's keys to string, and the record's own type holds them to the legacy properties.
+      const carried = (Object.entries(CONSOLIDATED_SETTINGS) as [LegacyProperty, string][]).filter(([property]) => config[property] !== undefined);
 
       if(!carried.length) {
 
@@ -171,7 +220,7 @@ export const makeRatgdoConfig = ({ FeatureOptions, catalog, formatValueList }) =
       }
 
       const engine = engineFor(config);
-      const patch = {};
+      const patch: RatgdoConfigPatch = {};
       let composed = false;
 
       for(const [ property, option ] of carried) {
@@ -235,7 +284,7 @@ export const makeRatgdoConfig = ({ FeatureOptions, catalog, formatValueList }) =
      *
      * @returns The patch to commit, or null when there is nothing to do.
      */
-    withManualDevice: (config, { address, key, mac }) => {
+    withManualDevice: (config: RatgdoLegacyConfig | undefined, { address, key, mac }: RatgdoManualDevice): RatgdoManualDevicePatch | null => {
 
       // The address takes its canonical form ONCE, here, and every decision about it below reads that one value - whether the list already carries it, and what is
       // written into the list - so no decision can spell the address differently from another.
@@ -247,21 +296,21 @@ export const makeRatgdoConfig = ({ FeatureOptions, catalog, formatValueList }) =
       }
 
       const engine = engineFor(config);
-      const listed = engine.valueList({ option: ADDRESS_OPTION });
+      const listed = engine.valueList({ option: RATGDO_ADDRESS_OPTION });
       let composed = false;
 
       // Every listed entry is canonicalized for the comparison too, so a list holding the bracketed spelling of this address is recognized as already carrying it.
       if(!listed.some((entry) => (canonicalManualAddress(entry) === canonical))) {
 
-        engine.setOption({ enabled: true, option: ADDRESS_OPTION, value: formatValueList([ ...listed, canonical ]) });
+        engine.setOption({ enabled: true, option: RATGDO_ADDRESS_OPTION, value: formatValueList([ ...listed, canonical ]) });
         composed = true;
       }
 
       // The key is addressed at the SAME identity the runtime reads it at. Resolving through the engine first is what makes an unchanged key a no-op: value() walks
       // the device's entry and then the global one, so a device whose key is already inherited globally gets no entry of its own.
-      if((typeof key === "string") && key.length && (engine.value(KEY_OPTION, mac) !== key)) {
+      if((typeof key === "string") && key.length && (engine.value(RATGDO_ENCRYPTION_KEY_OPTION, mac) !== key)) {
 
-        engine.setOption({ enabled: true, id: mac, option: KEY_OPTION, value: key });
+        engine.setOption({ enabled: true, id: mac, option: RATGDO_ENCRYPTION_KEY_OPTION, value: key });
         composed = true;
       }
 

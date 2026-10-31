@@ -3,23 +3,23 @@
  * ui.mjs: Homebridge Ratgdo webUI.
  */
 import { FeatureOptions, formatValueList } from "homebridge-plugin-utils/featureOptions.js";
-import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE, STATUS_WARM_ROUTE } from "./status-routes.mjs";
-import { canonicalManualAddress, isZonedAddress, makeRatgdoConfig } from "./ratgdo-config.mjs";
+import { PLATFORM_NAME, RATGDO_WEBUI_PAGE_PROBE_SECONDS } from "./lib/webui/settings.js";
+import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE, STATUS_WARM_ROUTE } from "./lib/webui/status-routes.js";
+import { canonicalManualAddress, isZonedAddress } from "./lib/webui/manual-address.js";
 import { createActionGuard, withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
 import { PluginConfigSession } from "homebridge-plugin-utils/pluginConfigSession.mjs";
+import { RATGDO_VARIANT_LABELS } from "./lib/webui/variants.js";
 import { STATUS_EVENT } from "homebridge-plugin-utils/webui/status.js";
+import { STATUS_ROW_TEMPLATES } from "./lib/webui/status-rows.js";
 import { createSaveFlow } from "homebridge-plugin-utils/webui/saveflow.js";
+import { makeRatgdoConfig } from "./lib/webui/ratgdo-config.js";
 import { webUi } from "homebridge-plugin-utils/webUi.mjs";
 
-// The motion-latch fallback duration, in seconds, for the placeholder skeleton only. The authoritative snapshot rows carry the server's RATGDO_MOTION_DURATION on their
-// own latch, so this fallback governs the clear-back only until the first snapshot arrives; browser code cannot import the server constant, so the fallback is local by
-// necessity and the snapshot is the source of truth once it lands.
-const MOTION_LATCH_FALLBACK_SECONDS = 5;
-
-// The trailing-debounce window, in milliseconds, before a hook- or belt-driven warm recompute sends. It mirrors homebridge-plugin-utils' own staging debounce window:
-// the edit hook fires once per option mutation, so a burst of keystrokes into an encryption-key field would otherwise re-send a warm on every character and reconnect the
-// device against a half-typed key. The debounce coalesces the burst into one warm carrying the settled value. The load announcement's warm bypasses this window and
-// sends immediately, because a page that has just established has nothing to coalesce with.
+// The trailing-debounce window, in milliseconds, before a hook- or belt-driven warm recompute sends. It matches homebridge-plugin-utils' own staging debounce window,
+// which the library ships to the browser without exporting, so the page states the same window here: the edit hook fires once per option mutation, so a burst of
+// keystrokes into an encryption-key field would otherwise re-send a warm on every character and reconnect the device against a half-typed key. The debounce coalesces
+// the burst into one warm carrying the settled value. The load announcement's warm bypasses this window and sends immediately, because a page that has just established
+// has nothing to coalesce with.
 const WARM_DEBOUNCE_MS = 300;
 
 /* The warm-set recompute state. sentSignature is a canonical string of the whole warm payload the server last received, and a recompute re-sends only when the payload
@@ -211,22 +211,25 @@ const forceWarmResend = () => {
   scheduleRecompute();
 };
 
-/* The sidebar's own order for the groups this page assigns. These are the family words a device's Model characteristic opens with, declared for HomeKit in the plugin's
- * own variant table, listed here only to rank the sections; a word this list does not name sorts after both of them by locale rather than breaking the sidebar.
+/* The sidebar's own order for the groups this page assigns. Each group is the family word a device's Model characteristic opens with, read from the variant label
+ * table the plugin composes that Model from; a word this list does not name sorts after every word it does name, by locale, rather than breaking the sidebar.
  */
-const SIDEBAR_GROUP_ORDER = [ "Ratgdo", "Konnected" ];
+const SIDEBAR_GROUPS = [ RATGDO_VARIANT_LABELS.ratgdo, RATGDO_VARIANT_LABELS.konnected ];
 
 // A group's place in the order above, with a group the order does not name ranking after every group it does.
 const sidebarGroupRank = (group) => {
 
-  const rank = SIDEBAR_GROUP_ORDER.indexOf(group);
+  const rank = SIDEBAR_GROUPS.indexOf(group);
 
-  return (rank === -1) ? SIDEBAR_GROUP_ORDER.length : rank;
+  return (rank === -1) ? SIDEBAR_GROUPS.length : rank;
 };
 
+// Each variant keyed by the family word its devices are grouped under, read from the same label table, so a group word maps back to its variant by lookup.
+const VARIANT_OF_GROUP = new Map(Object.entries(RATGDO_VARIANT_LABELS).map(([ variant, label ]) => [ label, variant ]));
+
 /* The sidebar group a device belongs to, read from the leading word of its Model. device.ts composes that Model as the family word followed by the hardware model, for
- * exactly this reason, so the group is available on every install the moment the page loads - nothing is persisted, nothing is migrated, and no plugin-runtime module
- * reaches the browser. A Model that is not text at all leaves the device untagged, which the framework renders under the top-level device heading.
+ * exactly this reason, so the group is available on every install the moment the page loads - nothing is persisted and nothing is migrated. A Model that is not text
+ * at all leaves the device untagged, which the framework renders under the top-level device heading.
  */
 const variantGroup = (model) => {
 
@@ -257,10 +260,10 @@ const deviceList = async () => {
 
 /* Whether one catalog entry - a category or an option - applies to the device whose page is being rendered. An entry applies when there is no device at all, which is
  * the global page and offers everything; when the entry names no variant, which is a concern every opener has; or when the device's own variant is the one named. The
- * device's variant is read from its sidebar group word, the family word its Model opens with and the same word SIDEBAR_GROUP_ORDER above ranks the sections by: that
- * word is the variant's label, and the variant key is the label lowercased, a pairing src/types.ts establishes by declaring the label beside the variant it belongs to.
- * A device whose Model the page could not read carries no group word and is offered everything, because a row that does not apply costs a reader far less than a page
- * that hides the row they came to set.
+ * device's variant is read from its sidebar group word, the family word its Model opens with and the same word SIDEBAR_GROUPS above ranks the sections by: that word
+ * is the variant's label, and the variant is looked up from it in the label table the plugin composes the Model from, so a word naming no variant offers no variant's
+ * rows. A device whose Model the page could not read carries no group word and is offered everything, because a row that does not apply costs a reader far less than a
+ * page that hides the row they came to set.
  */
 const entryAppliesToDevice = (device, entry) => {
 
@@ -269,7 +272,7 @@ const entryAppliesToDevice = (device, entry) => {
     return true;
   }
 
-  return device.sidebarGroup.toLowerCase() === entry.meta.variant;
+  return VARIANT_OF_GROUP.get(device.sidebarGroup) === entry.meta.variant;
 };
 
 // Whether a device's page offers one feature option, which is the entry-level reading of the variant rule above.
@@ -277,12 +280,6 @@ const validOption = (device, option) => entryAppliesToDevice(device, option);
 
 // Whether a device's page offers one feature option category, the same rule applied to the section the framework is about to render.
 const validOptionCategory = (device, category) => entryAppliesToDevice(device, category);
-
-/* The bound in seconds on one Test Connection round trip. It deliberately sits ABOVE the server's own probe budget, so what a slow device produces is the server's
- * classified answer - a timeout the card can explain - rather than this deadline firing first and leaving the card to guess which of the two happened. The page
- * cannot import the server's constant, so the ordering is stated here and held by the card's own timeout copy naming the device rather than the page.
- */
-const PROBE_DEADLINE = 15;
 
 // The card's copy for every verdict a probe can answer with. Keyed by the classified reason so the card renders one sentence per reason rather than branching, and
 // worded in the status panel's own voice: what happened, then what to do about it.
@@ -482,7 +479,7 @@ const runProbe = async (signal) => {
 
   try {
 
-    const answer = await withDeadline({ promise: homebridge.request(STATUS_PROBE_ROUTE, { address, psk }), seconds: PROBE_DEADLINE, signal });
+    const answer = await withDeadline({ promise: homebridge.request(STATUS_PROBE_ROUTE, { address, psk }), seconds: RATGDO_WEBUI_PAGE_PROBE_SECONDS, signal });
 
     // Two overlapping tests must leave the NEWER one's verdict on the card, whichever of them the network answers first, so a retired probe's answer is dropped here.
     if(signal.aborted) {
@@ -775,8 +772,8 @@ const mountCard = () => {
  * handle already minted and the configuration session established, which is exactly the state the recompute's own establishment gate waits for. The statusPanel
  * configuration supplies exactly the parts ratgdo owns and inherits the shared homebridge-plugin-utils panel around them:
  * the error-copy overrides for the reasons whose ratgdo wording differs from the component's credential-neutral defaults, the identity cells (Model, plus the monospace
- * MAC and IP address rows), and the placeholder rows the skeleton renders before the first snapshot. The row ids, labels, and sizers are ratgdo's vocabulary; the motion
- * row's placeholder latch is the fallback the snapshot's authoritative latch supersedes.
+ * MAC and IP address rows), and the placeholder rows the skeleton renders before the first snapshot. The placeholder rows are the same row templates the server builds
+ * each snapshot row from, so the skeleton and the snapshot carry one vocabulary and one motion latch.
  */
 const featureOptionsParams = {
 
@@ -792,8 +789,8 @@ const featureOptionsParams = {
 
     deviceLabel: "Ratgdo Devices",
 
-    /* Where each group of the device list sits: the Ratgdo family first, then the Konnected one. The framework hands this comparator only the names that render as
-     * sections, so the reserved hidden group never reaches it, and a group the order above does not name sorts after both of the named ones by locale.
+    /* Where each group of the device list sits, in the sidebar's own order above. The framework hands this comparator only the names that render as sections, so the
+     * reserved hidden group never reaches it, and a group the order above does not name sorts after every group the order names, by locale.
      */
     groupOrder: (a, b) => (sidebarGroupRank(a) - sidebarGroupRank(b)) || a.localeCompare(b)
   },
@@ -814,19 +811,12 @@ const featureOptionsParams = {
       { label: "IP Address", mono: true, value: deviceAddresses[device.serialNumber] ?? "" }
     ],
     onServerHello: forceWarmResend,
-    placeholderRows: [
-
-      { id: "door", label: "Door", sizer: "Stopped (100%)" },
-      { id: "lock", label: "Remotes", sizer: "Unlocked" },
-      { id: "motion", label: "Motion", latch: { seconds: MOTION_LATCH_FALLBACK_SECONDS, value: "Detected" }, sizer: "Detected" },
-      { id: "light", label: "Light", sizer: "Off" },
-      { id: "obstruction", label: "Obstruction", sizer: "Obstructed" }
-    ]
+    placeholderRows: STATUS_ROW_TEMPLATES
   },
   ui: { validOption, validOptionCategory }
 };
 
-const ui = new webUi({ featureOptions: featureOptionsParams, name: "Ratgdo" });
+const ui = new webUi({ featureOptions: featureOptionsParams, name: PLATFORM_NAME });
 
 /* Adopt the framework's theming for this page - the design tokens, the themed canvas, the dark-mode corrections, and the host's own accent - with one call that holds for
  * the life of the page. The registration is memoized by the framework, and the feature-options view routes through this same call when it shows, so what registering
@@ -919,7 +909,7 @@ const wireRatgdoConfig = async () => {
 
   // The library's session is the single conduit the framework's own writes use, so the patch merges onto a replica synced just now rather than onto a snapshot taken
   // before the page opened.
-  const session = await PluginConfigSession.open({ host: homebridge, name: "Ratgdo" });
+  const session = await PluginConfigSession.open({ host: homebridge, name: PLATFORM_NAME });
   const patch = ratgdoConfig.migrate(session.platform);
 
   // The signal is read immediately before the write, so an envelope that expired cannot stage a patch after the fact.

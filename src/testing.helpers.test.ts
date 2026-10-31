@@ -10,13 +10,14 @@
  */
 import { ConnectionError, CoverOperation, EncryptionKeyMissingError, EncryptionRequiredError, LockState, NegotiationFailedError, entityId,
   isConnectionLive } from "esphome-client";
-import { PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import { Service, TestEspHomeClient, asEspHomeClient, buildRatgdoAccessory, makeBinarySensorEvent, makeCoverEvent, makeFakeOpenClient, makeKonnectedInitialState,
   makeLightEvent, makeLockEvent, makeRatgdoInitialState, makeRatgdoService, makeScriptedOpenClient, makeSwitchEvent, makeTelemetry, makeTestDevice, makeTestPlatform,
   openThroughHello, resolverOf } from "./testing.helpers.ts";
 import { TestHomebridgeApi, TestMqttClient, logCount, loggedAt, settle } from "homebridge-plugin-utils/testing";
 import { describe, test } from "node:test";
 import type { LifecycleEvent } from "esphome-client";
+import { PLATFORM_NAME } from "./webui/settings.ts";
+import { PLUGIN_NAME } from "./settings.ts";
 import { RatgdoVariant } from "./types.ts";
 import assert from "node:assert/strict";
 import { txtEntries } from "homebridge-plugin-utils";

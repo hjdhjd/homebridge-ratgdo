@@ -10,11 +10,12 @@
  * and the log capture buffer is asserted against the production log strings verbatim.
  */
 import { Characteristic, Service, buildRatgdoAccessory, makeBinarySensorEvent, makeCoverEvent, makeRatgdoInitialState } from "./testing.helpers.ts";
-import { RATGDO_MOTION_DURATION, RATGDO_OCCUPANCY_DURATION } from "./settings.ts";
 import { describe, test } from "node:test";
 import { logCount, loggedAt, present, triggerGet, triggerSet } from "homebridge-plugin-utils/testing";
 import type { EspHomeEvent } from "./types.ts";
 import { MQTT_GET_SUFFIX } from "homebridge-plugin-utils";
+import { RATGDO_MOTION_DURATION } from "./webui/settings.ts";
+import { RATGDO_OCCUPANCY_DURATION } from "./settings.ts";
 import { RatgdoService } from "./types.ts";
 import assert from "node:assert/strict";
 

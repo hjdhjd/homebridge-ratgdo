@@ -12,11 +12,10 @@
 import { FeatureOptions, formatValueList, mqttConnectionSettings } from "homebridge-plugin-utils";
 import { describe, test } from "node:test";
 import { featureOptionCategories, featureOptions } from "./options.ts";
-import { makeRatgdoConfig, canonicalManualAddress as pageCanonical, isZonedAddress as pageIsZoned } from "../homebridge-ui/public/ratgdo-config.mjs";
-import { manualAddressList, canonicalManualAddress as runtimeCanonical, isZonedAddress as runtimeIsZoned } from "./manual.ts";
 import type { Nullable } from "homebridge-plugin-utils";
 import { RATGDO_MQTT_TOPIC } from "./settings.ts";
 import assert from "node:assert/strict";
+import { makeRatgdoConfig } from "./webui/ratgdo-config.ts";
 
 // The two broker URLs the precedence assertions tell apart: one carried by a legacy property, one already configured as an option entry.
 const LEGACY_URL = "mqtt://127.0.0.2:1883";
@@ -241,58 +240,6 @@ describe("the ratgdo webUI configuration migration", () => {
  * connection to that device reads its key at that MAC - so every stored-key row below reads the composed entry back through the real engine at the device's MAC,
  * which is what would fail if the card wrote anywhere else.
  */
-/* The one vector table, run against BOTH halves of the canonical-address rule.
- *
- * The rule is written twice on purpose: the page's copy lives in an import-free browser module and the plugin's lives in a Node module a browser cannot load. Nothing
- * in the language binds the two together, so THIS is what does - every vector is run through both halves and asserted to agree, and then asserted to be the expected
- * form. A drift between the two shows up here rather than as one address the page and the plugin spell two different ways.
- */
-describe("the canonical manual address, on both sides of the wire", () => {
-
-  const vectors: readonly (readonly [string, string, string])[] = [
-
-    [ "[2001:db8::5]", "2001:db8::5", "an enclosing bracket pair is removed" ],
-    [ "2001:db8::5", "2001:db8::5", "the bare form is already canonical, so both spellings meet here" ],
-    [ "Garage.Local", "garage.local", "a hostname is case-insensitive, so its case is settled" ],
-    [ "[2001:DB8::5]", "2001:db8::5", "upper-case hex in a bracketed literal is settled by the same pass" ],
-    [ "  10.0.0.20  ", "10.0.0.20", "surrounding whitespace is not part of an address" ],
-    [ "10.0.0.20", "10.0.0.20", "an IPv4 literal passes through unchanged" ],
-    [ "[", "[", "a lone bracket is not an enclosing pair, so only trim and case apply" ],
-    [ "fe80::1%en0", "fe80::1%en0", "a zone survives canonicalization - refusing it is a separate decision" ]
-  ];
-
-  for(const [ input, expected, why ] of vectors) {
-
-    test(JSON.stringify(input) + " canonicalizes identically on both sides", () => {
-
-      assert.equal(runtimeCanonical(input), expected, "the plugin's own rule answers " + JSON.stringify(expected) + ": " + why);
-      assert.equal(pageCanonical(input), expected, "and the page's rule answers the same, which is the whole point of asserting them together");
-    });
-  }
-
-  test("agrees on which addresses name a zone", () => {
-
-    for(const [input] of vectors) {
-
-      const canonical = runtimeCanonical(input);
-
-      assert.equal(pageIsZoned(canonical), runtimeIsZoned(canonical),
-        "both sides read " + JSON.stringify(canonical) + " the same way, so the card refuses exactly what the runtime would refuse");
-    }
-
-    assert.equal(runtimeIsZoned("fe80::1%en0"), true, "a zoned literal is refused");
-    assert.equal(runtimeIsZoned("fd00::1"), false, "and an ordinary unique-local literal is not");
-  });
-
-  test("collapses a bracketed and a bare spelling to one list entry", () => {
-
-    const listed = manualAddressList([ "[2001:DB8::5]", "2001:db8::5" ]);
-
-    assert.deepEqual([...listed], ["2001:db8::5"], "the runtime lists one address where a user wrote two spellings of it");
-    assert.equal(pageCanonical("[2001:DB8::5]"), pageCanonical("2001:db8::5"), "and the page spells the two as that one address too");
-  });
-});
-
 describe("the ratgdo webUI manual-device composition", () => {
 
   // The address shapes a user can type - an IPv4 address, a hostname, and an IPv6 literal. Whichever of them the card tested, the key is stored at the MAC of the
@@ -364,15 +311,6 @@ describe("the ratgdo webUI manual-device composition", () => {
         assert.equal(config.withManualDevice({}, { address, mac: MAC }), null,
           "an address of " + JSON.stringify(address) + " is the user having typed nothing, so nothing is composed");
       }
-
-      /* The card reads this value straight out of a DOM field, so the guard has to cope with a caller that is not TypeScript at all - which is what the module's own
-       * typeof check is for. Calling through an untyped view of the function is how that arm is exercised without an assertion at the call itself.
-       */
-      const loose = config as unknown as { withManualDevice: (entry: unknown, device: unknown) => unknown };
-      const untyped = (device: { address?: unknown; key?: unknown }): unknown => loose.withManualDevice({}, device);
-
-      assert.equal(untyped({}), null, "an address the page never supplied is the user having typed nothing too");
-      assert.equal(untyped({ address: 42 }), null, "and an address that is not text at all composes nothing rather than being coerced");
 
       const patch = config.withManualDevice({}, { address: "  10.0.0.20  ", mac: MAC });
 

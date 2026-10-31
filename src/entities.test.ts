@@ -50,7 +50,7 @@ describe("ratgdoInitialStateEntityIds", () => {
 
 describe("ratgdoStatusEntityIds", () => {
 
-  test("lists the ratgdo status row universe, motion included, in display order", () => {
+  test("lists the ratgdo status row universe, motion included", () => {
 
     assert.deepEqual(ratgdoStatusEntityIds(RatgdoVariant.RATGDO),
       [ "cover-door", "light-light", "lock-lock_remotes", "binary_sensor-motion", "binary_sensor-obstruction" ],
