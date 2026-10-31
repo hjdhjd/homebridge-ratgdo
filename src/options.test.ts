@@ -290,11 +290,24 @@ describe("the feature-option catalog", () => {
 
     test("the device-facing entries declare both the device and the global level", () => {
 
-      for(const [ category, name ] of [ [ "Device", "Encryption.Key" ], [ "Device", "LogName" ], [ "Log", "Opener" ], [ "Opener", "ReadOnly" ] ] as
+      for(const [ category, name ] of [ [ "Device", "Encryption.Key" ], [ "Device", "SyncName" ], [ "Log", "Opener" ], [ "Opener", "ReadOnly" ] ] as
         [ string, string ][]) {
 
         assert.deepEqual(entryFor(category, name).scopes, [ "device", "global" ], category + "." + name + " is settable globally or on one device");
       }
+    });
+
+    test("the custom Name is settable on one device alone, and Sync Name globally or on one device, each off by default in the family wording", () => {
+
+      const nameDescription = "Custom HomeKit name for this device and its parts. It always applies, so a rename in the Home app yields to it wherever " +
+        "HomeKit allows.";
+      const syncDescription = "Synchronize the ESPHome name of this device and its parts with HomeKit. A rename in the Home app yields to it wherever HomeKit " +
+        "allows. A custom Name takes precedence.";
+
+      assert.deepEqual(entryFor("Device", "Name"), { default: false, defaultValue: "", description: nameDescription, inputSize: 30, name: "Name", scopes: ["device"] },
+        "a custom name names one opener, so a global value, which would give every opener one name, has no home");
+      assert.deepEqual(entryFor("Device", "SyncName"), { default: false, description: syncDescription, name: "SyncName", scopes: [ "device", "global" ] },
+        "Sync Name is a flag every opener or one opener may set");
     });
 
     test("the option-scope documentation hook renders the sentence each declared shape carries", () => {

@@ -19,6 +19,10 @@ export const RATGDO_DEBUG_OPTION = "Log.Debug";
 // The feature option an encryption key is stored under, globally or at a device's MAC. Every connection reads its key here, and the Add Device card writes one here.
 export const RATGDO_ENCRYPTION_KEY_OPTION = "Device.Encryption.Key";
 
+// The feature option a device's custom HomeKit name is stored under, at the device's MAC. The accessory names itself and its parts from it, the platform and the status
+// feed name the device in their log lines from it, and the settings sidebar shows it as the device's name.
+export const RATGDO_NAME_OPTION = "Device.Name";
+
 // Duration, in seconds, of a motion sensor event. The accessory clears its motion state after this long, and the settings panel's motion row clears back to its
 // placeholder on the same duration.
 export const RATGDO_MOTION_DURATION = 5;

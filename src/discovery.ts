@@ -8,9 +8,10 @@
  * MAC into the two representations downstream code needs, and answer null for anything that is not a Ratgdo (or compatible variant) we configure - which is exactly
  * what the discovery stream reads as "not a device" and what the manual dial reads as "not an opener". A service's dial address is the library's ranked pick out of
  * everything it advertises, and the identity carries that whole advertised list besides, which each connection owner hands to the library's membership test to decide
- * whether the address its connection was opened at is still one the device advertises. The platform-state half - UUID generation, the per-run dedup gates, the
- * resolved log name - stays in the platform because it depends on instance state (hap, feature options, the device maps). Keeping the wire-derivation here makes the
- * validity guards, the project classification, and the MAC normalization unit-testable against arbitrary wire input without a live network or a Homebridge harness.
+ * whether the address its connection was opened at is still one the device advertises. The device's own name is stated here too, since it is read off the wire
+ * records alone. The platform-state half - UUID generation, the per-run dedup gates, the custom name a device is shown under - stays in the platform because it
+ * depends on instance state (hap, feature options, the device maps). Keeping the wire-derivation here makes the validity guards, the project classification, the
+ * device's own name, and the MAC normalization unit-testable against arbitrary wire input without a live network or a Homebridge harness.
  */
 import type { MdnsService, Nullable } from "homebridge-plugin-utils";
 import { dialAddress, txtEntries } from "homebridge-plugin-utils";
@@ -26,8 +27,8 @@ export const RATGDO_TXT_KEYS = [ "esphome_version", "friendly_name", "mac", "pro
 export type RatgdoTxtKey = typeof RATGDO_TXT_KEYS[number];
 
 /* A recognized Ratgdo identity, derived entirely from one wire record - everything a reader here can determine without platform state. A resolved mDNS service and a
- * connected client's device-info record each derive one, which is why nothing below names the source it came from. The platform layers UUID generation, the dedup
- * gates, and the resolved device name on top of this.
+ * connected client's device-info record each derive one, which is why nothing below names the source it came from. The platform layers UUID generation and the
+ * dedup gates on top of this, and composes the device's own name from it through deviceName().
  *
  * @property address         - The address to dial. For a service that is the pick out of everything the device advertises: its IPv6 address where it has a routable
  *                             one, otherwise its IPv4 address. For a device-info record it is the address the connection was opened at, since that is the one address
@@ -36,7 +37,7 @@ export type RatgdoTxtKey = typeof RATGDO_TXT_KEYS[number];
  *                             including any the pick would refuse, because this is the advertisement rather than a list of dial targets. For a device-info record it
  *                             is the single address that answered. The library's isAdvertisedAt reads it.
  * @property firmwareVersion - The device firmware version (the version key, falling back to esphome_version; the guard guarantees one of them is present).
- * @property friendlyName    - The mDNS-advertised friendly name, the fallback for the device's display name before the "Ratgdo" default.
+ * @property friendlyName    - The friendly name the record gives the device, or undefined when it gives none, which deviceName() reads the device's own name from.
  * @property macColon        - The uppercased colon-delimited MAC (AA:BB:...), the form HomeKit's UUID generator and the discovered-device dedup set consume.
  * @property model           - The advertised project version, used as the initial device model before the connected client's deviceInfo refreshes it.
  * @property strippedMac     - The bare-hex MAC (AABB...), the form device.mac, feature-option lookup keys, and MQTT topics consume.
@@ -73,6 +74,33 @@ const advertised = (value: Nullable<string> | undefined): string | undefined => 
 export function normalizeMac(mac: string): string {
 
   return mac.replace(/[^0-9a-f]/gi, "").toUpperCase();
+}
+
+/* The device's own name: the friendly name its wire record gives it, else "Ratgdo" for a device that gives none. It names the opener's accessory and every part in
+ * HomeKit wherever no custom Name does, and it is the name Sync Name holds HomeKit to. Each classification below reads the friendly name off its own record, a TXT
+ * record's friendly_name and a device-info record's through deviceInfoName(), and the platform seeds the device record's name from whichever identity found the
+ * device through this one rule, so a device reached by advertisement and the same device reached at a listed address are named alike.
+ *
+ * @param friendlyName - The friendly name a classification read, or undefined when the record gave none.
+ *
+ * @returns The device's own name.
+ */
+export function deviceName(friendlyName: string | undefined): string {
+
+  return friendlyName ?? "Ratgdo";
+}
+
+/* The friendly name a device-info record gives its device: the friendlyName member, else the name member, since ESPHome populates one or both depending on how the
+ * device's YAML is written, with an empty member read as an absent one. classifyDeviceInfo reads it for a device reached at a listed address, and applyDeviceInfo reads
+ * it on every session to refresh the device's own name, so the name a device is admitted under and the name each session refreshes it to are read the same way.
+ *
+ * @param info - The device-info record a connected client read.
+ *
+ * @returns The friendly name, or undefined when the record gives none.
+ */
+export function deviceInfoName(info: DeviceInfo): string | undefined {
+
+  return advertised(info.friendlyName) ?? advertised(info.name);
 }
 
 /* The already-read fields an identity is composed from, in the vocabulary this module derives rather than the vocabulary either wire format spells them in. A reader
@@ -141,8 +169,8 @@ function composeIdentity({ address, addresses, firmwareVersion, friendlyName, ma
  * gets from its advertisement is derived here from the record instead, after the connect.
  *
  * The validity guard requires a MAC, a project name, and a firmware version, because those are the three the identity cannot be composed without. An empty member
- * reads as an absent one, exactly as an empty TXT value does, and `friendlyName` falls back to the device's own name before it gives up - ESPHome populates one or
- * both depending on how the device's YAML is written.
+ * reads as an absent one, exactly as an empty TXT value does, and the friendly name is read through deviceInfoName(), the reading every session's refresh of the
+ * device's own name shares.
  *
  * Pure and I/O-free: the caller does the reading and hands the record over.
  *
@@ -162,7 +190,7 @@ export function classifyDeviceInfo(info: Nullable<DeviceInfo>, address: string):
    * guarantee reaches the composer below only through these bindings.
    */
   const firmwareVersion = advertised(info.esphomeVersion);
-  const friendlyName = advertised(info.friendlyName) ?? advertised(info.name);
+  const friendlyName = deviceInfoName(info);
   const mac = advertised(info.macAddress);
   const projectName = advertised(info.projectName);
 

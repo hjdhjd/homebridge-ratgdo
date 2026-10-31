@@ -737,6 +737,23 @@ describe("applyDeviceInfo", () => {
     assert.equal(firmwareOnly.model, "1.0.0", "the omitted member leaves discovery's seed standing rather than blanking it");
   });
 
+  test("refreshes the device's own name from the record's friendly name, else its node name, and keeps the seeded name when it carries neither", () => {
+
+    const device = makeTestDevice({ name: "Garage" });
+
+    applyDeviceInfo(device, asEspHomeClient(new TestEspHomeClient({ deviceInfo: { friendlyName: "Workshop Door", name: "workshop-door" } })));
+
+    assert.equal(device.name, "Workshop Door", "the friendly name the record carries becomes the device's own name");
+
+    applyDeviceInfo(device, asEspHomeClient(new TestEspHomeClient({ deviceInfo: { friendlyName: "", name: "workshop-door" } })));
+
+    assert.equal(device.name, "workshop-door", "an empty friendly name reads as none, and the node name stands in for it");
+
+    applyDeviceInfo(device, asEspHomeClient(new TestEspHomeClient({ deviceInfo: { esphomeVersion: "2025.1.0" } })));
+
+    assert.equal(device.name, "workshop-door", "a record carrying neither name leaves the name the device already holds");
+  });
+
   test("writes nothing when the client has no device info at all", () => {
 
     const device = makeTestDevice({ firmwareVersion: "1.0.0", model: "1.0.0" });

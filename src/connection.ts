@@ -20,7 +20,7 @@
 import { EncryptionKeyInvalidError, EncryptionKeyMissingError, EncryptionRequiredError, NegotiationFailedError, PermanentError, openEspHomeClient } from "esphome-client";
 import type { EntityId, EspHomeClient, NoiseServerHello, PskResolver, TelemetryEvent } from "esphome-client";
 import type { HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
-import { classifyDeviceInfo, normalizeMac } from "./discovery.ts";
+import { classifyDeviceInfo, deviceInfoName, normalizeMac } from "./discovery.ts";
 import { presentEntityIds, ratgdoInitialStateEntityIds } from "./entities.ts";
 import type { DiscoveredRatgdo } from "./discovery.ts";
 import { RATGDO_INITIAL_STATE_TIMEOUT } from "./settings.ts";
@@ -177,9 +177,10 @@ type CaptureOutcome<TIdentity, TRefusal> = { client: EspHomeClient; identity: TI
  * refresh will retry). The platformAccessory (if any) stays registered with Homebridge - acquireService() is safe to call more than once and reuses existing service
  * objects on the retry's RatgdoAccessory construction.
  *
- * The factory's `logger` field accepts the EspHomeLogging shape; the caller passes a static-prefix adapter built from device.name so client-internal messages (connect
- * retries, heartbeat, encryption fallback) carry device context. The adapter is permanent for the client's lifetime, so a HomeKit rename later does not retitle
- * client-internal logs - the accessory's dynamic-name logger is used for everything else.
+ * The factory's `logger` field accepts the EspHomeLogging shape; the caller passes a prefixed adapter naming the device as the platform names it, so client-internal
+ * messages (connect retries, heartbeat, encryption fallback) carry device context. The adapter is permanent for the client's lifetime and reads the name on each line,
+ * so a device renamed on its own side is retitled on the next one, while a rename in the Home app never retitles client-internal logs - the accessory's own logger is
+ * used for everything else.
  */
 export async function openConnection({ expected, ...options }: OpenConnectionOptions): Promise<ConnectionOutcome> {
 
@@ -406,27 +407,41 @@ resolveWaitList: (client: EspHomeClient) => WaitListOutcome<TIdentity, TRefusal>
   return { ok: false, reason };
 }
 
-/* Refresh a device's identity fields from the connected client's device info. The mDNS TXT record seeds both the model and the firmware version at discovery, but the
- * client's deviceInfo() is the authoritative source for each and a firmware upgrade can change either, so both are refreshed from it here. The platform applies this
- * before it constructs the accessory, so the accessory's first characteristic write is already correct, and again on every session through the platform's per-session
- * identity refresh, which is what carries a post-upgrade version into HomeKit. A field whose member the record omits keeps whatever discovery seeded, so a partial
- * record never blanks an identity.
+/* Refresh a device's identity fields from the connected client's device info. Discovery seeds the model, the firmware version, and the device's own name from the
+ * record that found the device, but the client's deviceInfo() is the authoritative source for each: a firmware upgrade can change the model and the firmware version, and
+ * a rename on the device changes its name, so each is refreshed from it here. The name is read through the same rule a listed address's identity is, which also gives a
+ * device found by advertisement the node name its TXT record does not carry. The platform applies this before it constructs the accessory, so the accessory's first
+ * characteristic write and its first name are already correct, and again on every session through the platform's per-session identity refresh, which is what carries a
+ * post-upgrade version and a renamed device into HomeKit. A field whose member the record omits keeps whatever discovery seeded, so a partial record never blanks an
+ * identity.
  *
- * @param device - The device record whose model and firmware version are refreshed in place.
+ * @param device - The device record whose model, firmware version, and name are refreshed in place.
  * @param client - The connected client whose device info is read.
  */
 export function applyDeviceInfo(device: RatgdoDevice, client: EspHomeClient): void {
 
   const info = client.deviceInfo();
 
-  if(info?.projectVersion !== undefined) {
+  if(!info) {
+
+    return;
+  }
+
+  const name = deviceInfoName(info);
+
+  if(info.projectVersion !== undefined) {
 
     device.model = info.projectVersion;
   }
 
-  if(info?.esphomeVersion !== undefined) {
+  if(info.esphomeVersion !== undefined) {
 
     device.firmwareVersion = info.esphomeVersion;
+  }
+
+  if(name !== undefined) {
+
+    device.name = name;
   }
 }
 

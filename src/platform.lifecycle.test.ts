@@ -3,17 +3,20 @@
  * platform.lifecycle.test.ts: The platform's connection lifecycle, driven for real. A RatgdoPlatform is built on the shared Homebridge test double with its
  * injectable defaults set to the doubles, an opener is discovered through the browser double and admitted through a fake dial, and the admitted client delivers its
  * lifecycle events in the orders esphome-client emits them and its telemetry in the shapes the wire carries. Each row reads what the opener's users see: whether
- * HomeKit answers, the info and error lines, the MQTT availability statement, the identity characteristics each session refreshes, and the tiles telemetry moves.
+ * HomeKit answers, the info and error lines, the MQTT availability statement, the identity characteristics each session refreshes, the tiles telemetry moves, and
+ * the lines the client itself writes, through the log adapter the admitting dial hands it.
  */
 import type { BuildPlatformResult, TestEspHomeClient } from "./testing.helpers.ts";
-import { Characteristic, Service, buildPlatform, makeCoverEvent, makeFakeOpenClient, makeOpenerClient, makeOpenerService, makeTelemetry } from "./testing.helpers.ts";
+import { Characteristic, Service, buildPlatform, customNameEntry, makeCoverEvent, makeFakeOpenClient, makeOpenerClient, makeOpenerService,
+  makeTelemetry, nameLookupsDuring } from "./testing.helpers.ts";
 import { ConnectionError, CoverOperation, EncryptionKeyInvalidError, LogLevel } from "esphome-client";
 import type { TestLogEntry, TestPlatformAccessory } from "homebridge-plugin-utils/testing";
 import { describe, test } from "node:test";
-import { expectAt, formatLogEntry, hapStatus, logCount, present, settleUntil, triggerGet } from "homebridge-plugin-utils/testing";
+import { expectAt, formatLogEntry, hapStatus, linesAt, logCount, present, settleUntil, triggerGet } from "homebridge-plugin-utils/testing";
 import { DeviceIdentityError } from "./connection.ts";
 import type { DeviceInfo } from "esphome-client";
 import { HAPStatus } from "homebridge-plugin-utils";
+import type { HomebridgePluginLogging } from "homebridge-plugin-utils";
 import type { RatgdoAccessory } from "./device.ts";
 import { RatgdoService } from "./types.ts";
 import assert from "node:assert/strict";
@@ -29,7 +32,7 @@ const UPGRADED_INFO = { esphomeVersion: "2025.10.1", projectVersion: "2.5.0" };
 const ATTEMPT_FAILED = new ConnectionError("The reconnect attempt failed.", "CONNECT_FAILED");
 
 /* An opener the platform has discovered and admitted: the platform, its client double, the device-info record that client reports, the accessory the platform
- * built, and how many log entries had been written once admission was done.
+ * built, the log adapter the admitting dial handed the client factory, and how many log entries had been written once admission was done.
  */
 interface AdmittedOpener {
 
@@ -37,6 +40,7 @@ interface AdmittedOpener {
   admittedAt: number;
   built: BuildPlatformResult;
   client: TestEspHomeClient;
+  logger: HomebridgePluginLogging;
   ratgdo: RatgdoAccessory;
   record: DeviceInfo;
 }
@@ -48,13 +52,15 @@ const admit = async ({ encrypted = false, mqtt = false, userOptions }: { encrypt
 Promise<AdmittedOpener> => {
 
   const client = makeOpenerClient({ encrypted, mac: MAC });
-  const built = buildPlatform({ mqtt, openClient: makeFakeOpenClient(client), userOptions });
+  const openClient = makeFakeOpenClient(client);
+  const built = buildPlatform({ mqtt, openClient, userOptions });
 
   built.launch().found(makeOpenerService({ address: ADDRESS, mac: MAC }));
 
   await settleUntil(() => built.platform.configuredDevices.size === 1, { description: "the discovered opener to be admitted" });
 
   return { accessory: expectAt(built.api.accessories, 0, "the accessory the platform registered"), admittedAt: built.entries.length, built, client,
+    logger: expectAt(openClient.calls, 0, "the dial that admitted the opener").logger,
     ratgdo: present([...built.platform.configuredDevices.values()][0], "the admitted opener"), record: present(client.deviceInfo(), "the opener's device-info record") };
 };
 
@@ -240,6 +246,40 @@ describe("RatgdoPlatform lifecycle listener", () => {
     assert.equal(logCount(since(opener), "error", "Encryption configuration error"), 1, "and its diagnostic is logged once");
     assert.ok(indexOf(since(opener), "info", "Ratgdo disconnected.") < indexOf(since(opener), "error", "Encryption configuration error"),
       "the announcement lands ahead of the diagnostic, so the diagnostic follows the disconnect it explains");
+  });
+});
+
+describe("RatgdoPlatform connection log", () => {
+
+  /* The connection's log adapter is the one the admitting dial hands the client factory, so every line the client writes reaches the platform's log through it. The
+   * opener carries a custom Name, so the prefix is read through the displayed-name rule rather than taken from the advertisement, and a spy on the platform's option
+   * engine counts the custom Name lookups that rule makes while one line is written, which is how the row reads that a suppressed debug line resolves no name.
+   */
+  test("drops a debug line with debug off before resolving the opener's name, and writes each line it emits under the opener's displayed name", async () => {
+
+    const quiet = await admit({ userOptions: [customNameEntry("Workshop", MAC)] });
+
+    assert.equal(nameLookupsDuring(quiet.built.platform, () => quiet.logger.debug("A debug line.")), 0,
+      "with debug off the adapter drops a debug line before resolving the name");
+    assert.deepEqual(since(quiet).map((entry) => formatLogEntry(entry)).filter((line) => line.includes("A debug line.")), [], "and the line reaches the log at no level");
+
+    const verbose = await admit({ userOptions: [ "Enable.Log.Debug", customNameEntry("Workshop", MAC) ] });
+
+    assert.equal(nameLookupsDuring(verbose.built.platform, () => verbose.logger.debug("A debug line.")), 1,
+      "with debug on the adapter resolves the opener's name for the line");
+    assert.deepEqual(linesAt(since(verbose), "warn").filter((line) => line.includes("A debug line.")), ["Workshop: A debug line."],
+      "and the line reaches the log once, at warn, under the opener's displayed name");
+
+    for(const opener of [ quiet, verbose ]) {
+
+      for(const level of [ "error", "info", "warn" ] as const) {
+
+        opener.logger[level]("A line at " + level + ".");
+
+        assert.deepEqual(linesAt(since(opener), level).filter((line) => line.includes("A line at " + level + ".")), ["Workshop: A line at " + level + "."],
+          "the " + level + " level reaches the log under the opener's displayed name whatever the debug setting");
+      }
+    }
   });
 });
 

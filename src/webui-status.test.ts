@@ -15,8 +15,8 @@ import type { OpenClientHandler, RecordedOpenOptions, TestEspHomeClientOptions }
 import { RATGDO_MOTION_DURATION, RATGDO_WEBUI_PROBE_TIMEOUT } from "./webui/settings.ts";
 import { StatusFeed, narrowStatusProbeRequest, narrowStatusWarmRequest } from "./webui-status.ts";
 import { TestClock, TestMdnsBrowserFactory, capturingLog, expectAt, formatLogEntry, settle, waitUntil } from "homebridge-plugin-utils/testing";
-import { TestEspHomeClient, TestPermanentError, makeBinarySensorEvent, makeCoverEvent, makeFakeOpenClient, makeLightEvent, makeLockEvent, makeRatgdoService,
-  makeSwitchEvent, makeTelemetry, openThroughHello, resolverOf } from "./testing.helpers.ts";
+import { TestEspHomeClient, TestPermanentError, customNameEntry, makeBinarySensorEvent, makeCoverEvent, makeFakeOpenClient, makeLightEvent, makeLockEvent,
+  makeRatgdoService, makeSwitchEvent, makeTelemetry, openThroughHello, resolverOf } from "./testing.helpers.ts";
 import type { TestLogEntry, TestMdnsBrowser } from "homebridge-plugin-utils/testing";
 import { describe, test } from "node:test";
 import type { OpenEspHomeClient } from "./connection.ts";
@@ -226,7 +226,7 @@ const makeFeed = (options: { browserFactory?: TestMdnsBrowserFactory; captureTim
   return { browser, clock, entries: log.entries, factory, feed, pushes };
 };
 
-/* The warm request the page sends: the sidebar's macs, and the options array of a configuration listing the given addresses and storing the given keys and log
+/* The warm request the page sends: the sidebar's macs, and the options array of a configuration listing the given addresses and storing the given keys and custom
  * names, each entry spelled the way the options editor spells it. The pool reads everything it acts on out of these entries through the plugin's own engine, so a row
  * describes the configuration a user would have and asserts what the pool made of it.
  *
@@ -234,7 +234,7 @@ const makeFeed = (options: { browserFactory?: TestMdnsBrowserFactory; captureTim
  * @param config.addresses - The Device.Address list, exactly as the user typed it.
  * @param config.global    - The global encryption key.
  * @param config.keys      - Encryption keys stored at a device's mac.
- * @param config.names     - Log names stored at a device's mac.
+ * @param config.names     - Custom names stored at a device's mac.
  */
 const warmOf = (devices: string[], { addresses, global, keys = {}, names = {} }: { addresses?: string[]; global?: string; keys?: Record<string, string>;
   names?: Record<string, string>; } = {}): StatusWarmRequest => ({
@@ -245,7 +245,7 @@ const warmOf = (devices: string[], { addresses, global, keys = {}, names = {} }:
     ...((addresses === undefined) ? [] : ["Enable.Device.Address=" + formatValueList(addresses)]),
     ...((global === undefined) ? [] : ["Enable.Device.Encryption.Key=" + global]),
     ...Object.entries(keys).map(([ mac, key ]) => "Enable.Device.Encryption.Key." + mac + "=" + key),
-    ...Object.entries(names).map(([ mac, name ]) => "Enable.Device.LogName." + mac + "=" + name)
+    ...Object.entries(names).map(([ mac, name ]) => customNameEntry(name, mac))
   ]
 });
 
@@ -1738,10 +1738,10 @@ describe("StatusFeed connection logging", () => {
       formatLogEntry(entry).startsWith("Test Ratgdo: The live-status connection failed unexpectedly.")), "the connect body's catch logs under the device's identity");
   });
 
-  test("speaks under the warmed log name ahead of the advertised name, and re-reads it on every line", async () => {
+  test("speaks under the warmed custom name ahead of the advertised name, and re-reads it on every line", async () => {
 
     /* The resolver is a closure the adapter calls per line rather than a string captured at connect, so one recorded logger is driven across two warms here: the same
-     * adapter answers the log name while one is warmed and the advertised name once it is not. Asserting it on ONE adapter is what tells a live resolver from an
+     * adapter answers the custom name while one is warmed and the advertised name once it is not. Asserting it on ONE adapter is what tells a live resolver from an
      * implementation that merely happened to compute the right prefix at connect time.
      */
     const openClient = makeFakeOpenClient(async () => makeClient({ snapshot: restingCache() }));
@@ -1777,7 +1777,7 @@ describe("StatusFeed connection logging", () => {
 
   test("falls back through the advertised name to the dialed address for a device with neither a warmed name nor an advertised one", async () => {
 
-    // The full precedence needs a device advertising no usable name and carrying no log name, which is the one input that reaches the last fallback.
+    // The full precedence needs a device advertising no usable name and carrying no custom name, which is the one input that reaches the last fallback.
     const openClient = makeFakeOpenClient(async () => makeClient({ snapshot: restingCache() }));
     const { browser, entries, feed } = makeFeed({ openClient });
 
@@ -1800,9 +1800,43 @@ describe("StatusFeed connection logging", () => {
       "with no name from either source the dialed address stands in as the identity");
   });
 
-  test("moves no connection for a warm that changes nothing but the log name", async () => {
+  test("passes over a warmed custom name HomeKit can carry nothing of, as the plugin does, and speaks a custom name as HomeKit carries it", async () => {
 
-    // A log name is display truth alone. The key diff is what decides a teardown, so a warm carrying a new name against an unchanged key must leave the live session
+    // The prefix follows HBPU's display-name rule, the plugin's own, so a name the rule empties names nothing and one carrying a character HomeKit refuses loses it.
+    const openClient = makeFakeOpenClient(async () => makeClient({ snapshot: restingCache() }));
+    const { browser, entries, feed } = makeFeed({ openClient });
+
+    feed.startDiscovery();
+    browser().found(makeService());
+
+    await settle();
+
+    feed.warm(warmOf([MAC], { names: { [MAC]: "\u{1F319}" } }));
+
+    await settle();
+
+    const call = openClient.calls[0];
+
+    assert.ok(call, "the device connects");
+
+    call.logger.info("A line.");
+
+    assert.ok(entries.some((entry) => (entry.level === "info") && (formatLogEntry(entry) === "Test Ratgdo: A line.")),
+      "a custom name HomeKit can carry nothing of is passed over for the advertised name, rather than prefixing the line with what the plugin never applies");
+
+    feed.warm(warmOf([MAC], { names: { [MAC]: "North Door \u{1F319}" } }));
+
+    await settle();
+
+    call.logger.info("A later line.");
+
+    assert.ok(entries.some((entry) => (entry.level === "info") && (formatLogEntry(entry) === "North Door: A later line.")),
+      "and a custom name is spoken as HomeKit carries it, cleaned by the same rule");
+  });
+
+  test("moves no connection for a warm that changes nothing but the custom name", async () => {
+
+    // A custom name is display truth alone. The key diff is what decides a teardown, so a warm carrying a new name against an unchanged key must leave the live session
     // exactly where it is: the factory call count proves no second connect, and the client's dispose record proves the first was never torn down.
     const client = makeClient({ snapshot: restingCache() });
     const openClient = makeFakeOpenClient(async () => client);
@@ -2551,10 +2585,10 @@ describe("narrowStatusWarmRequest", () => {
 
 describe("StatusFeed warmed configuration", () => {
 
-  test("drives every key, log name, and listed address from the warmed options, and never logs a key", async () => {
+  test("drives every key, custom name, and listed address from the warmed options, and never logs a key", async () => {
 
     /* The pool resolves what it acts on out of the configuration the page is editing, through the plugin's own engine, rather than out of values the page resolved
-     * for it. One warm carries each of them: a key and a log name stored at a discovered device's mac, and a listed address beside a zoned one. The key reaches the
+     * for it. One warm carries each of them: a key and a custom name stored at a discovered device's mac, and a listed address beside a zoned one. The key reaches the
      * discovered connection's client, the name prefixes its log, the address is dialed, the zoned entry is dropped by the pool's own filter, and no captured line
      * anywhere carries the key's text - the options can hold credentials, so the pool must never echo them.
      */
@@ -2577,7 +2611,7 @@ describe("StatusFeed warmed configuration", () => {
     discovered?.logger.info("A line.");
 
     assert.ok(entries.some((entry) => (entry.level === "info") && (formatLogEntry(entry) === "North Door: A line.")),
-      "the log name stored at the device's mac prefixes its connection's lines");
+      "the custom name stored at the device's mac prefixes its connection's lines");
     assert.equal(callsForHost(openClient, ADDR_TWO).length, 1, "the listed address is dialed");
     assert.equal(callsForHost(openClient, "fe80::1%en0").length, 0, "and the zoned entry beside it is never dialed");
     assert.ok(!entries.some((entry) => formatLogEntry(entry).includes("discovered-key")), "no line the pool wrote carries the warmed key's text");
@@ -3130,7 +3164,7 @@ describe("StatusFeed address governance", () => {
   test("redials a governed session when the key at its MAC changes, and leaves it alone when an unrelated option changes", async () => {
 
     /* The warm resends on any option edit, so the diff is what keeps an edit that moves nothing from moving a connection. The session is encrypted, so a moved key
-     * redials rather than adopting in place; the unrelated edit adds a global key the device's own key outranks, another device's key, and a log name.
+     * redials rather than adopting in place; the unrelated edit adds a global key the device's own key outranks, another device's key, and a custom name.
      */
     const openClient = makeFakeOpenClient(async () => makeAnsweringClient({ isEncrypted: true }));
     const { feed } = makeFeed({ openClient });

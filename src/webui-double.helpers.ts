@@ -86,7 +86,7 @@ export interface FeatureOptionsParams {
   onLoaded?: () => void;
   onOptionsEdited?: () => void;
   onOptionsRolledBack?: () => void;
-  sidebar?: { deviceLabel?: string; groupOrder?: (a: string, b: string) => number };
+  sidebar?: { deviceContent?: (device: FakeDevice) => FakeElement | string | null; deviceLabel?: string; groupOrder?: (a: string, b: string) => number };
   statusPanel?: StatusPanelParams;
 
   /* The framework's two visibility hooks as the page hands them over: one asked whether a device's page should render a given option, the other whether it should
@@ -214,6 +214,7 @@ export interface FakeDocument {
   createElement: (tag: string) => FakeElement;
   getElementById: (id: string) => Nullable<FakeElement>;
   querySelector: (selector: string) => Nullable<FakeElement>;
+  querySelectorAll: (selector: string) => readonly FakeElement[];
   visibilityState: string;
 }
 
@@ -586,6 +587,44 @@ export const makeDocument = (): FakeDom => {
      * identifies by class rather than by id, so modelling those two keeps the double honest about what may be reached for.
      */
     querySelector: (selector) => search((element) => (element.className.split(" ").includes(selector.replace(".", "")) || (element.tagName === selector))),
+
+    /* The one selector shape the page's sidebar repaint sends: every element wearing a class beneath the element carrying an id, in document order. Any other shape
+     * is one the page has no reason to send, so it throws rather than answering a guess.
+     */
+    querySelectorAll: (selector) => {
+
+      const [ , id, className ] = /^#([^ .]+) \.([^ .]+)$/.exec(selector) ?? [];
+
+      if((id === undefined) || (className === undefined)) {
+
+        throw new Error("The fake document models only the \"#id .class\" selector shape, which " + selector + " is not.");
+      }
+
+      const found: FakeElement[] = [];
+
+      // Every descendant of one element, depth first, so the answer keeps document order.
+      const collect = (element: FakeElement): void => {
+
+        for(const child of element.children) {
+
+          if(child.className.split(" ").includes(className)) {
+
+            found.push(child);
+          }
+
+          collect(child);
+        }
+      };
+
+      const root = document.getElementById(id);
+
+      if(root) {
+
+        collect(root);
+      }
+
+      return found;
+    },
     visibilityState: "visible"
   };
 
@@ -602,13 +641,14 @@ export const makeDocument = (): FakeDom => {
   };
 
   /* The markup Config UI X serves, in the shape index.html declares it: one feature-content row holding the sidebar and the main region side by side, the sidebar
-   * holding its own content wrapper, and the main region holding the three framework content regions in order. The NESTING is what matters here rather than the
-   * completeness - the launcher and a takeover's container mount by inserting beside these elements, so a flat set of roots would let an insertion pass that a real
-   * document would refuse.
+   * holding its own content wrapper with the device links' container inside it, and the main region holding the three framework content regions in order. The
+   * NESTING is what matters here rather than the completeness - the launcher and a takeover's container mount by inserting beside these elements, and the sidebar's
+   * repaint finds its device names beneath the container, so a flat set of roots would let an insertion or a lookup pass that a real document would refuse.
    */
   const row = seed("feature-main-content");
   const sidebar = seed("sidebar");
   const sidebarContent = makeElement("div");
+  const devices = makeElement("nav");
   const main = makeElement("main");
   const stats = seed("deviceStatsContainer");
   const searchRegion = seed("search");
@@ -616,7 +656,9 @@ export const makeDocument = (): FakeDom => {
 
   row.className = "feature-main-content";
   sidebarContent.className = "sidebar-content";
+  devices.id = "devicesContainer";
   main.className = "feature-content";
+  sidebarContent.append(devices);
   sidebar.append(sidebarContent);
   main.append(stats, searchRegion, options);
   row.append(sidebar, main);

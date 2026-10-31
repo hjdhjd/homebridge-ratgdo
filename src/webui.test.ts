@@ -31,6 +31,9 @@ const configWith = (...options: string[]): FakeConfigEntry[] => [{ name: "Ratgdo
 // The encryption-key entry at a device's mac, or the global one when no mac is given, spelled the way the options editor writes it.
 const keyEntry = (mac: string | undefined, key: string): string => "Enable.Device.Encryption.Key" + ((mac === undefined) ? "" : ("." + mac)) + "=" + key;
 
+// The custom-name entry at a device's mac, spelled the way the options editor writes it.
+const nameEntry = (mac: string, name: string): string => "Enable.Device.Name." + mac + "=" + name;
+
 // Every warm request the page has sent, in order. Reading the log by route is how each test counts sends without depending on what else the page asked for.
 const warmSends = (page: LoadedUi): unknown[] => page.host.requests.filter((entry) => (entry.route === STATUS_WARM_ROUTE)).map((entry) => entry.body);
 
@@ -546,6 +549,52 @@ describe("the ratgdo settings page", () => {
 
       assert.deepEqual(warmSends(page)[0], { devices: [ MAC, MAC_TWO ], options: [keyEntry(MAC, KEY)] },
         "tagging a row for the sidebar adds nothing to the warm body the server receives");
+    });
+  });
+
+  describe("the sidebar's device names", () => {
+
+    test("names each device link as the plugin names its accessory, repainting it as a custom Name is edited, rolled back, or one HomeKit cannot carry", async () => {
+
+      using page = await loadUi();
+
+      const deviceContent = page.double.params.sidebar?.deviceContent;
+      const container = page.document.getElementById("devicesContainer");
+      const rows = defaultDevices();
+
+      assert.ok(deviceContent && container, "the page supplies the link content hook, and the markup carries the device links' container");
+
+      // Render each link the way the framework does, handing the hook the row the device source produced and placing what it answers in the container.
+      const links = rows.map((row) => {
+
+        const content = deviceContent(row);
+
+        assert.ok((content !== null) && (typeof content !== "string"), "the hook answers a node of its own, which the repaint can find again");
+
+        return content;
+      });
+
+      container.append(...links);
+
+      const names = (): string[] => links.map((link) => link.textContent);
+
+      assert.deepEqual(names(), [ "Garage", "Side Door" ], "with no custom Name, each link shows the name its device's accessory carries");
+
+      setOptions(page, nameEntry(MAC, "Workshop \u{1F319}"));
+      page.double.params.onOptionsEdited?.();
+
+      assert.deepEqual(names(), [ "Workshop", "Side Door" ], "an edit repaints the link it names at once, with the custom Name as HomeKit carries it");
+
+      setOptions(page);
+      page.double.params.onOptionsRolledBack?.();
+
+      assert.deepEqual(names(), [ "Garage", "Side Door" ], "a rollback that clears the custom Name repaints the link back to its row's own name");
+
+      setOptions(page, nameEntry(MAC, "\u{1F319}"));
+      page.double.params.onOptionsEdited?.();
+
+      assert.deepEqual(names(), [ "Garage", "Side Door" ], "a custom Name HomeKit can carry nothing of names nothing, so the row's own name stands");
+      assert.deepEqual(rows.map((row) => row.name), [ "Garage", "Side Door" ], "and no row the device source handed over was written");
     });
   });
 

@@ -111,15 +111,17 @@ export const featureOptionCategories: FeatureCategoryEntry<RatgdoOptionMeta>[] =
 
 /* eslint-disable @stylistic/max-len */
 /* Individual feature options, broken out by category. Every entry declares the scope levels it may be configured at, which the webUI reads to decide where an option
- * renders and the documentation generator restates in prose: a device-facing option belongs at the global level and on an individual device alike, while a
- * platform-wide fact - the broker connection, the debug stream - has exactly one home.
+ * renders and the documentation generator restates in prose: a device-facing option belongs at the global level and on an individual device alike, a fact about
+ * one device - its custom name, which set globally would give every opener the same name - belongs on that device alone, and a platform-wide fact - the broker
+ * connection, the debug stream - has exactly one home.
  */
 
 // Device options.
 const deviceOptions: RatgdoFeatureOption[] = [
 
   { default: true, description: "Make this device available in HomeKit.", name: "", scopes: [ "device", "global" ] },
-  { default: false, defaultValue: "", description: "Name to use for logging purposes. Defaults to the name the Ratgdo device advertises.", inputSize: 15, name: "LogName", scopes: [ "device", "global" ] },
+  { default: false, defaultValue: "", description: "Custom HomeKit name for this device and its parts. It always applies, so a rename in the Home app yields to it wherever HomeKit allows.", inputSize: 30, name: "Name", scopes: ["device"] },
+  { default: false, description: "Synchronize the ESPHome name of this device and its parts with HomeKit. A rename in the Home app yields to it wherever HomeKit allows. A custom Name takes precedence.", name: "SyncName", scopes: [ "device", "global" ] },
   { default: false, defaultValue: "", description: "Base64-encoded encryption key to use for the ESPHome API as specified in your YAML configuration.", inputSize: 44, name: "Encryption.Key", scopes: [ "device", "global" ] },
   { default: false, defaultValue: "", description: "Hostnames or IP addresses of devices to connect to directly, for a device autodiscovery cannot reach or should not choose the address for.", inputSize: 30, multiple: true, name: "Address", scopes: ["global"] }
 ];
@@ -201,9 +203,10 @@ export const featureOptions: Record<string, FeatureOptionEntry<RatgdoOptionMeta>
   "Opener": openerOptions
 };
 
-/* Documentation hooks: the scope prose the generated feature-option reference renders. Every entry in this catalog declares one of exactly two shapes - a device-facing
- * option configurable at both levels, and a platform-wide fact configurable globally alone - which is the pair the library's fixed sentences are written for, so the
- * sentences themselves belong to the library and the choice of that pair is all this module states. The category hook comes back with it and contributes nothing: the
- * per-option suffixes carry the whole story, and a category-level sentence would either repeat them or contradict a category holding options at differing levels.
+/* Documentation hooks: the scope prose the generated feature-option reference renders. The library's fixed sentences are written for a device-facing option
+ * configurable at both levels and for a platform-wide fact configurable globally alone, so the sentences themselves belong to the library and choosing them is all
+ * this module states. An entry configurable on a device alone, the custom name, matches neither sentence and renders none. The category hook comes back with it and
+ * contributes nothing: the per-option suffixes carry the whole story, and a category-level sentence would either repeat them or contradict a category holding options
+ * at differing levels.
  */
 export const { describeCategoryScope, describeOptionScope } = buildFixedScopeDescribers();

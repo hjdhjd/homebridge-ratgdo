@@ -521,13 +521,6 @@ describe("makeTestPlatform", () => {
       "clientUnavailable models the connect-failure window where no client is available");
   });
 
-  test("resolveLogName mirrors production: a configured value resolves, an unset or empty value collapses to undefined", () => {
-
-    assert.equal(makeTestPlatform({ userOptions: ["Enable.Device.LogName.MyDoor"] }).platform.resolveLogName("AABBCCDDEEFF"), "MyDoor",
-      "a configured Device.LogName resolves to its value");
-    assert.equal(makeTestPlatform().platform.resolveLogName("AABBCCDDEEFF"), undefined, "an unset Device.LogName resolves to undefined");
-  });
-
   test("carries the kit's Homebridge API double, whose HAP namespace is the platform double's own", () => {
 
     const { platform } = makeTestPlatform();

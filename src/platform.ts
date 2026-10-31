@@ -4,19 +4,19 @@
  */
 import type { API, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
 import { APIEvent, AccessoryPersistence, CoalescingTask, FeatureOptions, HbpuAbortError, MQTT_AVAILABILITY_OFFLINE, Perms, WakeableWait, createMqttClient,
-  debugGatedLog, discoverServices, formatErrorMessage, isAdvertisedAt, mdnsBrowserFactory, mqttConnectionSettings, mqttTopic, notResponding, prefixedLog,
+  debugGatedLog, discoverServices, displayedName, formatErrorMessage, isAdvertisedAt, mdnsBrowserFactory, mqttConnectionSettings, mqttTopic, notResponding, prefixedLog,
   repeatDemotedLog, sanitizeName, superviseLoop, systemClock } from "homebridge-plugin-utils";
 import type { Clock, HomebridgePluginLogging, MdnsBrowserFactory, MdnsDiscovery, MdnsDiscoveryEvent, MqttClient, Nullable,
   RepeatDemotedLog } from "homebridge-plugin-utils";
 import type { ConnectionFailureReason, EncryptionKeyLookup, ManualConnectionFailureReason, OpenEspHomeClient, PermanentCauseDescription } from "./connection.ts";
 import type { EntityId, EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
 import { LogLevel, PermanentError, openEspHomeClient } from "esphome-client";
-import { PLATFORM_NAME, RATGDO_ADDRESS_OPTION, RATGDO_DEBUG_OPTION, RATGDO_ENCRYPTION_KEY_OPTION } from "./webui/settings.ts";
+import { PLATFORM_NAME, RATGDO_ADDRESS_OPTION, RATGDO_DEBUG_OPTION, RATGDO_ENCRYPTION_KEY_OPTION, RATGDO_NAME_OPTION } from "./webui/settings.ts";
 import { PLUGIN_NAME, RATGDO_MDNS_SERVICE_TYPE, RATGDO_RETRY_INTERVAL } from "./settings.ts";
 import { applyDeviceInfo, describePermanentCause, identityRefusal, openConnection, openManualConnection } from "./connection.ts";
+import { deviceName, normalizeMac, parseRatgdoService } from "./discovery.ts";
 import { featureOptionCategories, featureOptions, normalizeConfig } from "./options.ts";
 import { governingAddress, manualAddressList, runManualAddress, runRetryLoop } from "./manual.ts";
-import { normalizeMac, parseRatgdoService } from "./discovery.ts";
 import type { DialOutcome } from "./manual.ts";
 import type { DiscoveredRatgdo } from "./discovery.ts";
 import { RatgdoAccessory } from "./device.ts";
@@ -343,16 +343,33 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     return this.connections.get(mac)?.client;
   }
 
-  /* Single source of truth for the `Device.LogName` feature option. Performs the featureOptions lookup AND normalizes the result so null, undefined, and the empty
-   * string all collapse to `undefined`. Empty string is not a valid log name - treating it as "set" would surface bare `": message"` prefixes for users who clear the
-   * field through the UI or write an empty value in JSON. Every consumer of the log-name decision (the discovery path composing device.name, RatgdoAccessory.buildHints
-   * caching hints.logName) calls through here so the "what counts as set?" decision lives in one place.
+  /* The name the platform tells the user an opener by: its custom Name where HomeKit can carry one, and its own name otherwise, by HBPU's display-name rule, which is
+   * the rule the accessory names itself by. Every platform line about an opener and a fresh accessory's display name read it here, so the log, the cache, and HomeKit
+   * name one opener alike. It is read live, so a device whose own name a session moved is named by its new name on the next line.
+   *
+   * @param device - The opener's device record.
+   *
+   * @returns The opener's displayed name.
    */
-  public resolveLogName(mac: string): string | undefined {
+  private openerName(device: RatgdoDevice): string {
 
-    const raw = this.featureOptions.value("Device.LogName", mac);
+    return displayedName({ fallback: device.name, override: this.featureOptions.value(RATGDO_NAME_OPTION, device.mac) });
+  }
 
-    return raw?.length ? raw : undefined;
+  /* The log the platform speaks about one opener through: the platform's log under the opener's displayed name, composed as the accessory's logger is. The name is
+   * read live through the one displayed-name rule, so a line carries the opener's custom Name, or its own name as each session refreshes it, never a Home app rename.
+   *
+   * Any log this builds can become a client's logger for that client's life: the discovery dial hands it to the client it opens, and a released opener's episode
+   * carries it into every client a follow or a redial installs. A client writes a debug line for every state event and every device log line it receives, which is
+   * why the debug gate sits outermost: a line the debug setting suppresses costs one predicate call and never resolves the opener's name.
+   *
+   * @param device - The opener's device record, whose name each line reads as it is written.
+   *
+   * @returns The opener's log.
+   */
+  private openerLog(device: RatgdoDevice): HomebridgePluginLogging {
+
+    return debugGatedLog(prefixedLog(this.log, () => this.openerName(device)), (): boolean => this.config.debug);
   }
 
   /* Configure and connect to Ratgdo ESPHome clients, for as long as this platform runs.
@@ -643,11 +660,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
        * there is no type-level check that would catch a future divergence, so any change to what buildInitialStatus reads must be mirrored in
        * ratgdoInitialStateEntityIds.
        */
-      // The client's own log adapter. The plain platform log is the right base: the constructor redirects `this.log.debug` through the plugin's gated debug(), so
-      // client-internal messages (handshake, retries, heartbeat) honor the config.debug opt-in without a second wrapper. The name read is live in form but static in
-      // practice - RatgdoDevice.name is readonly, fixed at discovery - which keeps those messages titled by the mDNS-discovered name even after a HomeKit rename;
-      // per-accessory logging routes through RatgdoAccessory's dynamic-name channel instead.
-      const connectLog = prefixedLog(this.log, () => device.name);
+      const connectLog = this.openerLog(device);
       const expected = ratgdoInitialStateEntityIds(device.variant);
       const connection = await openConnection({
 
@@ -714,7 +727,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
    * device the user disabled should never be connected to. An address dial asks after it connects, because nothing knows which device answers at an address until
    * one has. That is the whole difference between the two paths here, and it is a difference in timing rather than in policy.
    *
-   * It answers with the device record rather than a bare yes, because building that record IS most of the decision - the resolved log name, the address, the
+   * It answers with the device record rather than a bare yes, because building that record IS most of the decision - the device's own name, the address, the
    * governing manual address - and building it twice would let the announcement and the accessory disagree about the same device.
    *
    * @param discovered    - The identity derived from whichever wire record named this device.
@@ -742,7 +755,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       mac: strippedMac,
       manualAddress: manualAddress,
       model: model,
-      name: this.resolveLogName(strippedMac) ?? friendlyName ?? "Ratgdo",
+      name: deviceName(friendlyName),
       variant: variant
     };
 
@@ -780,7 +793,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   // The one-line description of a device the discovery and configuration announcements share, so an operator reading either sees the same fields in the same shape.
   private describeDevice(device: RatgdoDevice): string {
 
-    return device.name + " (address: " + device.address + " mac: " + device.mac + " firmware: v" + device.firmwareVersion + " variant: " + device.variant +
+    return this.openerName(device) + " (address: " + device.address + " mac: " + device.mac + " firmware: v" + device.firmwareVersion + " variant: " + device.variant +
       (device.model ? (" [" + device.model + "]") : "") + ")";
   }
 
@@ -844,13 +857,16 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
     applyDeviceInfo(device, client);
 
-    // Register the PlatformAccessory with Homebridge if it is new. Cached accessories (restored on startup) reuse their persisted services via the acquireService
-    // path inside the RatgdoAccessory constructor's configureDevice chain. The Map gives O(1) membership lookup.
+    /* Register the PlatformAccessory with Homebridge if it is new. Cached accessories (restored on startup) reuse their persisted services via the acquireService
+     * path inside the RatgdoAccessory constructor's configureDevice chain. The Map gives O(1) membership lookup. A fresh accessory is born with the opener's displayed
+     * name, sanitized once more because the display rule answers a name HomeKit's rule empties as it stands, and the empty name that leaves is one HAP's Accessory
+     * constructor refuses, as it refuses any accessory created with no display name.
+     */
     let accessory = this.accessories.get(uuid);
 
     if(!accessory) {
 
-      accessory = new this.api.platformAccessory(sanitizeName(device.name), uuid);
+      accessory = new this.api.platformAccessory(sanitizeName(this.openerName(device)), uuid);
       this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
       this.accessories.set(uuid, accessory);
     }
@@ -1176,8 +1192,8 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     return (failure === null) ? { ok: true } : { ok: false, reason: failure };
   }
 
-  /* Open the episode a release begins: an adapter on the log the opener's redial reports through, with the release's report of the refusal that released the
-   * opener run through it as the episode's first attempt.
+  /* Open the episode a release begins: an adapter on the opener's log, which the redial carries into every attempt, with the release's report of the refusal that
+   * released the opener run through it as the episode's first attempt, so the report and each attempt after it are written under one prefix and weighed by one adapter.
    *
    * The report is classified by the reason the redial's own dial answers for that refusal, the one the describer gives it on every path, so a redial whose first
    * dial meets the same refusal reads it as a repeat and reports it at debug. A release with no refusal to report opens the episode knowing nothing: a dial of a
@@ -1190,7 +1206,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
    */
   private openRedialEpisode(ratgdo: RatgdoAccessory, permanent: Nullable<PermanentCauseDescription> = null): RepeatDemotedLog<ManualConnectionFailureReason> {
 
-    const failures = repeatDemotedLog<ManualConnectionFailureReason>(this.redialLog(ratgdo));
+    const failures = repeatDemotedLog<ManualConnectionFailureReason>(this.openerLog(ratgdo.device));
 
     if(permanent) {
 
@@ -1198,18 +1214,6 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     }
 
     return failures;
-  }
-
-  /* The log each release opens a released opener's redial episode on, which the episode's adapter carries into the redial, so the release's report and every attempt
-   * after it are written under one prefix and weighed by one adapter.
-   *
-   * @param ratgdo - The released opener.
-   *
-   * @returns The log.
-   */
-  private redialLog(ratgdo: RatgdoAccessory): HomebridgePluginLogging {
-
-    return prefixedLog(this.log, () => ratgdo.device.name);
   }
 
   /* Record where a released opener advertises itself, for the next dial of its redial to read.
@@ -1463,10 +1467,11 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     };
   }
 
-  /* The per-session work: refresh the identity fields - the model and the firmware version - from the session's device info, and push them to the accessory's
-   * information service. It runs on every session, the fresh client's first through its bridge and each later one through the lifecycle `connect`, because a
-   * firmware upgrade is the case the refresh exists for and the device can reboot into one over a drop the client heals on its first attempt, which makes no
-   * availability statement at all.
+  /* The per-session work: refresh the identity fields - the model, the firmware version, and the device's own name - from the session's device info, push the model and
+   * the firmware version to the accessory's information service, and hand the name to the accessory, which re-states it in HomeKit where Sync Name owns it. It runs on
+   * every session, the fresh client's first through its bridge and each later one through the lifecycle `connect`, because a firmware upgrade or a rename on the device
+   * is the case the refresh exists for and the device can reboot into one over a drop the client heals on its first attempt, which makes no availability statement at
+   * all.
    */
   private refreshIdentity(ratgdo: RatgdoAccessory, client: EspHomeClient): void {
 
@@ -1475,11 +1480,14 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     applyDeviceInfo(ratgdo.device, client);
     ratgdo.refreshInfo();
 
+    const renamed = ratgdo.refreshName();
+
     /* A session that moves an identity field changes what the cache holds, and the settings sidebar groups each device under the Model it reads back off its
-     * cached accessory, so the accessory is saved. A session on unchanged firmware moves no field and saves nothing. The fresh client's bridge meets the same
-     * fields construction was born with, since configureDevice applies the device info before it constructs, so the bridge saves nothing here as well.
+     * cached accessory, so the accessory is saved, and so is one whose re-stated name wrote anything. A session on unchanged firmware under an unchanged name moves
+     * nothing and saves nothing. The fresh client's bridge meets the same fields and the same name construction was born with, since configureDevice applies the
+     * device info before it constructs, so the bridge saves nothing here as well.
      */
-    if((ratgdo.device.model === model) && (ratgdo.device.firmwareVersion === firmwareVersion)) {
+    if(!renamed && (ratgdo.device.model === model) && (ratgdo.device.firmwareVersion === firmwareVersion)) {
 
       return;
     }

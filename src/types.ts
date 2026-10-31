@@ -3,9 +3,9 @@
  * types.ts: Interface and type definitions for Ratgdo.
  */
 
-/* Ratgdo device settings. The mac, name, and variant are written once at discovery time and never reassigned, so they carry readonly. The rest stay mutable because
- * the platform rewrites them after construction: address, once a reconnect to a new address has actually connected; firmwareVersion and model, from the connected
- * client's device info on every connect; and manualAddress, once a listed address has won the right to govern this device's dial.
+/* Ratgdo device settings. The mac and variant are written once at discovery time and never reassigned, so they carry readonly. The rest stay mutable because the
+ * platform rewrites them after construction: address, once a reconnect to a new address has actually connected; firmwareVersion, model, and name, the device's own
+ * name, from the connected client's device info on every connect; and manualAddress, once a listed address has won the right to govern this device's dial.
  *
  * manualAddress is where the answer to "is this device governed by an address the user listed, and by which one?" lives, rather than in a map beside the device. Two
  * listed addresses can reach one device, so the question has an answer per device and not per address, and reading it off the device is what keeps the two possible
@@ -18,7 +18,7 @@ export interface RatgdoDevice {
   readonly mac: string;
   manualAddress?: string;
   model?: string;
-  readonly name: string;
+  name: string;
   readonly variant: RatgdoVariant;
 }
 

@@ -7,11 +7,13 @@
  * parks once its script runs out, so a row's dial count is exact and a loop that stops pausing fails that count rather than the suite's timeout.
  */
 import type { BuildPlatformResult, ScriptedAnswer, TestEspHomeClient } from "./testing.helpers.ts";
-import { Characteristic, Service, buildPlatform, colonMac, makeOpenerClient, makeOpenerService, makeScriptedOpenClient } from "./testing.helpers.ts";
+import { Characteristic, Service, buildPlatform, colonMac, customNameEntry, makeOpenerClient, makeOpenerService, makeScriptedOpenClient,
+  nameLookupsDuring } from "./testing.helpers.ts";
 import { ConnectionError, EncryptionKeyInvalidError } from "esphome-client";
 import type { TestLogEntry, TestPlatformAccessory } from "homebridge-plugin-utils/testing";
 import { describe, test } from "node:test";
 import { expectAt, formatLogEntry, linesAt, logCount, present, settle, settleUntil } from "homebridge-plugin-utils/testing";
+import type { HomebridgePluginLogging } from "homebridge-plugin-utils";
 import type { RatgdoAccessory } from "./device.ts";
 import assert from "node:assert/strict";
 
@@ -58,6 +60,7 @@ interface Released {
   built: BuildPlatformResult;
   client: TestEspHomeClient;
   dialsTo: (host: string) => number;
+  loggerOf: (host: string) => HomebridgePluginLogging;
   ratgdo: RatgdoAccessory;
 }
 
@@ -76,6 +79,7 @@ const admit = async (scripts: Partial<Record<string, ScriptedAnswer[]>> = {}, us
 
   return { accessory: expectAt(built.api.accessories, 0, "the accessory the platform registered"), built, client,
     dialsTo: (host: string): number => openClient.calls.filter((call) => call.host === host).length,
+    loggerOf: (host: string): HomebridgePluginLogging => present(openClient.calls.findLast((call) => call.host === host), "the latest dial at " + host).logger,
     ratgdo: present([...built.platform.configuredDevices.values()][0], "the admitted opener") };
 };
 
@@ -394,6 +398,60 @@ describe("RatgdoPlatform redial", () => {
     assert.equal(built.platform.getEspHomeClient(MAC), moved, "and installs the opener answering there");
     assert.equal(opener.ratgdo.device.address, MOVED, "at its new address");
   });
+
+  /* A follow opens the opener's episode before it dials, so the client its dial installs is handed that episode's attempt log and keeps it as its logger for its
+   * life, writing a debug line for every state event. The opener carries a custom Name, so the prefix is read through the displayed-name rule, and a spy on the
+   * platform's option engine counts the custom Name lookups that rule makes while one line is written, which is how the row reads that a suppressed debug line
+   * resolves no name.
+   */
+  test("a client the address follow installs drops a debug line with debug off before resolving the opener's name, and writes each line it emits under that name",
+    async () => {
+
+      // Admit the opener under the given options and follow it to the address it moves to, answering the platform, the log adapter the client installed there was
+      // handed, and the log entries written since that install.
+      const follow = async (userOptions: string[]):
+      Promise<{ built: BuildPlatformResult; logger: HomebridgePluginLogging; since: () => readonly TestLogEntry[] }> => {
+
+        const { built, loggerOf, ratgdo } = await admit({ [MOVED]: [makeOpenerClient({ mac: MAC })] }, userOptions);
+
+        built.browser().updated(makeOpenerService({ address: MOVED, mac: MAC }));
+
+        await settleUntil(() => ratgdo.device.address === MOVED, { description: "the follow to install the client answering where the opener moved" });
+
+        const installedAt = built.entries.length;
+
+        return { built, logger: loggerOf(MOVED), since: (): readonly TestLogEntry[] => built.entries.slice(installedAt) };
+      };
+
+      // The formatted lines at a level carrying a message, written since the followed client was installed.
+      const linesSince = (since: () => readonly TestLogEntry[], level: TestLogEntry["level"], message: string): string[] => linesAt(since(), level)
+        .filter((line) => line.includes(message));
+
+      const quiet = await follow([customNameEntry("Workshop", MAC)]);
+
+      assert.equal(nameLookupsDuring(quiet.built.platform, () => quiet.logger.debug("A debug line.")), 0,
+        "with debug off the followed client's adapter drops a debug line before resolving the name");
+      assert.deepEqual(quiet.since().map((entry) => formatLogEntry(entry)).filter((line) => line.includes("A debug line.")), [],
+        "and the line reaches the log at no level");
+
+      const verbose = await follow([ DEBUG, customNameEntry("Workshop", MAC) ]);
+
+      assert.equal(nameLookupsDuring(verbose.built.platform, () => verbose.logger.debug("A debug line.")), 1,
+        "with debug on the followed client's adapter resolves the opener's name for the line");
+      assert.deepEqual(linesSince(verbose.since, "warn", "A debug line."), ["Workshop: A debug line."],
+        "and the line reaches the log once, at warn, under the opener's displayed name");
+
+      for(const followed of [ quiet, verbose ]) {
+
+        for(const level of [ "error", "info", "warn" ] as const) {
+
+          followed.logger[level]("A line at " + level + ".");
+
+          assert.deepEqual(linesSince(followed.since, level, "A line at " + level + "."), ["Workshop: A line at " + level + "."],
+            "the " + level + " level reaches the log under the opener's displayed name whatever the debug setting");
+        }
+      }
+    });
 
   test("shutdown ends a pausing redial without a dial or a fault", async () => {
 

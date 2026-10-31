@@ -1,20 +1,132 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * device.naming.test.ts: Naming concern net for RatgdoAccessory - the private `name` getter's precedence chain and the private door-state translation /
- * capitalization helpers, all reached strictly through the accessory's public surface (log prefixes, MQTT get handlers, and the door telemetry router).
+ * device.naming.test.ts: Naming concern net for RatgdoAccessory - who owns the opener's HomeKit name under HBPU's family naming rule, the names the accessory and
+ * each of its parts carry, the watches that hold an owned name against a rename in the Home app, and the private door-state translation / capitalization helpers, all
+ * reached strictly through the accessory's public surface (the HAP services it configures, MQTT get handlers, and the door telemetry router).
  *
- * The `name` getter fronts every info / warn / error log line via prefixed(), so we observe its precedence by driving a logging event (a door transition with the
- * default-on Log.Opener) and asserting the rendered entry's prefix. translateCurrentDoorState() and capitalize() are private, so we observe them through
- * the two public surfaces that consume them: the MQTT "garagedoor" get handler (which returns the lowercase translation) and the door-transition info log (which
- * emits the capitalized translation, e.g. "Open.", "Closed."). Door states are driven through ratgdo.updateState() with the EspHomeEvent cover shape.
+ * A rename in the Home app is a controller's write to a service's ConfiguredName, which the suite makes through HBPU's triggerSet and then lets the watch's restore
+ * land, as HBPU's own suite renames one. A part HomeKit names with Name alone gives the Home app nothing to write, so its rows read the Name characteristic HAP holds
+ * read-only to a controller rather than inventing a rename. translateCurrentDoorState() and capitalize() are private, so we observe them through the two public
+ * surfaces that consume them: the MQTT "garagedoor" get handler (which returns the lowercase translation) and the door-transition info log (which emits the
+ * capitalized translation, e.g. "Open.", "Closed."). Door states are driven through ratgdo.updateState() with the EspHomeEvent cover shape.
  */
-import { Characteristic, Service, buildRatgdoAccessory, makeKonnectedInitialState } from "./testing.helpers.ts";
+import { Characteristic, Service, buildRatgdoAccessory, customNameEntry, makeKonnectedInitialState, makeRatgdoInitialState,
+  makeTestPlatform } from "./testing.helpers.ts";
+import { HAPStatus, MQTT_GET_SUFFIX, ServiceEventTypes, getServiceName } from "homebridge-plugin-utils";
+import { RatgdoService, RatgdoVariant } from "./types.ts";
 import { describe, test } from "node:test";
-import { formatLogEntry, loggedAt } from "homebridge-plugin-utils/testing";
+import { hapStatus, logCount, loggedAt, present, settle, triggerSet } from "homebridge-plugin-utils/testing";
+import type { BuildRatgdoAccessoryResult } from "./testing.helpers.ts";
 import type { EspHomeEvent } from "./types.ts";
-import { MQTT_GET_SUFFIX } from "homebridge-plugin-utils";
-import { RatgdoVariant } from "./types.ts";
+import { RatgdoAccessory } from "./device.ts";
+import type { TestPlatformAccessory } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
+
+// One service a test accessory carries, as HAP holds it.
+type TestService = TestPlatformAccessory["services"][number];
+
+// The Sync Name entry for every opener, spelled the way the options editor writes it.
+const SYNC_NAME = "Enable.Device.SyncName";
+
+/* One part named from the opener: its key, the HAP service it is and the subtype it carries, the suffix it adds to the opener's name, the variant it belongs to, and
+ * the feature option that configures it where it is off by default. The suffixes are spelled here rather than read from the accessory, so a part named with the
+ * wrong suffix fails its row.
+ */
+interface NamedPart {
+
+  readonly option?: string;
+  readonly part: RatgdoService;
+  readonly serviceType: { readonly UUID: string };
+  readonly subtype?: string;
+  readonly suffix: string;
+  readonly variant: RatgdoVariant;
+}
+
+// The parts HomeKit names with Name alone, which the Home app cannot rename, so the plugin names each of them and watches none.
+const NAME_ONLY_PARTS: readonly NamedPart[] = [
+
+  { part: RatgdoService.GARAGE_DOOR, serviceType: Service.GarageDoorOpener, suffix: "", variant: RatgdoVariant.RATGDO },
+  { option: "Enable.Disco.Battery", part: RatgdoService.BATTERY, serviceType: Service.Battery, suffix: "", variant: RatgdoVariant.RATGDO }
+];
+
+// The parts carrying ConfiguredName, the name a rename in the Home app writes, one for each configure site naming one, so each row reads one site's watch.
+const WATCHED_PARTS: readonly NamedPart[] = [
+
+  { part: RatgdoService.LIGHT, serviceType: Service.Lightbulb, suffix: "", variant: RatgdoVariant.RATGDO },
+  { option: "Enable.Opener.Dimmer", part: RatgdoService.DIMMER_OPENER_AUTOMATION, serviceType: Service.Lightbulb, subtype: RatgdoService.DIMMER_OPENER_AUTOMATION,
+    suffix: " Automation Door Position", variant: RatgdoVariant.RATGDO },
+  { option: "Enable.Opener.Switch", part: RatgdoService.SWITCH_OPENER_AUTOMATION, serviceType: Service.Switch, subtype: RatgdoService.SWITCH_OPENER_AUTOMATION,
+    suffix: " Automation Opener", variant: RatgdoVariant.RATGDO },
+  { option: "Enable.Opener.Switch.RemoteLockout", part: RatgdoService.SWITCH_LOCKOUT, serviceType: Service.Switch, subtype: RatgdoService.SWITCH_LOCKOUT,
+    suffix: " Lockout", variant: RatgdoVariant.RATGDO },
+  { option: "Enable.Opener.OccupancySensor", part: RatgdoService.OCCUPANCY_SENSOR_DOOR_OPEN, serviceType: Service.OccupancySensor,
+    subtype: RatgdoService.OCCUPANCY_SENSOR_DOOR_OPEN, suffix: " Open", variant: RatgdoVariant.RATGDO },
+  { part: RatgdoService.MOTION_SENSOR, serviceType: Service.MotionSensor, suffix: "", variant: RatgdoVariant.RATGDO },
+  { option: "Enable.Motion.OccupancySensor", part: RatgdoService.OCCUPANCY_SENSOR_MOTION, serviceType: Service.OccupancySensor,
+    subtype: RatgdoService.OCCUPANCY_SENSOR_MOTION, suffix: "", variant: RatgdoVariant.RATGDO },
+  { option: "Enable.Disco.Switch.Laser", part: RatgdoService.SWITCH_DISCO_LASER, serviceType: Service.Switch, subtype: RatgdoService.SWITCH_DISCO_LASER,
+    suffix: " Laser", variant: RatgdoVariant.RATGDO },
+  { option: "Enable.Disco.Switch.Led", part: RatgdoService.SWITCH_DISCO_LED, serviceType: Service.Switch, subtype: RatgdoService.SWITCH_DISCO_LED, suffix: " LED",
+    variant: RatgdoVariant.RATGDO },
+  { option: "Enable.Disco.ContactSensor.Vehicle.Arriving", part: RatgdoService.CONTACT_DISCO_VEHICLE_ARRIVING, serviceType: Service.ContactSensor,
+    subtype: RatgdoService.CONTACT_DISCO_VEHICLE_ARRIVING, suffix: " Vehicle Arriving", variant: RatgdoVariant.RATGDO },
+  { option: "Enable.Disco.ContactSensor.Vehicle.Leaving", part: RatgdoService.CONTACT_DISCO_VEHICLE_LEAVING, serviceType: Service.ContactSensor,
+    subtype: RatgdoService.CONTACT_DISCO_VEHICLE_LEAVING, suffix: " Vehicle Leaving", variant: RatgdoVariant.RATGDO },
+  { option: "Enable.Disco.OccupancySensor.Vehicle.Presence", part: RatgdoService.OCCUPANCY_DISCO_VEHICLE_PRESENCE, serviceType: Service.OccupancySensor,
+    subtype: RatgdoService.OCCUPANCY_DISCO_VEHICLE_PRESENCE, suffix: " Vehicle Presence", variant: RatgdoVariant.RATGDO },
+  { option: "Enable.Konnected.Switch.Pcw", part: RatgdoService.SWITCH_KONNECTED_PCW, serviceType: Service.Switch, subtype: RatgdoService.SWITCH_KONNECTED_PCW,
+    suffix: " Pre Close Warning", variant: RatgdoVariant.KONNECTED },
+  { option: "Enable.Konnected.Switch.Strobe", part: RatgdoService.SWITCH_KONNECTED_STROBE, serviceType: Service.Switch, subtype: RatgdoService.SWITCH_KONNECTED_STROBE,
+    suffix: " Strobe", variant: RatgdoVariant.KONNECTED }
+];
+
+// The light, the part the rows reading a single watch rename.
+const LIGHT = present(WATCHED_PARTS.find(({ part }) => (part === RatgdoService.LIGHT)), "the light part");
+
+// Every part of one variant, and the feature options that configure each of them, so a build of that variant carries every part it can.
+const partsOf = (variant: RatgdoVariant): NamedPart[] => [ ...NAME_ONLY_PARTS, ...WATCHED_PARTS ].filter((named) => (named.variant === variant));
+const partOptions = (variant: RatgdoVariant): string[] => partsOf(variant).flatMap(({ option }) => ((option === undefined) ? [] : [option]));
+
+// Build an opener of a variant with every part it can carry, under the given naming options, and under its own name where a row gives it one.
+const buildOpener = ({ name, options = [], variant = RatgdoVariant.RATGDO }: { name?: string; options?: string[]; variant?: RatgdoVariant } = {}):
+BuildRatgdoAccessoryResult => buildRatgdoAccessory({ device: { variant, ...((name === undefined) ? {} : { name }) }, userOptions: [ ...partOptions(variant),
+  ...options ] });
+
+/* Construct the opener again over the accessory a previous construction configured, under new naming options, which is what a Homebridge restart after the user
+ * changed them looks like: the previous run is disposed, and the accessory keeps every service and every name it left behind.
+ */
+const restart = ({ accessory, ratgdo }: BuildRatgdoAccessoryResult, naming: string[]): { accessory: TestPlatformAccessory; ratgdo: RatgdoAccessory } => {
+
+  const variant = ratgdo.device.variant;
+
+  ratgdo[Symbol.dispose]();
+
+  const { platform } = makeTestPlatform({ userOptions: [ ...partOptions(variant), ...naming ] });
+
+  return { accessory, ratgdo: new RatgdoAccessory(platform as unknown as ConstructorParameters<typeof RatgdoAccessory>[0], accessory, ratgdo.device,
+    (variant === RatgdoVariant.KONNECTED) ? makeKonnectedInitialState() : makeRatgdoInitialState()) };
+};
+
+// One part's own service on an accessory, told apart from its siblings of the same kind by its subtype.
+const partOf = (accessory: TestPlatformAccessory, { part, serviceType, subtype }: NamedPart): TestService => {
+
+  const isPart = (service: TestService): boolean => (service.UUID === serviceType.UUID) && (service.subtype === subtype);
+
+  return present(accessory.services.find(isPart), "the " + part + " part's service");
+};
+
+// The information service of an accessory, which carries the name of the opener's own tile.
+const infoOf = (accessory: TestPlatformAccessory): TestService => present(accessory.getService(Service.AccessoryInformation), "the accessory's information service");
+
+// The listeners a service carries for changes to its characteristics, which is where a watch listens.
+const listeners = (service: TestService): number => service.listenerCount(ServiceEventTypes.CHARACTERISTIC_CHANGE);
+
+// Rename a service in the Home app: a controller's write to its ConfiguredName, then the turn a watch's restore waits for, as HBPU's own suite renames one.
+const renameInHomeApp = async (service: TestService, name: string): Promise<void> => {
+
+  await triggerSet(service.getCharacteristic(Characteristic.ConfiguredName), name);
+  await settle();
+};
 
 // Build a cover telemetry event in the EspHomeEvent shape updateState() consumes. Properties are alphabetical per the house style; current_operation drives the
 // transition class (OPENING / CLOSING / IDLE). For an IDLE cover the reported state resolves the branch: an OPEN state at a partial position (strictly between 0 and 1)
@@ -25,72 +137,138 @@ const coverEvent = (id: string, state: string, currentOperation: string, positio
 
 describe("RatgdoAccessory naming", () => {
 
-  describe("the device log-name precedence", () => {
+  describe("the opener's name in HomeKit", () => {
 
-    test("uses the configured Device.LogName as the log-line prefix when set", () => {
+    test("with neither a custom Name nor Sync Name, the accessory and every part carry the opener's own name, and a Home app rename of any part stands", async () => {
 
-      const { entries, ratgdo } = buildRatgdoAccessory({ userOptions: ["Enable.Device.LogName.MyDoor"] });
+      const { accessory } = buildOpener();
 
-      // Drive a door-open transition. Log.Opener defaults on, so this emits an info line fronted by the name getter via prefixed().
-      ratgdo.updateState(coverEvent("cover-door", "OPEN", "IDLE", 1));
+      assert.equal(infoOf(accessory).testCharacteristic(Characteristic.ConfiguredName), false,
+        "the accessory's own tile is given no ConfiguredName, since the plugin owns no name to hold it to");
 
-      const opened = entries.find((entry) => (entry.level === "info") && formatLogEntry(entry).endsWith("Open."));
+      for(const named of partsOf(RatgdoVariant.RATGDO)) {
 
-      assert.ok(opened, "a door-open transition with Log.Opener enabled emits an info line");
-      assert.ok(formatLogEntry(opened).startsWith("MyDoor: "), "the log line is prefixed with the configured Device.LogName value");
+        assert.equal(getServiceName(partOf(accessory, named)), "Test Ratgdo" + named.suffix, "the " + named.part + " part is named from the opener's own name");
+      }
+
+      for(const named of WATCHED_PARTS.filter(({ variant }) => variant === RatgdoVariant.RATGDO)) {
+
+        const service = partOf(accessory, named);
+
+        // eslint-disable-next-line no-await-in-loop
+        await renameInHomeApp(service, "Renamed");
+
+        assert.equal(getServiceName(service), "Renamed", "a Home app rename of the " + named.part + " part stands, since the user owns the name");
+      }
     });
 
-    test("prefers the configured Device.LogName over the GarageDoorOpener Name characteristic", () => {
+    test("a custom Name names the accessory and every part at creation", () => {
 
-      const { accessory, entries, ratgdo } = buildRatgdoAccessory({ userOptions: ["Enable.Device.LogName.MyDoor"] });
+      const { accessory } = buildOpener({ options: [customNameEntry("Workshop")] });
 
-      // Seed a HomeKit rename on the garage door's Name characteristic. The LogName cache must still win over it.
-      accessory.getService(Service.GarageDoorOpener)?.getCharacteristic(Characteristic.Name).updateValue("RenamedDoor");
-      ratgdo.updateState(coverEvent("cover-door", "OPEN", "IDLE", 1));
+      assert.equal(accessory.displayName, "Workshop", "the accessory takes the custom Name");
+      assert.equal(getServiceName(infoOf(accessory)), "Workshop", "and so does the ConfiguredName its own tile is given");
 
-      const opened = entries.find((entry) => (entry.level === "info") && formatLogEntry(entry).endsWith("Open."));
+      for(const named of partsOf(RatgdoVariant.RATGDO)) {
 
-      assert.ok(opened, "a door-open transition emits an info line");
-      assert.ok(formatLogEntry(opened).startsWith("MyDoor: "), "the configured LogName takes precedence over the service Name characteristic");
+        assert.equal(getServiceName(partOf(accessory, named)), "Workshop" + named.suffix, "the " + named.part + " part is named from the custom Name");
+      }
     });
 
-    test("falls back to the GarageDoorOpener Name characteristic when no LogName is configured", () => {
+    test("with Sync Name on and no custom Name, the opener's own name owns: a restart puts it back over a Home app rename, and a later rename is put back at once",
+      async () => {
 
-      const { accessory, entries, ratgdo } = buildRatgdoAccessory();
+        const first = buildOpener({ name: "Garage" });
+        const light = partOf(first.accessory, LIGHT);
 
-      // No LogName is set, so the getter's second precedence tier - the HomeKit-renamed service Name characteristic - is what logs should follow.
-      accessory.getService(Service.GarageDoorOpener)?.getCharacteristic(Characteristic.Name).updateValue("RenamedDoor");
-      ratgdo.updateState(coverEvent("cover-door", "OPEN", "IDLE", 1));
+        await renameInHomeApp(light, "Workshop Light");
 
-      const opened = entries.find((entry) => (entry.level === "info") && formatLogEntry(entry).endsWith("Open."));
+        assert.equal(getServiceName(light), "Workshop Light", "while the user owns the name, the rename stands");
 
-      assert.ok(opened, "a door-open transition emits an info line");
-      assert.ok(formatLogEntry(opened).startsWith("RenamedDoor: "), "with no LogName, the prefix follows the service Name characteristic");
+        restart(first, [SYNC_NAME]);
+
+        assert.equal(getServiceName(light), "Garage", "once Sync Name owns the name, the restart puts the opener's own name back over the rename");
+        assert.equal(getServiceName(infoOf(first.accessory)), "Garage", "and names the accessory's own tile with it");
+
+        await renameInHomeApp(light, "Workshop Light");
+
+        assert.equal(getServiceName(light), "Garage", "and a later Home app rename is put back to the opener's own name at once");
+      });
+
+    for(const named of WATCHED_PARTS) {
+
+      test("puts the custom Name back on the " + named.part + " part, which carries ConfiguredName, the moment the Home app renames it", async () => {
+
+        const { accessory, entries } = buildOpener({ options: [customNameEntry("Workshop")], variant: named.variant });
+        const service = partOf(accessory, named);
+
+        await renameInHomeApp(service, "Renamed");
+
+        assert.equal(getServiceName(service), "Workshop" + named.suffix, "the name the plugin owns for the part is put back over the rename");
+        assert.equal(logCount(entries, "info", "Restored the name the plugin owns for a service after the Home app renamed it."), 1, "and the restore is reported once");
+      });
+    }
+
+    for(const named of NAME_ONLY_PARTS) {
+
+      test("re-states the custom Name on the " + named.part + " part, which carries Name alone, and gives the Home app nothing to rename", async () => {
+
+        const restarted = restart(buildOpener(), [customNameEntry("Workshop")]);
+        const service = partOf(restarted.accessory, named);
+        const name = service.getCharacteristic(Characteristic.Name);
+
+        assert.equal(service.testCharacteristic(Characteristic.ConfiguredName), false, "the part carries no ConfiguredName, and naming it attached none");
+        assert.equal(name.value, "Workshop", "its Name carries the custom Name the restart re-stated over the opener's own name");
+
+        await assert.rejects(triggerSet(name, "Renamed"), hapStatus(HAPStatus.READ_ONLY_CHARACTERISTIC), "the Name it carries is read-only to the Home app");
+        await settle();
+
+        assert.equal(name.value, "Workshop", "so no rename reaches it, and it keeps the custom Name");
+      });
+    }
+
+    test("holds the accessory's own tile to a custom Name through the ConfiguredName of its information service", async () => {
+
+      const { accessory } = buildOpener({ options: [customNameEntry("Workshop")] });
+      const info = infoOf(accessory);
+
+      await renameInHomeApp(info, "Renamed");
+
+      assert.equal(getServiceName(info), "Workshop", "the Home app rename of the accessory's own tile is put back to the custom Name");
+      assert.equal(accessory.displayName, "Workshop", "and the accessory's display name never moved");
     });
 
-    test("falls back to the accessory displayName when neither LogName nor a service Name is set", () => {
+    test("watches nothing while the user owns the name, and while it owns the name watches the information service and each part carrying ConfiguredName once", () => {
 
-      const { entries, ratgdo } = buildRatgdoAccessory();
+      const owned = buildOpener({ options: [customNameEntry("Workshop")] });
+      const userOwned = buildOpener();
 
-      ratgdo.updateState(coverEvent("cover-door", "OPEN", "IDLE", 1));
+      // A watch is one listener on its service, so the listeners an owned opener's service carries beyond the same service of a user-owned opener are its watches.
+      const watches = (select: (accessory: TestPlatformAccessory) => TestService): number => listeners(select(owned.accessory)) - listeners(select(userOwned.accessory));
 
-      const opened = entries.find((entry) => (entry.level === "info") && formatLogEntry(entry).endsWith("Open."));
+      assert.equal(watches(infoOf), 1, "the information service carries one watch while the plugin owns the name, and none while the user does");
 
-      assert.ok(opened, "a door-open transition emits an info line");
-      assert.ok(formatLogEntry(opened).startsWith("Test Ratgdo: "), "the prefix falls back to the accessory displayName / device.name");
+      for(const named of partsOf(RatgdoVariant.RATGDO)) {
+
+        assert.equal(watches((accessory) => partOf(accessory, named)), WATCHED_PARTS.includes(named) ? 1 : 0,
+          "the " + named.part + " part carries " + (WATCHED_PARTS.includes(named) ? "one watch" : "no watch, having nothing a rename could write") +
+          " while the plugin owns the name, and none while the user does");
+      }
     });
 
-    test("ignores a Device.LogName enabled without a value and falls back to the displayName", () => {
+    test("ends every watch when the accessory is disposed, so a Home app rename afterward stands", async () => {
 
-      // A bare Enable on the value option resolves to "enabled, no value", which resolveLogName collapses to undefined - so the prefix must fall back, not become empty.
-      const { entries, ratgdo } = buildRatgdoAccessory({ userOptions: ["Enable.Device.LogName"] });
+      const { accessory, ratgdo } = buildOpener({ options: [customNameEntry("Workshop")] });
+      const light = partOf(accessory, LIGHT);
+      const info = infoOf(accessory);
 
-      ratgdo.updateState(coverEvent("cover-door", "OPEN", "IDLE", 1));
+      ratgdo[Symbol.dispose]();
 
-      const opened = entries.find((entry) => (entry.level === "info") && formatLogEntry(entry).endsWith("Open."));
+      await renameInHomeApp(light, "Renamed");
+      await renameInHomeApp(info, "Renamed Tile");
 
-      assert.ok(opened, "a door-open transition emits an info line");
-      assert.ok(formatLogEntry(opened).startsWith("Test Ratgdo: "), "a valueless LogName does not blank the prefix; it falls back to the displayName");
+      assert.equal(getServiceName(light), "Renamed", "a disposed accessory puts back no part's name");
+      assert.equal(getServiceName(info), "Renamed Tile", "nor the name of its own tile");
     });
   });
 

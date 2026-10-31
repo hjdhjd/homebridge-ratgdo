@@ -7,12 +7,12 @@ import type { AcquireServiceTarget, HomebridgePluginLogging, MqttAvailabilityPay
 import type { EntityId, TelemetryEvent } from "esphome-client";
 import type { EspHomeEvent, RatgdoDevice } from "./types.ts";
 import { LockCommand, LockState, isConnectionLive } from "esphome-client";
-import { MQTT_AVAILABILITY_OFFLINE, MQTT_AVAILABILITY_ONLINE, TimerRegistry, acquireService, debugGatedLog, mqttTopic, notResponding, prefixedLog, validCharacteristic,
-  validService } from "homebridge-plugin-utils";
+import { MQTT_AVAILABILITY_OFFLINE, MQTT_AVAILABILITY_ONLINE, TimerRegistry, acquireService, debugGatedLog, displayedName, mqttTopic, notResponding, ownedName,
+  prefixedLog, resolveNameOverride, setAccessoryName, setServiceName, validCharacteristic, validService, watchServiceName } from "homebridge-plugin-utils";
 import { RATGDO_ENTITIES, idFor } from "./entities.ts";
 import { RATGDO_KONNECTED_PCW_DURATION, RATGDO_OCCUPANCY_DURATION, RATGDO_UI_REVERT_DELAY } from "./settings.ts";
+import { RATGDO_MOTION_DURATION, RATGDO_NAME_OPTION } from "./webui/settings.ts";
 import { RatgdoService, RatgdoVariant } from "./types.ts";
-import { RATGDO_MOTION_DURATION } from "./webui/settings.ts";
 import { RATGDO_VARIANT_LABELS } from "./webui/variants.ts";
 import type { RatgdoEntityRef } from "./entities.ts";
 import type { RatgdoPlatform } from "./platform.ts";
@@ -33,9 +33,9 @@ type CommandTopic = "disco-laser" | "disco-led" | "door" | "konnected-pcw" | "ko
 /* Device-specific options and settings. Resolved once at configuration time by buildHints() and never reassigned for the lifetime of the accessory; the readonly
  * surface here mirrors that contract.
  *
- * `logName` is the user-configured Device.LogName feature option captured at configure time. Caching it here avoids paying the featureOptions lookup cost on every
- * single log line emission (the `name` getter is the prefix supplier behind every log line this accessory emits). All other hint fields follow the same
- * read-once-cache-forever pattern.
+ * `nameOverride` and `syncName` are what HBPU's family naming rule decides the owner of the opener's HomeKit name from. Options change only at a restart, so whether
+ * the plugin owns the name is fixed for the accessory's life, and only the opener's own name, which a session can refresh, moves the name it owns. All other hint
+ * fields follow the same read-once-cache-forever pattern.
  */
 interface RatgdoHints {
 
@@ -57,7 +57,6 @@ interface RatgdoHints {
   readonly lockoutSwitch: boolean;
   readonly logLight: boolean;
   readonly logMotion: boolean;
-  readonly logName: string | undefined;
   readonly logObstruction: boolean;
   readonly logOpener: boolean;
   readonly logVehiclePresence: boolean;
@@ -65,7 +64,11 @@ interface RatgdoHints {
   readonly motionOccupancyDuration: number;
   readonly motionOccupancySensor: boolean;
   readonly motionSensor: boolean;
+  // The custom HomeKit name the user set for this opener, trimmed, or null when they set none HomeKit can carry, as HBPU's custom-name rule decides.
+  readonly nameOverride: Nullable<string>;
   readonly readOnly: boolean;
+  // Whether the opener's own name, the one its ESPHome firmware gives it, is synchronized with HomeKit.
+  readonly syncName: boolean;
 }
 
 /* Ratgdo status information. Every observable piece of device state lives on this object so MQTT, log, and HomeKit reads share a single source of truth - the cached
@@ -134,6 +137,30 @@ const RATGDO_OCCUPANCY = {
 
 type OccupancyKind = keyof typeof RATGDO_OCCUPANCY;
 
+/* The suffix each part adds to the opener's name in HomeKit. A new part is created with the opener's displayed name followed by its suffix, and while the plugin owns
+ * the opener's name, construction's re-state, a session's re-state, and the part's watch each hold it to the owned name followed by the same suffix, so no two of them
+ * can name a part differently. The record names every part, so a part added to RatgdoService fails compilation here until its suffix is decided.
+ */
+const PART_SUFFIXES: Readonly<Record<RatgdoService, string>> = {
+
+  [RatgdoService.BATTERY]: "",
+  [RatgdoService.CONTACT_DISCO_VEHICLE_ARRIVING]: " Vehicle Arriving",
+  [RatgdoService.CONTACT_DISCO_VEHICLE_LEAVING]: " Vehicle Leaving",
+  [RatgdoService.DIMMER_OPENER_AUTOMATION]: " Automation Door Position",
+  [RatgdoService.GARAGE_DOOR]: "",
+  [RatgdoService.LIGHT]: "",
+  [RatgdoService.MOTION_SENSOR]: "",
+  [RatgdoService.OCCUPANCY_DISCO_VEHICLE_PRESENCE]: " Vehicle Presence",
+  [RatgdoService.OCCUPANCY_SENSOR_DOOR_OPEN]: " Open",
+  [RatgdoService.OCCUPANCY_SENSOR_MOTION]: "",
+  [RatgdoService.SWITCH_DISCO_LASER]: " Laser",
+  [RatgdoService.SWITCH_DISCO_LED]: " LED",
+  [RatgdoService.SWITCH_KONNECTED_PCW]: " Pre Close Warning",
+  [RatgdoService.SWITCH_KONNECTED_STROBE]: " Strobe",
+  [RatgdoService.SWITCH_LOCKOUT]: " Lockout",
+  [RatgdoService.SWITCH_OPENER_AUTOMATION]: " Automation Opener"
+};
+
 /* The resolved cover-operation domain the door-state resolution switch operates over. The cover handler derives one of these from the wire event's current_operation and
  * state, having already validated both, so everything downstream of that validation works with a closed set rather than an open string. This is deliberately distinct
  * from esphome-client's own CoverOperation, which names the wire vocabulary rather than this resolved one.
@@ -155,10 +182,16 @@ export class RatgdoAccessory implements Disposable {
   private readonly enabled: Readonly<Record<StateTopic, boolean>>;
   private readonly hap: HAP;
   public readonly hints: RatgdoHints;
+  // The accessory's lifetime. Every registration this accessory makes on something that outlives it carries this controller's signal: each MQTT subscription and the
+  // final word on the shared MqttClient, and each watch holding a service to the name the plugin owns. Aborting it at disposal releases all of them in lockstep with
+  // the accessory's teardown, so none outlives the accessory.
+  private readonly lifetime: AbortController;
   public readonly log: HomebridgePluginLogging;
-  // The per-accessory abort controller composed into every MQTT subscription this accessory registers. Aborting it at disposal removes those subscriptions from the
-  // shared MqttClient handler set in lockstep with the accessory's teardown, so no MQTT handler outlives the accessory.
-  private readonly mqttAbort: AbortController;
+  /* The name the opener is shown under: its custom Name where HomeKit can carry one, and its own name otherwise, by HBPU's display-name rule. It prefixes every log line
+   * and names every part construction creates, so it is stored rather than composed on each read, and it is composed afresh only where the opener's own name can move,
+   * a session's refreshName(). A rename in the Home app never moves it, so a log line names the opener as the plugin does whoever owns its HomeKit name.
+   */
+  private name: string;
   private readonly platform: RatgdoPlatform;
   private readonly services: Partial<Record<RatgdoService, Service>>;
   private readonly status: RatgdoStatus;
@@ -192,15 +225,17 @@ export class RatgdoAccessory implements Disposable {
     this.answering = notResponding({ errorClass: this.hap.HapStatusError, unavailable: () => !this.status.availability });
 
     this.hints = this.buildHints();
+    this.name = this.composeName();
     this.enabled = this.buildEnabled();
 
-    /* Read-only deviation log runs AFTER `this.hints` is assigned. The `name` getter (the prefix supplier behind every log line) reads `this.hints.logName`, so any
-     * logging that fires while `this.hints` is still undefined would crash with a TypeError. Keeping the call here - and out of `buildHints()` - means the cache
-     * contract (hints fully resolved before any log call that depends on it) is enforced by program order, not by reviewer discipline.
+    /* The deviation logs run AFTER `this.hints` and `this.name` are assigned. `this.name` is the prefix behind every log line and is composed from the hints, so a line
+     * logged ahead of them would carry no name. Keeping the calls here - and out of `buildHints()` - means the cache contract (hints and the name fully resolved before
+     * any log call that depends on them) is enforced by program order, not by reviewer discipline.
      */
     this.logFeature("Opener.ReadOnly", "Read-only mode");
+    this.logNaming();
 
-    this.mqttAbort = new AbortController();
+    this.lifetime = new AbortController();
     this.configureDevice();
   }
 
@@ -220,13 +255,13 @@ export class RatgdoAccessory implements Disposable {
     return this.accessory.UUID;
   }
 
-  /* Synchronous disposal hook. Tears down every resource this accessory owns: the pending timers in the registry, and the per-accessory MQTT registrations composed
-   * onto `mqttAbort`, its final word among them. The platform invokes this at shutdown, once the final words have been stated, so no pending timer or MQTT
-   * registration outlives the accessory.
+  /* Synchronous disposal hook. Tears down every resource this accessory owns: the pending timers in the registry, and every registration made on the lifetime signal,
+   * the MQTT registrations and their final word among them, and each name watch. The platform invokes this at shutdown, once the final words have been stated, so no
+   * pending timer, MQTT registration, or name watch outlives the accessory.
    */
   public [Symbol.dispose](): void {
 
-    this.mqttAbort.abort();
+    this.lifetime.abort();
     this.timers.dispose();
   }
 
@@ -263,8 +298,12 @@ export class RatgdoAccessory implements Disposable {
     this.configureKonnectedPcwSwitch();
     this.configureKonnectedStrobeSwitch();
 
-    // MQTT comes last. Its registrations live on the shared MQTT client and are released only through mqttAbort, which a constructor that throws never hands to
-    // anyone, so we make them only once every step that can throw has run...a failed construction registers nothing.
+    /* The name watches and MQTT come last. Both register on the lifetime signal and are released only through it, which a constructor that throws never hands to
+     * anyone, so both wait until every step that can throw has run...a failed construction registers nothing. The watches wait for every service acquisition as well:
+     * a watch is a listener on its service, HAP's removeService clears every listener on a service it detaches, and HBPU's room-making step detaches and re-adds the
+     * subtyped siblings of a service it adds, so a watch made ahead of any acquisition could be silently lost.
+     */
+    this.holdNames();
     this.configureMqtt();
   }
 
@@ -414,7 +453,7 @@ export class RatgdoAccessory implements Disposable {
   }
 
   /* Build the hints record from feature-option configuration. Resolves every option exactly once at construction time and returns the populated structure. The
-   * caching contract is structural: any reader (the `name` getter, the configureXxx methods, the updateState hot path) reads from `this.hints.X` instead of re-issuing
+   * caching contract is structural: any reader (the opener's names, the configureXxx methods, the updateState hot path) reads from `this.hints.X` instead of re-issuing
    * the underlying featureOptions lookup. The variant gates fold here too so configureXxx() methods can treat a single hint boolean as the source of truth for whether
    * a feature applies to this device. Motion sits under the same gate as the disco hardware: Konnected firmware advertises no motion entity, so both motion hints
    * resolve false on that variant and the accessory carries neither the motion sensor nor the occupancy sensor its activity would drive.
@@ -447,14 +486,15 @@ export class RatgdoAccessory implements Disposable {
       lockoutSwitch: this.hasFeature("Opener.Switch.RemoteLockout"),
       logLight: this.hasFeature("Log.Light"),
       logMotion: this.hasFeature("Log.Motion"),
-      logName: this.platform.resolveLogName(this.device.mac),
       logObstruction: this.hasFeature("Log.Obstruction"),
       logOpener: this.hasFeature("Log.Opener"),
       logVehiclePresence: this.hasFeature("Log.VehiclePresence"),
       motionOccupancyDuration: featureOptions.getInteger("Motion.OccupancySensor.Duration", this.device.mac) ?? RATGDO_OCCUPANCY_DURATION,
       motionOccupancySensor: isRatgdo && this.hasFeature("Motion.OccupancySensor"),
       motionSensor: isRatgdo && this.hasFeature("Motion"),
-      readOnly: this.hasFeature("Opener.ReadOnly")
+      nameOverride: resolveNameOverride(featureOptions.value(RATGDO_NAME_OPTION, this.device.mac)),
+      readOnly: this.hasFeature("Opener.ReadOnly"),
+      syncName: this.hasFeature("Device.SyncName")
     };
   }
 
@@ -483,9 +523,15 @@ export class RatgdoAccessory implements Disposable {
     };
   }
 
-  // Configure the device information for HomeKit. The Manufacturer and SerialNumber characteristics never mutate over the lifetime of this accessory (they derive
-  // from immutable RatgdoDevice fields populated at discovery time), so we write them exactly once here. The Model and FirmwareRevision characteristics route
-  // through refreshInfo(), which the platform also calls on every session the opener's client begins.
+  /* Configure the device information for HomeKit. The Manufacturer and SerialNumber characteristics never mutate over the lifetime of this accessory (they derive
+   * from immutable RatgdoDevice fields populated at discovery time), so we write them exactly once here. The Model and FirmwareRevision characteristics route
+   * through refreshInfo(), which the platform also calls on every session the opener's client begins.
+   *
+   * While the plugin owns the opener's name, the accessory itself is named with it: HBPU's name helper writes the display names and the information service's
+   * ConfiguredName, the one name of the opener's own tile a Home app rename writes, where they differ, so a restored accessory takes the owned name and a fresh one
+   * gains the ConfiguredName it is born without. The platform's save after construction carries the write. With the user owning the name, the accessory keeps the
+   * name it carries.
+   */
   private configureInfo(): void {
 
     const info = this.accessory.getService(this.hap.Service.AccessoryInformation);
@@ -493,6 +539,7 @@ export class RatgdoAccessory implements Disposable {
     info?.updateCharacteristic(this.hap.Characteristic.Manufacturer, "github.com/hjdhjd");
     info?.updateCharacteristic(this.hap.Characteristic.SerialNumber, this.device.mac);
 
+    this.restateAccessory();
     this.refreshInfo();
   }
 
@@ -511,6 +558,34 @@ export class RatgdoAccessory implements Disposable {
     info?.updateCharacteristic(this.hap.Characteristic.Model,
       RATGDO_VARIANT_LABELS[this.device.variant] + (this.device.model ? " " + this.device.model : ""));
     info?.updateCharacteristic(this.hap.Characteristic.FirmwareRevision, this.device.firmwareVersion);
+  }
+
+  /* Refresh the opener's names once a session has refreshed its own name. The displayed name is composed afresh, so the log follows a device renamed in ESPHome, and
+   * while the plugin owns the name the accessory and every part are re-stated to it. With a custom Name the owned name never moves with the device, so the re-state
+   * writes nothing, and with the user owning the name nothing is re-stated, so only a rename on the device under Sync Name writes anything here. Every name is
+   * re-stated whatever the others answer, so the answers are collected before they are read, and the answer is whether any wrote, which is what the platform saves
+   * the accessory on. Every watch reads the owned name afresh, so a rename in the Home app after this one is put back to the refreshed name.
+   *
+   * The rename line is logged only when the accessory's display name moved: the plugin alone writes that name and a Home app rename never touches it, so a move is the
+   * device's own name changing under Sync Name, while a session that moves nothing, or a re-state over a Home app rename, logs nothing. The line names the name HomeKit
+   * carries after the write, the device's name as HomeKit's naming rule cleans it.
+   *
+   * @returns Whether the re-state wrote anything.
+   */
+  public refreshName(): boolean {
+
+    const previousName = this.accessory.displayName;
+
+    this.name = this.composeName();
+
+    const wrote = [ this.restateAccessory(), ...this.parts().map(([ part, service ]) => this.restatePart(part, service)) ].includes(true);
+
+    if(this.accessory.displayName !== previousName) {
+
+      this.log.info("Detected a name change on the device; updating the HomeKit name to %s.", this.accessory.displayName);
+    }
+
+    return wrote;
   }
 
   /* The wire payload of a state topic, read from this.status alone: each topic answers from the status field its transition path writes. The transition publish, the
@@ -600,11 +675,11 @@ export class RatgdoAccessory implements Disposable {
     this.platform.mqtt?.publishGuarded(mqttTopic(this.device.mac, mqttTopics.availability.topic), payload, { retain: true });
   }
 
-  // Configure MQTT services. Every registration below passes the per-accessory `mqttAbort.signal`, because the MQTT client is shared by every opener and outlives
-  // each accessory: disposing this accessory aborts the signal, and that is what removes its handlers and its final word from the client, so none outlives it.
+  // Configure MQTT services. Every registration below passes the accessory's lifetime signal, because the MQTT client is shared by every opener and outlives each
+  // accessory: disposing this accessory aborts the signal, and that is what removes its handlers and its final word from the client, so none outlives it.
   private configureMqtt(): boolean {
 
-    const signal = this.mqttAbort.signal;
+    const signal = this.lifetime.signal;
 
     // Return our garage door state.
     this.platform.mqtt?.subscribeGet(mqttTopic(this.device.mac, mqttTopics.garageDoor.topic), mqttTopics.garageDoor.label, () => this.topicPayload("garageDoor"),
@@ -720,9 +795,9 @@ export class RatgdoAccessory implements Disposable {
   // Configure the garage door service for HomeKit.
   private configureGarageDoor(): boolean {
 
-    const { service } = acquireService({ accessory: this.accessory, name: this.name, serviceType: this.hap.Service.GarageDoorOpener });
+    const { service } = acquireService({ accessory: this.accessory, name: this.partName(RatgdoService.GARAGE_DOOR), serviceType: this.hap.Service.GarageDoorOpener });
 
-    this.services[RatgdoService.GARAGE_DOOR] = service;
+    this.holdPart(RatgdoService.GARAGE_DOOR, service);
 
     service.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.status.door);
     service.updateCharacteristic(this.hap.Characteristic.TargetDoorState, this.doorTargetStateBias(this.status.door));
@@ -781,14 +856,15 @@ export class RatgdoAccessory implements Disposable {
 
     this.logFeature("Light", "Light");
 
-    const { service } = validService({ accessory: this.accessory, name: this.name, serviceType: this.hap.Service.Lightbulb, validate: this.hints.light });
+    const { service } = validService({ accessory: this.accessory, name: this.partName(RatgdoService.LIGHT), serviceType: this.hap.Service.Lightbulb,
+      validate: this.hints.light });
 
     if(!service) {
 
       return false;
     }
 
-    this.services[RatgdoService.LIGHT] = service;
+    this.holdPart(RatgdoService.LIGHT, service);
 
     service.updateCharacteristic(this.hap.Characteristic.On, this.status.light);
     service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.status.light));
@@ -814,20 +890,19 @@ export class RatgdoAccessory implements Disposable {
     hint: boolean;
     initialCharacteristic: CharacteristicTarget;
     initialValue: CharacteristicValue;
-    nameSuffix?: string;
     service: AcquireServiceTarget;
     subtype?: string;
   }): boolean {
 
-    const displayName = (opts.nameSuffix !== undefined) ? (this.name + opts.nameSuffix) : this.name;
-    const { service } = validService({ accessory: this.accessory, name: displayName, serviceType: opts.service, subtype: opts.subtype, validate: opts.hint });
+    const { service } = validService({ accessory: this.accessory, name: this.partName(opts.cacheKey), serviceType: opts.service, subtype: opts.subtype,
+      validate: opts.hint });
 
     if(!service) {
 
       return false;
     }
 
-    this.services[opts.cacheKey] = service;
+    this.holdPart(opts.cacheKey, service);
 
     service.updateCharacteristic(opts.initialCharacteristic, opts.initialValue);
     service.updateCharacteristic(this.hap.Characteristic.StatusActive, true);
@@ -855,7 +930,7 @@ export class RatgdoAccessory implements Disposable {
 
     this.logFeature("Opener.Dimmer", "Automation door position dimmer");
 
-    const { service } = validService({ accessory: this.accessory, name: this.name + " Automation Door Position", serviceType: this.hap.Service.Lightbulb,
+    const { service } = validService({ accessory: this.accessory, name: this.partName(RatgdoService.DIMMER_OPENER_AUTOMATION), serviceType: this.hap.Service.Lightbulb,
       subtype: RatgdoService.DIMMER_OPENER_AUTOMATION, validate: this.hints.automationDimmer });
 
     if(!service) {
@@ -863,7 +938,7 @@ export class RatgdoAccessory implements Disposable {
       return false;
     }
 
-    this.services[RatgdoService.DIMMER_OPENER_AUTOMATION] = service;
+    this.holdPart(RatgdoService.DIMMER_OPENER_AUTOMATION, service);
 
     /* Put the dimmer back on the door once HomeKit has acknowledged the onSet, after a door write the dimmer made was refused. A refused write leaves the door where
      * it was, so Brightness and On are restored from the status record - the position the door is at, and On by the same rule its getter answers with - rather than
@@ -925,7 +1000,7 @@ export class RatgdoAccessory implements Disposable {
 
     this.logFeature("Opener.Switch", "Automation door opener switch");
 
-    const { service } = validService({ accessory: this.accessory, name: this.name + " Automation Opener", serviceType: this.hap.Service.Switch,
+    const { service } = validService({ accessory: this.accessory, name: this.partName(RatgdoService.SWITCH_OPENER_AUTOMATION), serviceType: this.hap.Service.Switch,
       subtype: RatgdoService.SWITCH_OPENER_AUTOMATION, validate: this.hints.automationSwitch });
 
     if(!service) {
@@ -933,7 +1008,7 @@ export class RatgdoAccessory implements Disposable {
       return false;
     }
 
-    this.services[RatgdoService.SWITCH_OPENER_AUTOMATION] = service;
+    this.holdPart(RatgdoService.SWITCH_OPENER_AUTOMATION, service);
 
     service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.isDoorOpen()));
 
@@ -962,14 +1037,15 @@ export class RatgdoAccessory implements Disposable {
 
     this.logFeature("Disco.Battery", "Ratgdo (ESP32) backup battery status");
 
-    const { service } = validService({ accessory: this.accessory, name: this.name, serviceType: this.hap.Service.Battery, validate: this.hints.discoBattery });
+    const { service } = validService({ accessory: this.accessory, name: this.partName(RatgdoService.BATTERY), serviceType: this.hap.Service.Battery,
+      validate: this.hints.discoBattery });
 
     if(!service) {
 
       return false;
     }
 
-    this.services[RatgdoService.BATTERY] = service;
+    this.holdPart(RatgdoService.BATTERY, service);
 
     service.getCharacteristic(this.hap.Characteristic.ChargingState).onGet(this.answering(() => this.status.discoBatteryState));
     service.updateCharacteristic(this.hap.Characteristic.ChargingState, this.status.discoBatteryState);
@@ -982,7 +1058,7 @@ export class RatgdoAccessory implements Disposable {
 
     this.logFeature("Disco.Switch.Laser", "Ratgdo (ESP32) Disco parking assistance laser switch");
 
-    const { service } = validService({ accessory: this.accessory, name: this.name + " Laser", serviceType: this.hap.Service.Switch,
+    const { service } = validService({ accessory: this.accessory, name: this.partName(RatgdoService.SWITCH_DISCO_LASER), serviceType: this.hap.Service.Switch,
       subtype: RatgdoService.SWITCH_DISCO_LASER, validate: this.hints.discoLaserSwitch });
 
     if(!service) {
@@ -990,7 +1066,7 @@ export class RatgdoAccessory implements Disposable {
       return false;
     }
 
-    this.services[RatgdoService.SWITCH_DISCO_LASER] = service;
+    this.holdPart(RatgdoService.SWITCH_DISCO_LASER, service);
 
     service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.status.discoLaser));
     service.getCharacteristic(this.hap.Characteristic.On).onSet(this.answering(this.toggleOnSet({ service, state: () => this.status.discoLaser, topic: "disco-laser" })));
@@ -1004,7 +1080,7 @@ export class RatgdoAccessory implements Disposable {
 
     this.logFeature("Disco.Switch.Led", "Ratgdo (ESP32) Disco LED switch");
 
-    const { service } = validService({ accessory: this.accessory, name: this.name + " LED", serviceType: this.hap.Service.Switch,
+    const { service } = validService({ accessory: this.accessory, name: this.partName(RatgdoService.SWITCH_DISCO_LED), serviceType: this.hap.Service.Switch,
       subtype: RatgdoService.SWITCH_DISCO_LED, validate: this.hints.discoLedSwitch });
 
     if(!service) {
@@ -1012,7 +1088,7 @@ export class RatgdoAccessory implements Disposable {
       return false;
     }
 
-    this.services[RatgdoService.SWITCH_DISCO_LED] = service;
+    this.holdPart(RatgdoService.SWITCH_DISCO_LED, service);
 
     service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.status.discoLed));
     service.getCharacteristic(this.hap.Characteristic.On).onSet(this.answering(this.toggleOnSet({ service, state: () => this.status.discoLed, topic: "disco-led" })));
@@ -1032,7 +1108,6 @@ export class RatgdoAccessory implements Disposable {
       hint: this.hints.discoVehicleArriving,
       initialCharacteristic: this.hap.Characteristic.ContactSensorState,
       initialValue: this.contactSensorState(this.status.discoVehicleArriving),
-      nameSuffix: " Vehicle Arriving",
       service: this.hap.Service.ContactSensor,
       subtype: RatgdoService.CONTACT_DISCO_VEHICLE_ARRIVING
     });
@@ -1049,7 +1124,6 @@ export class RatgdoAccessory implements Disposable {
       hint: this.hints.discoVehicleLeaving,
       initialCharacteristic: this.hap.Characteristic.ContactSensorState,
       initialValue: this.contactSensorState(this.status.discoVehicleLeaving),
-      nameSuffix: " Vehicle Leaving",
       service: this.hap.Service.ContactSensor,
       subtype: RatgdoService.CONTACT_DISCO_VEHICLE_LEAVING
     });
@@ -1066,7 +1140,6 @@ export class RatgdoAccessory implements Disposable {
       hint: this.hints.discoVehiclePresence,
       initialCharacteristic: this.hap.Characteristic.OccupancyDetected,
       initialValue: this.occupancyDetected(this.status.discoVehiclePresence),
-      nameSuffix: " Vehicle Presence",
       service: this.hap.Service.OccupancySensor,
       subtype: RatgdoService.OCCUPANCY_DISCO_VEHICLE_PRESENCE
     });
@@ -1077,7 +1150,7 @@ export class RatgdoAccessory implements Disposable {
 
     this.logFeature("Konnected.Switch.Pcw", "Konnected pre-close warning switch");
 
-    const { service } = validService({ accessory: this.accessory, name: this.name + " Pre Close Warning", serviceType: this.hap.Service.Switch,
+    const { service } = validService({ accessory: this.accessory, name: this.partName(RatgdoService.SWITCH_KONNECTED_PCW), serviceType: this.hap.Service.Switch,
       subtype: RatgdoService.SWITCH_KONNECTED_PCW, validate: this.hints.konnectedPcwSwitch });
 
     if(!service) {
@@ -1085,7 +1158,7 @@ export class RatgdoAccessory implements Disposable {
       return false;
     }
 
-    this.services[RatgdoService.SWITCH_KONNECTED_PCW] = service;
+    this.holdPart(RatgdoService.SWITCH_KONNECTED_PCW, service);
 
     service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => false));
 
@@ -1114,7 +1187,7 @@ export class RatgdoAccessory implements Disposable {
 
     this.logFeature("Konnected.Switch.Strobe", "Konnected strobe switch");
 
-    const { service } = validService({ accessory: this.accessory, name: this.name + " Strobe", serviceType: this.hap.Service.Switch,
+    const { service } = validService({ accessory: this.accessory, name: this.partName(RatgdoService.SWITCH_KONNECTED_STROBE), serviceType: this.hap.Service.Switch,
       subtype: RatgdoService.SWITCH_KONNECTED_STROBE, validate: this.hints.konnectedStrobeSwitch });
 
     if(!service) {
@@ -1122,7 +1195,7 @@ export class RatgdoAccessory implements Disposable {
       return false;
     }
 
-    this.services[RatgdoService.SWITCH_KONNECTED_STROBE] = service;
+    this.holdPart(RatgdoService.SWITCH_KONNECTED_STROBE, service);
 
     service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.status.konnectedStrobe));
     service.getCharacteristic(this.hap.Characteristic.On).onSet(this.answering(this.toggleOnSet({ service, state: () => this.status.konnectedStrobe,
@@ -1137,7 +1210,7 @@ export class RatgdoAccessory implements Disposable {
 
     this.logFeature("Opener.Switch.RemoteLockout", "Automation wireless remote lockout switch");
 
-    const { service } = validService({ accessory: this.accessory, name: this.name + " Lockout", serviceType: this.hap.Service.Switch,
+    const { service } = validService({ accessory: this.accessory, name: this.partName(RatgdoService.SWITCH_LOCKOUT), serviceType: this.hap.Service.Switch,
       subtype: RatgdoService.SWITCH_LOCKOUT, validate: this.hints.lock && this.hints.lockoutSwitch });
 
     if(!service) {
@@ -1145,7 +1218,7 @@ export class RatgdoAccessory implements Disposable {
       return false;
     }
 
-    this.services[RatgdoService.SWITCH_LOCKOUT] = service;
+    this.holdPart(RatgdoService.SWITCH_LOCKOUT, service);
 
     // The switch is on whenever the remote lockout is engaged, and a command that never reached the opener puts it back on the lockout the opener holds.
     service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.remotesLockedOut()));
@@ -1175,7 +1248,6 @@ export class RatgdoAccessory implements Disposable {
       hint: this.hints.doorOpenOccupancySensor,
       initialCharacteristic: this.hap.Characteristic.OccupancyDetected,
       initialValue: this.occupancyDetected(this.status.doorOpenOccupancy),
-      nameSuffix: " Open",
       service: this.hap.Service.OccupancySensor,
       subtype: RatgdoService.OCCUPANCY_SENSOR_DOOR_OPEN
     });
@@ -2106,36 +2178,122 @@ export class RatgdoAccessory implements Disposable {
     this.platform.featureOptions.logFeature(option, label, this.log, this.device.mac);
   }
 
-  // Resolve the device's display name. Precedence:
-  //
-  //   1. The user-configured Device.LogName feature option, when set. We read this from `hints.logName`, which buildHints() resolved exactly once at construction
-  //      time. Reading the cache rather than the live feature-option store means we do not pay the featureOptions lookup cost on every log line (the getter fronts
-  //      every log line as the prefix supplier).
-  //   2. The GarageDoorOpener service's Name characteristic. This reflects any rename the user has made in HomeKit, so logs follow what the user sees there.
-  //   3. The accessory's displayName, which Homebridge manages and uses when the service Name has not been set.
-  //   4. The mDNS-advertised device.name, as a final fallback.
-  private get name(): string {
+  /* Tell the user, once per accessory, what the naming options do for this opener. The custom-name line names the name the plugin applies, the custom name as HomeKit's
+   * naming rule cleans it. A value HomeKit can carry nothing of is refused by HBPU's rule, and a refusal the user would otherwise never see is said once, here, with the
+   * value as the user set it. Sync Name is reported as every other option departing from its default is.
+   */
+  private logNaming(): void {
 
-    if(this.hints.logName !== undefined) {
+    const customName = this.platform.featureOptions.value(RATGDO_NAME_OPTION, this.device.mac);
 
-      return this.hints.logName;
+    if(this.hints.nameOverride !== null) {
+
+      this.log.info("Custom HomeKit name set to %s.", this.name);
+    } else if(customName?.length) {
+
+      this.log.warn("The custom name \"%s\" leaves nothing HomeKit can display, so it is not applied.", customName);
     }
 
-    // HomeKit's Name characteristic is always string-valued per the HAP specification, so this CharacteristicValue-to-string narrowing is safe.
-    let name = this.services[RatgdoService.GARAGE_DOOR]?.getCharacteristic(this.hap.Characteristic.Name).value as string | undefined;
+    this.logFeature("Device.SyncName", "ESPHome name sync");
+  }
 
-    if(name?.length) {
+  // Compose the opener's displayed name, the one the name field stores: its custom Name where HomeKit can carry one, and its own name otherwise.
+  private composeName(): string {
 
-      return name;
+    return displayedName({ fallback: this.device.name, override: this.hints.nameOverride });
+  }
+
+  /* The name the plugin owns for this opener's accessory under HBPU's family naming rule, or null while the user owns it: the custom Name where HomeKit can carry one,
+   * else the opener's own name while Sync Name is on. Every holder of an owned name reads it afresh, so a session that moves the opener's own name under Sync Name
+   * reaches the next re-state and the next restore alike.
+   */
+  private get ownedHomeKitName(): Nullable<string> {
+
+    return ownedName({ fallback: this.device.name, override: this.hints.nameOverride, sync: this.hints.syncName });
+  }
+
+  // The name the plugin owns for one part, the owned name followed by the part's suffix, or null while the user owns the opener's name.
+  private ownedPartName(part: RatgdoService): Nullable<string> {
+
+    const owned = this.ownedHomeKitName;
+
+    return (owned === null) ? null : (owned + PART_SUFFIXES[part]);
+  }
+
+  // The name a part is created with: the opener's displayed name followed by the part's suffix. A service HomeKit has never seen carries no name of the user's to
+  // leave alone, so a new part takes this whoever owns the opener's name.
+  private partName(part: RatgdoService): string {
+
+    return this.name + PART_SUFFIXES[part];
+  }
+
+  /* Re-state the name the plugin owns for the accessory itself, answering whether it wrote. HBPU's name helper writes the display names and the information service's
+   * names where they differ, so an accessory already carrying the owned name writes nothing. While the user owns the opener's name there is nothing to re-state.
+   */
+  private restateAccessory(): boolean {
+
+    const owned = this.ownedHomeKitName;
+
+    return (owned !== null) && setAccessoryName(this.accessory, owned);
+  }
+
+  // Re-state the name the plugin owns for one part, answering whether it wrote, by the same rule the accessory's re-state follows.
+  private restatePart(part: RatgdoService, service: Service): boolean {
+
+    const owned = this.ownedPartName(part);
+
+    return (owned !== null) && setServiceName(service, owned);
+  }
+
+  /* Hold a part this construction configured: record it under its key, and re-state the name the plugin owns for it. A part already carrying the owned name, a new
+   * one among them, writes nothing, while a restored part takes the owned name over whatever it carried. With the user owning the name, a restored part keeps the
+   * name it carries, a Home app rename included. The platform's save after construction carries any write.
+   */
+  private holdPart(part: RatgdoService, service: Service): void {
+
+    this.services[part] = service;
+    this.restatePart(part, service);
+  }
+
+  // Every part this construction configured, with its key. The services map is partial, and each entry it holds is a configured part.
+  private parts(): [RatgdoService, Service][] {
+
+    return Object.entries(this.services) as [RatgdoService, Service][];
+  }
+
+  /* Watch the opener's names while the plugin owns them, so a rename in the Home app is put back the moment it lands. The information service carries the name of the
+   * opener's own tile and each part carrying ConfiguredName carries its own, so each of them is watched, and each watch reads the owned name afresh on every rename. A
+   * part HomeKit names with Name alone, the garage door and the battery, gives the Home app nothing to rename, so it is named and never watched. Nothing is watched
+   * while the user owns the name, since a rename of theirs stands. Every watch ends with the lifetime signal at disposal, and no service is removed after
+   * construction, so nothing has to end one sooner.
+   */
+  private holdNames(): void {
+
+    if(this.ownedHomeKitName === null) {
+
+      return;
     }
 
-    name = this.accessory.displayName;
+    const info = this.accessory.getService(this.hap.Service.AccessoryInformation);
+    const signal = this.lifetime.signal;
 
-    if(name.length) {
+    // Watch one service, where it carries the ConfiguredName a rename in the Home app writes.
+    const hold = (service: Service, name: () => Nullable<string>): void => {
 
-      return name;
+      if(service.testCharacteristic(this.hap.Characteristic.ConfiguredName)) {
+
+        watchServiceName({ log: this.log, name, service, signal });
+      }
+    };
+
+    if(info) {
+
+      hold(info, () => this.ownedHomeKitName);
     }
 
-    return this.device.name;
+    for(const [ part, service ] of this.parts()) {
+
+      hold(service, () => this.ownedPartName(part));
+    }
   }
 }

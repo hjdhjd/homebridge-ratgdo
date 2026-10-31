@@ -52,7 +52,8 @@ Options whose key ends in `=<value>` take a value - replace `=<value>` with your
 | Option                                                               | Description
 |----------------------------------------------------------------------|-------------------------------------------------------------
 | <A NAME="Device"></A>`Device`                                        | Make this device available in HomeKit. **(default: enabled)**.<BR>This option may be applied globally or on individual devices.
-| <A NAME="Device.LogName"></A>`Device.LogName=<value>`                | Name to use for logging purposes. Defaults to the name the Ratgdo device advertises. **(default: none)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Device.Name"></A>`Device.Name=<value>`                      | Custom HomeKit name for this device and its parts. It always applies, so a rename in the Home app yields to it wherever HomeKit allows. **(default: none)**.
+| <A NAME="Device.SyncName"></A>`Device.SyncName`                      | Synchronize the ESPHome name of this device and its parts with HomeKit. A rename in the Home app yields to it wherever HomeKit allows. A custom Name takes precedence. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
 | <A NAME="Device.Encryption.Key"></A>`Device.Encryption.Key=<value>`  | Base64-encoded encryption key to use for the ESPHome API as specified in your YAML configuration. **(default: none)**.<BR>This option may be applied globally or on individual devices.
 | <A NAME="Device.Address"></A>`Device.Address=<value>`                | Hostnames or IP addresses of devices to connect to directly, for a device autodiscovery cannot reach or should not choose the address for. **(default: none)**.<BR>This option may only be applied globally.
 

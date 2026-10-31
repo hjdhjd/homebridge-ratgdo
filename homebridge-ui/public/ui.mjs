@@ -12,6 +12,7 @@ import { RATGDO_VARIANT_LABELS } from "./lib/webui/variants.js";
 import { STATUS_EVENT } from "homebridge-plugin-utils/webui/status.js";
 import { STATUS_ROW_TEMPLATES } from "./lib/webui/status-rows.js";
 import { createSaveFlow } from "homebridge-plugin-utils/webui/saveflow.js";
+import { displayedName } from "homebridge-plugin-utils/homekit-name.js";
 import { makeRatgdoConfig } from "./lib/webui/ratgdo-config.js";
 import { webUi } from "homebridge-plugin-utils/webUi.mjs";
 
@@ -112,12 +113,12 @@ const warmSignature = (payload) => JSON.stringify({
  * this one function, which gates on config-view establishment before it sends, so the diff-and-send logic and the integrity conditions that guard it live in exactly
  * one place rather than being restated per trigger; the address-refresh request is a read and is deliberately outside this funnel. The whole body is guarded: a failed
  * lookup logs to the console and keeps the last-sent set rather than throwing out of a callback. The device list comes from the public HBPU device-list source (never a
- * hand-parse of the cached accessories), and the configuration goes as the edited block's own options array: the server resolves every key, log name, and listed
- * address from it through the plugin's own engine, so this page resolves nothing and cannot disagree with the plugin about any of them.
+ * hand-parse of the cached accessories), and the configuration goes as the edited block's own options array: the server resolves every key, custom name, and
+ * listed address from it through the plugin's own engine, so this page resolves nothing for the server and cannot disagree with the plugin about any of them.
  *
  * The payload is then reduced to a canonical signature and compared against the last one sent. A resend is suppressed only while the sidebar's devices and the
- * configuration are both unchanged, so any option edit resends; an edit that moves no key, log name, or listed address moves nothing at the server's diff, which is
- * what makes the suppression purely an optimization.
+ * configuration are both unchanged, so any option edit resends; an edit that moves no key, custom name, or listed address moves nothing at the server's diff, which
+ * is what makes the suppression purely an optimization.
  */
 const recomputeWarmSet = async () => {
 
@@ -294,15 +295,89 @@ const PROBE_MESSAGES = {
 };
 
 /* The interpreter over the served catalog, built once for the page's life and shared by everything that reads or writes this plugin's configuration shape - the
- * legacy migration at load, and the Add Device card's save. One construction, because two would be two engines over one catalog answering the same questions.
+ * legacy migration at load, the Add Device card's save, and the sidebar's device names. One construction, because two would be two engines over one catalog
+ * answering the same questions. A device link drawn before the interpreter lands shows its row's own name, so landing repaints every link already drawn.
  */
 let interpreter = null;
 
 const configInterpreter = async () => {
 
-  interpreter ??= makeRatgdoConfig({ FeatureOptions, catalog: await ui.featureOptions.catalog(), formatValueList });
+  if(!interpreter) {
+
+    interpreter = makeRatgdoConfig({ FeatureOptions, catalog: await ui.featureOptions.catalog(), displayedName, formatValueList });
+    repaintDeviceLinks();
+  }
 
   return interpreter;
+};
+
+// The key the link namer is held under for a configuration with no options. A platform entry carrying no options array reads as a fresh empty array each time, so
+// every such read shares this one array rather than building a namer per link.
+const NO_OPTIONS = Object.freeze([]);
+
+/* The namer the sidebar last named device links through, and the options array it was built over. The edited configuration is composed afresh on every read, but its
+ * options array keeps its identity until an edit or a rollback moves it, so a sidebar build names every link through one engine and an edit builds one more.
+ */
+let linkNamer = { name: null, options: null };
+
+/* The text one device link shows: the name the plugin gives the device's accessory in HomeKit, with the custom Name being edited applied where HomeKit can carry it,
+ * read from the edited configuration. Until the interpreter lands, a link shows the name its row carries. Nothing here writes a row: the rows are the device list's
+ * own, and a name written onto one would go on showing after its custom Name was cleared.
+ */
+const deviceLinkName = (row) => {
+
+  if(!interpreter) {
+
+    return row.name;
+  }
+
+  const config = ui.featureOptions.editedConfig[0];
+  const options = config?.options?.length ? config.options : NO_OPTIONS;
+
+  if(linkNamer.options !== options) {
+
+    linkNamer = { name: interpreter.deviceNamer(config), options };
+  }
+
+  return linkNamer.name(row);
+};
+
+// The class each device link's name node wears, which is how the repaint finds every one of them on the page.
+const DEVICE_LINK_NAME_CLASS = "ratgdo-device-name";
+
+/* Every device link's name node, mapped to the row it names. The framework rebuilds its links on its own schedule, so the repaint finds the nodes on the page as it
+ * stands rather than holding them, and a node the framework drops leaves this map with it.
+ */
+const linkRows = new WeakMap();
+
+// Compose one device link's content: the device's name, in a node of its own that the repaint can find again.
+const deviceContent = (device) => {
+
+  const node = document.createElement("span");
+
+  node.className = DEVICE_LINK_NAME_CLASS;
+  node.textContent = deviceLinkName(device);
+  linkRows.set(node, device);
+
+  return node;
+};
+
+/* Repaint every device link's name, once an edit or a refused write moved the configured options or the interpreter landed. A custom Name is applied in the browser,
+ * so a rename needs this rather than a round trip. It runs synchronously inside the framework's hook, which reads the edited configuration as the change left it, and
+ * it changes no option, so it is as safe inside a drain as outside one. Each node is named from the row it rendered from, so a cleared custom Name shows that row's own
+ * name again.
+ */
+const repaintDeviceLinks = () => {
+
+  for(const node of document.querySelectorAll("#devicesContainer ." + DEVICE_LINK_NAME_CLASS)) {
+
+    const row = linkRows.get(node);
+
+    if(row) {
+
+      node.textContent = deviceLinkName(row);
+    }
+  }
 };
 
 /* Build one element through plain DOM calls. Every part of the Add Device card is composed with this and nothing else: no HTML string is ever parsed, because every
@@ -783,10 +858,23 @@ const featureOptionsParams = {
     mountCard();
     void recomputeWarmSet();
   },
-  onOptionsEdited: scheduleRecompute,
-  onOptionsRolledBack: scheduleRecompute,
+  // An options edit repaints the device names it moved, so a custom Name shows in the sidebar as soon as it is entered and before it is saved, and warms the panel.
+  onOptionsEdited: () => {
+
+    repaintDeviceLinks();
+    scheduleRecompute();
+  },
+
+  // A refused write rolls the configuration back without announcing an edit, so a custom Name that never landed is repainted away and the panel warmed again.
+  onOptionsRolledBack: () => {
+
+    repaintDeviceLinks();
+    scheduleRecompute();
+  },
   sidebar: {
 
+    // Each device link shows the device's name as the plugin names its accessory, the custom Name being edited applied.
+    deviceContent,
     deviceLabel: "Ratgdo Devices",
 
     /* Where each group of the device list sits, in the sidebar's own order above. The framework hands this comparator only the names that render as sections, so the

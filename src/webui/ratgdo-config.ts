@@ -1,10 +1,11 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * ratgdo-config.ts: Pure interpreter over the injected Ratgdo platform configuration, which the settings page loads to migrate legacy settings and to compose the Add
- * Device card's writes. It lives in the folder the page and the plugin share because the address rule and the option names it reads are defined there.
+ * ratgdo-config.ts: Pure interpreter over the injected Ratgdo platform configuration, which the settings page loads to migrate legacy settings, to compose the Add
+ * Device card's writes, and to name the sidebar's devices. It lives in the folder the page and the plugin share because the address rule and the option names it reads
+ * are defined there.
  */
-import type { FeatureCategoryEntry, FeatureOptionEntry, FeatureOptions, formatValueList } from "homebridge-plugin-utils";
-import { RATGDO_ADDRESS_OPTION, RATGDO_DEBUG_OPTION, RATGDO_ENCRYPTION_KEY_OPTION } from "./settings.ts";
+import type { FeatureCategoryEntry, FeatureOptionEntry, FeatureOptions, displayedName, formatValueList } from "homebridge-plugin-utils";
+import { RATGDO_ADDRESS_OPTION, RATGDO_DEBUG_OPTION, RATGDO_ENCRYPTION_KEY_OPTION, RATGDO_NAME_OPTION } from "./settings.ts";
 import { canonicalManualAddress, isZonedAddress } from "./manual-address.ts";
 import type { RatgdoOptions } from "../options.ts";
 
@@ -17,9 +18,12 @@ import type { RatgdoOptions } from "../options.ts";
  * a configuration nobody has opened the webUI on keeps working. Reconciling the two is one of this module's jobs: the migration moves a property's value into its
  * option and marks the property for deletion. Nothing in this plugin's browser code reads a configuration property.
  *
- * The other job is composing the writes the page's own affordances make. A manual device is the one setting a user adds from a card rather than from the options
+ * Another job is composing the writes the page's own affordances make. A manual device is the one setting a user adds from a card rather than from the options
  * editor, and it lands in TWO places at once - the address on a list option, and its key at the device's MAC, which the card learned by testing the address - so the
  * composition belongs here beside the rest of this plugin's knowledge of where a setting lives, rather than in the page that happens to draw the card.
+ *
+ * And the page names each sidebar device as the plugin names its accessory, a custom Name applied where HomeKit can carry it, which is a reading of where the custom
+ * Name lives and so belongs here too.
  */
 
 // The configuration properties a legacy setting can still arrive on: every property the plugin's own configuration shape declares except the options array itself.
@@ -76,27 +80,41 @@ export interface RatgdoManualDevicePatch {
 }
 
 /**
- * The interpreter over a fetched catalog: the legacy-settings migration, plus the reads and writes behind the page's Add Device card.
+ * One sidebar device as the page's device list carries it: the name its cached accessory carries, and its MAC in the plugin's identity form, the scope the framework
+ * addresses its options at.
+ */
+export interface RatgdoDeviceRow {
+
+  name: string;
+  serialNumber?: string;
+}
+
+/**
+ * The interpreter over a fetched catalog: the legacy-settings migration, the reads and writes behind the page's Add Device card, and the namer the sidebar's device
+ * links are named through.
  */
 export interface RatgdoConfigInterpreter {
 
+  deviceNamer(config?: RatgdoLegacyConfig): (row: RatgdoDeviceRow) => string;
   globalKey(config?: RatgdoLegacyConfig): string | undefined;
   manualAddresses(config?: RatgdoLegacyConfig): readonly string[];
   migrate(config?: RatgdoLegacyConfig): RatgdoConfigPatch | null;
   withManualDevice(config: RatgdoLegacyConfig | undefined, device: RatgdoManualDevice): RatgdoManualDevicePatch | null;
 }
 
-/* What the page hands the interpreter: the feature-option engine class, the served catalog, and the engine's list formatter. Named apart from the factory's parameter
- * list because the factory binds the engine and the formatter under the same names their types are read from.
+/* What the page hands the interpreter: the feature-option engine class, the served catalog, HBPU's display-name rule, and the engine's list formatter. Named apart from
+ * the factory's parameter list because the factory binds the engine, the rule, and the formatter under the same names their types are read from.
  *
  * @property FeatureOptions  - The feature-option engine class.
  * @property catalog         - The served catalog, carrying its categories and its options record.
+ * @property displayedName   - HBPU's display-name rule, which answers the custom name where one resolves and the fallback otherwise, as HomeKit carries it.
  * @property formatValueList - The engine's own list formatter.
  */
 interface RatgdoConfigInjected {
 
   FeatureOptions: typeof FeatureOptions;
   catalog: RatgdoConfigCatalog;
+  displayedName: typeof displayedName;
   formatValueList: typeof formatValueList;
 }
 
@@ -116,17 +134,19 @@ const CONSOLIDATED_SETTINGS: Readonly<Record<LegacyProperty, string>> = {
 };
 
 /**
- * Build the interpreter over an injected feature-option engine class, the option catalog the plugin's own UI server publishes, and the engine's list formatter the
- * composition needs. The engine and its formatter are handed in because a module in this folder imports values only from the folder itself, and handing them in is
- * also what keeps this module testable under node against the real engine and the real catalog, rather than against a stand-in that could drift from either.
+ * Build the interpreter over an injected feature-option engine class, the option catalog the plugin's own UI server publishes, HBPU's display-name rule, and the
+ * engine's list formatter the composition needs. The engine, the rule, and the formatter are handed in because a module in this folder imports values only from the
+ * folder itself, and handing them in is also what keeps this module testable under node against the real engine, the real catalog, and the real rule, rather than
+ * against a stand-in that could drift from any of them.
  *
  * @param injected.FeatureOptions   - The feature-option engine class.
  * @param injected.catalog          - The served catalog, carrying its categories and its options record.
+ * @param injected.displayedName    - HBPU's display-name rule, the one the plugin names an opener's accessory by.
  * @param injected.formatValueList  - The engine's own list formatter, so a list this module writes reads back exactly as the editor's own writes do.
  *
- * @returns The interpreter: the legacy-settings migration, and the manual-device reads and writes.
+ * @returns The interpreter: the legacy-settings migration, the manual-device reads and writes, and the device-row namer.
  */
-export const makeRatgdoConfig = ({ FeatureOptions, catalog, formatValueList }: RatgdoConfigInjected): RatgdoConfigInterpreter => {
+export const makeRatgdoConfig = ({ FeatureOptions, catalog, displayedName, formatValueList }: RatgdoConfigInjected): RatgdoConfigInterpreter => {
 
   // A feature-option engine over the served catalog and the config's own entries. The array is handed in directly rather than copied: the engine's set-option path is
   // a pure transform that composes a fresh array and reassigns its own field, so the array it was given is never written to. Its entries are the engine's to read,
@@ -155,6 +175,24 @@ export const makeRatgdoConfig = ({ FeatureOptions, catalog, formatValueList }: R
   };
 
   return {
+
+    /* The namer for one configuration's device rows, over one engine for the whole list, so the sidebar pays for one catalog index rather than one per row. A row shows
+     * the name the plugin gives its opener's accessory in HomeKit: the custom Name read at the row's MAC, the scope the plugin reads it at, where HomeKit can carry it,
+     * and otherwise the name the row's cached accessory carries, by HBPU's display-name rule.
+     *
+     * The rule is applied here rather than written onto the row, so a custom name being edited shows before anything is saved, and a row the page keeps never
+     * carries a custom name it would go on showing once that name is cleared.
+     *
+     * @param config - The platform configuration entry, the edited one when the page names rows under an edit.
+     *
+     * @returns The namer: a device row in, the name the page shows for it out.
+     */
+    deviceNamer: (config?: RatgdoLegacyConfig): ((row: RatgdoDeviceRow) => string) => {
+
+      const engine = engineFor(config);
+
+      return (row) => displayedName({ fallback: row.name, override: engine.value(RATGDO_NAME_OPTION, row.serialNumber) });
+    },
 
     /* The global encryption key, exactly as the plugin's runtime resolves it for a connection keyed for no MAC - the engine's global entry, with an empty one read as
      * no key at all.

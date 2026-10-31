@@ -210,7 +210,7 @@ describe("RatgdoAccessory timers", () => {
       assert.ok(mqtt, "MQTT is enabled, so the recording MQTT double is present");
       assert.ok(mqtt.subscriptions.length > 0, "configureMqtt registered the accessory's get and set topics at construction");
 
-      /* Disposal aborts the per-accessory mqttAbort controller, and the client releases every registration composed onto a signal when that signal aborts. An empty
+      /* Disposal aborts the accessory's lifetime controller, and the client releases every registration composed onto a signal when that signal aborts. An empty
        * table afterwards is therefore proof that each registration carried THAT signal: a subscription registered without it, or onto some other signal, would
        * survive this teardown and go on answering for an accessory that no longer exists.
        */

@@ -9,7 +9,7 @@
  * omitting the key. An equality read cannot tell those apart, and the session's shallow-merge commit treats them oppositely, so presence is asserted with
  * Object.hasOwn and absence with its negation - never with a comparison against undefined.
  */
-import { FeatureOptions, formatValueList, mqttConnectionSettings } from "homebridge-plugin-utils";
+import { FeatureOptions, displayedName, formatValueList, mqttConnectionSettings } from "homebridge-plugin-utils";
 import { describe, test } from "node:test";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import type { Nullable } from "homebridge-plugin-utils";
@@ -26,7 +26,7 @@ const OPTION_URL = "mqtt://127.0.0.1:1883";
 const UNRELATED_ENTRY = "Disable.Light.1234567890AB";
 
 // The interpreter under test, built the way the webUI builds it: the real engine class, the real served catalog, and the engine's own list formatter.
-const config = makeRatgdoConfig({ FeatureOptions, catalog: { categories: featureOptionCategories, options: featureOptions }, formatValueList });
+const config = makeRatgdoConfig({ FeatureOptions, catalog: { categories: featureOptionCategories, options: featureOptions }, displayedName, formatValueList });
 
 // Every entry in an options array that addresses a given option, case-insensitively, in either the enabled or the disabled form.
 function entriesFor(options: string[] | undefined, option: string): string[] {

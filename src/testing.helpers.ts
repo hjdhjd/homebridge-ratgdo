@@ -31,13 +31,13 @@ import { ConnectionError, CoverOperation, EncryptionKeyMissingError, EncryptionR
   entityId } from "esphome-client";
 import type { ConnectionHealth, DeviceInfo, EntityId, EspHomeClient, LifecycleEvent, LogEventData, NoiseServerHello, PskResolver, TelemetryEvent } from "esphome-client";
 import { FeatureOptions, onAbort } from "homebridge-plugin-utils";
+import { PLATFORM_NAME, RATGDO_NAME_OPTION } from "./webui/settings.ts";
 import { PLUGIN_NAME, RATGDO_MDNS_SERVICE_TYPE } from "./settings.ts";
 import { TestClock, TestMdnsBrowserFactory, TestMqttClient, capturingLog, expectAt, loadHomebridge, makeService, makeTxtStrings,
   watchServerWarnings } from "homebridge-plugin-utils/testing";
 import type { TestHomebridgeApi, TestLogEntry, TestMdnsBrowser, TestPlatformAccessory } from "homebridge-plugin-utils/testing";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import type { OpenEspHomeClient } from "./connection.ts";
-import { PLATFORM_NAME } from "./webui/settings.ts";
 import { RatgdoAccessory } from "./device.ts";
 import type { RatgdoDevice } from "./types.ts";
 import { RatgdoPlatform } from "./platform.ts";
@@ -45,6 +45,7 @@ import type { RatgdoPlatformDefaults } from "./platform.ts";
 import type { RatgdoResolvedConfig } from "./options.ts";
 import type { RatgdoTxtKey } from "./discovery.ts";
 import { RatgdoVariant } from "./types.ts";
+import { mock } from "node:test";
 
 // The Homebridge runtime every suite runs on, loaded once from this repository's tree: the hap-nodejs copy and the PlatformAccessory class Homebridge itself loads
 // here, so the handlers the accessory binds meet the HAP they meet at runtime.
@@ -543,6 +544,43 @@ export function makeTestDevice(overrides: Partial<RatgdoDevice> = {}): RatgdoDev
   };
 }
 
+/**
+ * Build the custom Name entry for one opener, spelled the way the options editor writes a value set on one device.
+ *
+ * @param name - the custom Name, as the user typed it.
+ * @param mac  - the opener's MAC in the plugin's identity form. Defaults to the MAC every factory here gives its test opener.
+ *
+ * @returns the feature-option string a configuration carries for that custom Name.
+ */
+export function customNameEntry(name: string, mac = "AABBCCDDEEFF"): string {
+
+  return "Enable." + RATGDO_NAME_OPTION + "." + mac + "=" + name;
+}
+
+/**
+ * Count the custom Name lookups the platform's option engine answers while a write runs, which is how a row reads whether a log line resolved the opener's name.
+ *
+ * @param platform - the platform whose option engine the opener's displayed name is read through.
+ * @param write    - the write to observe, such as one line to a connection's log adapter.
+ *
+ * @returns how many times the engine was asked for the custom Name while the write ran.
+ */
+export function nameLookupsDuring(platform: RatgdoPlatform, write: () => void): number {
+
+  const lookups = mock.method(platform.featureOptions, "value");
+
+  // The module's mock tracker has no test context to restore the spy when a test ends, so the spy comes off here, even when the write throws.
+  try {
+
+    write();
+  } finally {
+
+    lookups.mock.restore();
+  }
+
+  return lookups.mock.calls.filter(({ arguments: [option] }) => option === RATGDO_NAME_OPTION).length;
+}
+
 /** Build the resolved mDNS service a browser derives for a Ratgdo advertisement, composed from the library's own fixture so what a test advertises and what the
  * classify reads cannot disagree. Each TXT field becomes one record string through the library's `makeTxtStrings`, the inverse of the `txtEntries` read the
  * classify performs.
@@ -580,7 +618,6 @@ export interface TestPlatform {
   hap: HAP;
   log: HomebridgePluginLogging;
   mqtt: Nullable<TestMqttClient>;
-  resolveLogName: (mac: string) => string | undefined;
 }
 
 /* Options for makeTestPlatform: the fake client to back getEspHomeClient, the clock the platform double publishes, the platform config, whether to attach a recording
@@ -610,10 +647,9 @@ export interface MakeTestPlatformResult {
 /* Build a platform double around the kit's Homebridge API and a REAL FeatureOptions engine seeded with the supplied userOptions, so the production feature-option
  * logic (test / value / getInteger / logFeature) runs unchanged. The API comes from the file's server-warning builder, so a warning Homebridge logs on its account
  * fails the test that drew it, and its HAP namespace is the platform double's own, as production's platform reads `api.hap`. A capturing log records every line; an
- * optional recording MQTT double captures subscriptions and publishes; a fake esphome-client backs getEspHomeClient. resolveLogName mirrors the production platform
- * method exactly (empty string collapses to undefined). A TestClock stands in for the production platform's time source, so every deadline an accessory built on
- * this double arms is driven by advancing that clock. The returned handles let a test assert on the captured logs, the recorded commands, and the MQTT traffic, and
- * drive the clock.
+ * optional recording MQTT double captures subscriptions and publishes; a fake esphome-client backs getEspHomeClient. A TestClock stands in for the production
+ * platform's time source, so every deadline an accessory built on this double arms is driven by advancing that clock. The returned handles let a test assert on the
+ * captured logs, the recorded commands, and the MQTT traffic, and drive the clock.
  */
 export function makeTestPlatform(options: MakeTestPlatformOptions = {}): MakeTestPlatformResult {
 
@@ -634,13 +670,7 @@ export function makeTestPlatform(options: MakeTestPlatformOptions = {}): MakeTes
     getEspHomeClient: (): TestEspHomeClient | undefined => (options.clientUnavailable ? undefined : client),
     hap: api.hap,
     log,
-    mqtt,
-    resolveLogName: (mac: string): string | undefined => {
-
-      const raw = fo.value("Device.LogName", mac);
-
-      return raw?.length ? raw : undefined;
-    }
+    mqtt
   };
 
   return { client, clock, entries: log.entries, mqtt, platform };

@@ -3,7 +3,7 @@
  * webui-status.ts: The live device-status connection pool for the Config UI X settings panel.
  *
  * This module runs exclusively inside the transient custom-UI child process that Config UI X forks for the plugin's settings modal - never inside Homebridge. At panel
- * open the frontend hands the pool the warm set: every device the sidebar knows, and the page's edited configuration. The pool resolves each device's key, its log
+ * open the frontend hands the pool the warm set: every device the sidebar knows, and the page's edited configuration. The pool resolves each device's key, its custom
  * name, and every listed address from that configuration through the same feature-option engine and the same list function the plugin itself runs on, so the page,
  * the pool, and the runtime cannot disagree about a device. The pool connects to every discovered warm device immediately and holds each connection for the whole
  * settings session, so clicking between devices is an instant view switch rather than a teardown and reconnect. It opens each connection by reusing the platform's own
@@ -31,10 +31,10 @@
 import type { Clock, HomebridgePluginLogging, MdnsBrowserFactory, MdnsDiscovery, MdnsDiscoveryEvent, Nullable, StatusErrorReason, StatusEvent,
   StatusRow } from "homebridge-plugin-utils";
 import type { EntityId, EspHomeClient, LifecycleEvent, TelemetryEvent } from "esphome-client";
-import { FeatureOptions, HbpuAbortError, TimerRegistry, composeSignals, discoverServices, isAdvertisedAt, prefixedLog, superviseLoop,
+import { FeatureOptions, HbpuAbortError, TimerRegistry, composeSignals, discoverServices, displayedName, isAdvertisedAt, prefixedLog, superviseLoop,
   systemClock } from "homebridge-plugin-utils";
 import type { ManualConnectionFailureReason, OpenEspHomeClient } from "./connection.ts";
-import { RATGDO_ADDRESS_OPTION, RATGDO_ENCRYPTION_KEY_OPTION, RATGDO_WEBUI_PROBE_TIMEOUT } from "./webui/settings.ts";
+import { RATGDO_ADDRESS_OPTION, RATGDO_ENCRYPTION_KEY_OPTION, RATGDO_NAME_OPTION, RATGDO_WEBUI_PROBE_TIMEOUT } from "./webui/settings.ts";
 import { RATGDO_ENTITIES, idFor, presentEntityIds, ratgdoInitialStateEntityIds, ratgdoStatusEntityIds } from "./entities.ts";
 import { RATGDO_MDNS_SERVICE_TYPE, RATGDO_WEBUI_DISCOVERY_TIMEOUT } from "./settings.ts";
 import { STATUS_ROW_ORDER, mapRowValue, statusRowTemplate } from "./webui/status-rows.ts";
@@ -78,8 +78,8 @@ export interface StatusFeedOptions {
  * named shape the warm narrowing produces and the warm method consumes, so neither re-declares it inline.
  *
  * The configuration travels whole rather than as values the page resolved, because resolving it is the plugin's own engine's job: the pool builds that engine over
- * the plugin's catalog and reads every key, log name, and listed address through it exactly as the platform does. The listed addresses matter beyond the sidebar,
- * because a device named only by address may be in nobody's sidebar yet - the pool has to dial the address to learn which device is there.
+ * the plugin's catalog and reads every key, custom name, and listed address through it exactly as the platform does. The listed addresses matter beyond the
+ * sidebar, because a device named only by address may be in nobody's sidebar yet - the pool has to dial the address to learn which device is there.
  *
  * @property devices - The sidebar's devices, by stripped mac.
  * @property options - The edited configuration's feature-option entries.
@@ -360,8 +360,8 @@ export class StatusFeed implements Disposable {
   // The live discovery while one runs, and null between them: a null field is what makes the next warm's startDiscovery open a new one.
   #discovery: Nullable<MdnsDiscovery<DiscoveredRatgdo>> = null;
   readonly #discoveryTimeoutSeconds: number;
-  // The feature-option engine over the plugin's own catalog and the last warm's configuration, built empty here and replaced by every warm. Every key, log name, and
-  // listed address the pool reads comes from it, through the same calls the platform makes.
+  // The feature-option engine over the plugin's own catalog and the last warm's configuration, built empty here and replaced by every warm. Every key, custom name,
+  // and listed address the pool reads comes from it, through the same calls the platform makes.
   #engine = new FeatureOptions(featureOptionCategories, featureOptions, []);
 
   /* The key lookup every connection this pool opens hands the connection core: the key the engine resolves at a MAC, or the global key when called with none, and
@@ -408,7 +408,7 @@ export class StatusFeed implements Disposable {
   }
 
   /* Apply a warm set: the whole sidebar's device list and the configuration the page is editing. This is the pool's one policy chokepoint. The configuration replaces
-   * the engine every key, log name, and listed address is read from, and the device list replaces `#warmed` wholesale (never merged), so a mac the sidebar dropped
+   * the engine every key, custom name, and listed address is read from, and the device list replaces `#warmed` wholesale (never merged), so a mac the sidebar dropped
    * simply leaves the set - its live session is deliberately NOT torn down, because a transient device-list read must never destroy a live connection. For each
    * device: a discovered device with no session starts a connect, unless outcome memory records an auth failure against a key that has not moved, in which case the
    * connect waits for a changed key; an undiscovered device with no session and no pending discovery timer arms its per-mac not-found timer; a device whose live
@@ -416,9 +416,9 @@ export class StatusFeed implements Disposable {
    * place with no teardown; a device whose key has not moved is left untouched. Timers for macs that left the warm set are cleared, since discovery and the not-found
    * sweep do not concern a departed mac.
    *
-   * The key is the only thing a warm resolves that decides anything here. A log name is display truth: the prefix resolver reads it live from the engine on every log
-   * call, so a warm that changes nothing but a name is applied by the engine's replacement and moves no connection, and neither does an edit to an option this pool
-   * never reads.
+   * The key is the only thing a warm resolves that decides anything here. A custom name is display truth: the prefix resolver reads it live from the engine on every
+   * log call, so a warm that changes nothing but a name is applied by the engine's replacement and moves no connection, and neither does an edit to an option this
+   * pool never reads.
    *
    * The listed addresses are applied first, and they are applied differently: a mac is something the sidebar already knows, while an address is a question the pool
    * has to ask the network. So each listed address is dialed once, identified, and remembered by what answered, and the device the pool already holds a session for
@@ -799,16 +799,18 @@ export class StatusFeed implements Disposable {
 
     const device = known.device;
 
-    /* The feed logs this connection's lifecycle under the name the user knows the device by: the Device.LogName option they set for it, then the mDNS-advertised
+    /* The feed logs this connection's lifecycle under the name the user knows the device by, by the plugin's own rule: HBPU's display-name rule over the custom Name
+     * stored at the device's MAC, so a Name HomeKit can carry nothing of is passed over here exactly as the plugin passes it over. The fallback is the advertised
      * friendly name, then the dialed address for a device advertising no usable name. The option is read from the warmed configuration through the same engine call
      * the platform's own lines resolve it with - so one device reads the same in the settings page's log as it does in Homebridge's.
      *
      * The resolver is a closure rather than a captured string because it is read on every log call, so a warm that changes only the name is carried by the next line
-     * this connection writes and moves nothing else. The empty-string guard is deliberate, and it is why each fallback is a logical or rather than a nullish coalesce:
-     * an empty name is as unusable an identity as no name at all, and nullish coalescing would let that empty string through as the prefix.
+     * this connection writes and moves nothing else. The fallback is a logical or rather than a nullish coalesce on purpose: an empty friendly name is as unusable an
+     * identity as no name at all, and nullish coalescing would let that empty string through as the prefix.
      */
     // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing
-    const log = prefixedLog(this.#log, () => this.#engine.value("Device.LogName", mac) || device.friendlyName || device.address);
+    const log = prefixedLog(this.#log, () => displayedName({ fallback: device.friendlyName || device.address,
+      override: this.#engine.value(RATGDO_NAME_OPTION, mac) }));
     const session: DeviceSession = { address: device.address, client: null, controller: new AbortController(), encryptedTransport: false, mac,
       offered: { key: this.#keyFor(mac), mac }, online: false, rowMap: new Map(), stack: new DisposableStack(), token: ++this.#tokenCounter };
 

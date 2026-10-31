@@ -7,13 +7,13 @@
  * engine through the harness `userOptions` array, then reads the resolved hint back from `ratgdo.hints`. The net covers every contract: every boolean hint flips when its
  * option moves off its default while every sibling stays at default (asserted by a full-object deepEqual against the spelled-out default record); the variant gates
  * (disco* hints exist only on the Ratgdo variant, konnected* hints only on Konnected) hold even when the underlying option is enabled on the wrong variant; the
- * value-centric duration hints fall back to RATGDO_OCCUPANCY_DURATION by default and honor a userOptions override; and logName resolves through the platform's
- * resolveLogName (empty collapses to undefined). The read-only deviation log - the one side effect the constructor fires after hints resolve - is asserted from the
- * captured log entries.
+ * value-centric duration hints fall back to RATGDO_OCCUPANCY_DURATION by default and honor a userOptions override; and the custom name resolves through HBPU's
+ * custom-name rule, a name HomeKit can carry nothing of resolving to none. The deviation logs the constructor fires after hints resolve - read-only mode and the
+ * custom name - are asserted from the captured log entries.
  */
-import { Characteristic, Service, buildRatgdoAccessory, makeKonnectedInitialState, makeRatgdoInitialState } from "./testing.helpers.ts";
+import { Characteristic, Service, buildRatgdoAccessory, customNameEntry, makeKonnectedInitialState, makeRatgdoInitialState } from "./testing.helpers.ts";
 import { describe, test } from "node:test";
-import { formatLogEntry, loggedAt, triggerSet } from "homebridge-plugin-utils/testing";
+import { linesAt, loggedAt, triggerSet } from "homebridge-plugin-utils/testing";
 import { LockCommand } from "esphome-client";
 import { RATGDO_OCCUPANCY_DURATION } from "./settings.ts";
 import { RatgdoAccessory } from "./device.ts";
@@ -44,14 +44,15 @@ const DEFAULT_HINTS = {
   lockoutSwitch: false,
   logLight: true,
   logMotion: true,
-  logName: undefined,
   logObstruction: true,
   logOpener: true,
   logVehiclePresence: true,
   motionOccupancyDuration: RATGDO_OCCUPANCY_DURATION,
   motionOccupancySensor: false,
   motionSensor: true,
-  readOnly: false
+  nameOverride: null,
+  readOnly: false,
+  syncName: false
 };
 
 /* The single-option boolean derivation cases, expressed as data so the "flip exactly this hint, leave every sibling at default" contract is netted uniformly across the
@@ -80,7 +81,8 @@ const booleanHintCases: { action: "Disable" | "Enable"; hint: keyof typeof DEFAU
   { action: "Disable", hint: "logVehiclePresence", option: "Log.VehiclePresence", value: false },
   { action: "Enable", hint: "motionOccupancySensor", option: "Motion.OccupancySensor", value: true },
   { action: "Disable", hint: "motionSensor", option: "Motion", value: false },
-  { action: "Enable", hint: "readOnly", option: "Opener.ReadOnly", value: true }
+  { action: "Enable", hint: "readOnly", option: "Opener.ReadOnly", value: true },
+  { action: "Enable", hint: "syncName", option: "Device.SyncName", value: true }
 ];
 
 describe("RatgdoAccessory hints", () => {
@@ -197,29 +199,38 @@ describe("RatgdoAccessory hints", () => {
     });
   });
 
-  describe("logName resolution", () => {
+  describe("the custom name", () => {
 
-    test("resolves to undefined by default, the empty configured value collapsing to undefined", () => {
+    test("resolves the custom name set at the opener's MAC onto its hint, trimmed", () => {
 
-      const { ratgdo } = buildRatgdoAccessory();
+      const { ratgdo } = buildRatgdoAccessory({ userOptions: [customNameEntry("  Workshop Door  ")] });
 
-      assert.equal(ratgdo.hints.logName, undefined, "an unconfigured Device.LogName (empty default value) collapses to an undefined logName hint");
+      assert.deepEqual(ratgdo.hints, { ...DEFAULT_HINTS, nameOverride: "Workshop Door" }, "the custom name lands on its hint trimmed and moves no other hint");
     });
 
-    test("resolves the configured Device.LogName value", () => {
+    test("resolves a custom name HomeKit can carry nothing of to none", () => {
 
-      const { ratgdo } = buildRatgdoAccessory({ userOptions: ["Enable.Device.LogName.GarageLogger"] });
+      const { ratgdo } = buildRatgdoAccessory({ userOptions: [customNameEntry("\u{1F319}")] });
 
-      assert.equal(ratgdo.hints.logName, "GarageLogger", "a configured Device.LogName value resolves straight onto the logName hint via the platform resolveLogName");
+      assert.equal(ratgdo.hints.nameOverride, null, "a custom name HomeKit's naming rule empties counts as no custom name at all");
     });
 
-    test("fronts the device log prefix when a logName is configured", () => {
+    test("logs the custom name it applies, as HomeKit's naming rule cleans it, and prefixes every line with it", () => {
 
-      const { entries } = buildRatgdoAccessory({ userOptions: [ "Enable.Device.LogName.GarageLogger", "Enable.Opener.ReadOnly" ] });
-      const readOnlyEntry = entries.find((entry) => formatLogEntry(entry).includes("Read-only mode"));
+      const { entries } = buildRatgdoAccessory({ userOptions: [customNameEntry("Workshop \u{1F319}")] });
 
-      assert.ok(readOnlyEntry, "the read-only deviation log fires so we have a log line to inspect the prefix on");
-      assert.ok(formatLogEntry(readOnlyEntry).startsWith("GarageLogger: "), "the configured logName fronts every log line through the name getter's prefix");
+      assert.deepEqual(linesAt(entries, "info"), ["Workshop: Custom HomeKit name set to Workshop."],
+        "the one line the custom name draws names the name HomeKit carries, and the opener's own lines carry it as their prefix");
+      assert.deepEqual(linesAt(entries, "warn"), [], "a custom name HomeKit can carry draws no warning");
+    });
+
+    test("warns of a custom name HomeKit can display nothing of, naming it as the user set it, and names the opener by its own name", () => {
+
+      const { entries } = buildRatgdoAccessory({ userOptions: [customNameEntry("\u{1F319}")] });
+
+      assert.deepEqual(linesAt(entries, "warn"), ["Test Ratgdo: The custom name \"\u{1F319}\" leaves nothing HomeKit can display, so it is not applied."],
+        "the refusal is said once, quoting the value the user set, under the opener's own name");
+      assert.deepEqual(linesAt(entries, "info"), [], "and no custom name is reported as set");
     });
   });
 
