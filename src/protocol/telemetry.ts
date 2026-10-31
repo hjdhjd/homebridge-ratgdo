@@ -29,8 +29,8 @@ export function translateTelemetry(data: TelemetryEvent): EspHomeEvent {
 
     case "cover":
 
-      // Any non-zero position means the door is not fully closed, so it reads as OPEN here; the raw position is forwarded separately on payload.position for the
-      // dimmer/percentage path.
+      // Any non-zero position means the door is not fully closed, so it reads as OPEN here; the position itself is forwarded on payload.position, which the
+      // automation dimmer and the status panel read.
       payload.state = data.position ? "OPEN" : "CLOSED";
 
       switch(data.currentOperation) {
@@ -69,7 +69,9 @@ export function translateTelemetry(data: TelemetryEvent): EspHomeEvent {
         }
       }
 
-      payload.position = data.position;
+      // Protobuf omits a zero-valued position, so a fully closed door's state arrives with none. We read that absence as 0 here, the same reading the state above
+      // gives it, so every consumer sees a closed door at the closed position rather than holding the last position it was told.
+      payload.position = data.position ?? 0;
 
       break;
 

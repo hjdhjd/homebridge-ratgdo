@@ -9,14 +9,15 @@
  * the door, the MQTT garagedoor publish on every real transition, and the capitalized state log gated on Log.Opener. The occupancy duration is exercised by advancing
  * the platform double's test clock, so the test never waits in real time.
  */
-import { Characteristic, Service, buildRatgdoAccessory, makeCoverEvent, makeKonnectedInitialState, makeRatgdoInitialState } from "./testing.helpers.ts";
+import { Characteristic, Service, buildRatgdoAccessory, makeBinarySensorEvent, makeCoverEvent, makeKonnectedInitialState,
+  makeRatgdoInitialState } from "./testing.helpers.ts";
 import { RatgdoService, RatgdoVariant } from "./types.ts";
 import { describe, test } from "node:test";
+import { loggedAt, present, triggerGet } from "homebridge-plugin-utils/testing";
 import type { EspHomeEvent } from "./types.ts";
 import { MQTT_GET_SUFFIX } from "homebridge-plugin-utils";
 import { RATGDO_OCCUPANCY_DURATION } from "./settings.ts";
 import assert from "node:assert/strict";
-import { loggedAt } from "homebridge-plugin-utils/testing";
 
 /* Build a cover EspHomeEvent in the exact shape updateState() consumes. updateState() reads the EspHomeEvent surface (id / state / current_operation / position), which
  * is distinct from the wire TelemetryEvent shape the initial-state snapshot carries - so we construct these directly rather than through the telemetry factories.
@@ -190,6 +191,29 @@ describe("RatgdoAccessory.updateState() cover events", () => {
 
       assert.equal(dimmer.getCharacteristic(Characteristic.Brightness).value, 0, "a closed door drives the dimmer brightness to 0 percent");
       assert.equal(dimmer.getCharacteristic(Characteristic.On).value, false, "a zero door position turns the automation dimmer off");
+    });
+
+    test("reads the automation dimmer on for a closing door that has not reached the closed position", async () => {
+
+      const { accessory, ratgdo } = buildRatgdoAccessory({ initialState: makeRatgdoInitialState([makeCoverEvent("door", 1)]), userOptions: ["Enable.Opener.Dimmer"] });
+      const dimmer = present(accessory.getServiceById(Service.Lightbulb, RatgdoService.DIMMER_OPENER_AUTOMATION), "the automation dimmer");
+
+      ratgdo.updateState(coverEvent("cover-door", "CLOSING", "CLOSED", 0.5));
+
+      assert.equal(dimmer.getCharacteristic(Characteristic.On).value, true, "the closing door's event leaves the dimmer on at the position the door has reached");
+      assert.equal(await triggerGet(dimmer.getCharacteristic(Characteristic.On)), true,
+        "and HomeKit's read answers on too, so the tile shows On beside its Brightness of 50 rather than flipping to Off");
+    });
+
+    test("reads the automation dimmer off for an obstructed door at the closed position, from its startup write onward", async () => {
+
+      const { accessory } = buildRatgdoAccessory({ initialState: makeRatgdoInitialState([makeBinarySensorEvent("obstruction", true)]),
+        userOptions: ["Enable.Opener.Dimmer"] });
+      const dimmer = present(accessory.getServiceById(Service.Lightbulb, RatgdoService.DIMMER_OPENER_AUTOMATION), "the automation dimmer");
+
+      assert.equal(dimmer.getCharacteristic(Characteristic.Brightness).value, 0, "the obstructed door stands at the closed position");
+      assert.equal(dimmer.getCharacteristic(Characteristic.On).value, false, "so the dimmer's startup write leaves it off, though the door counts as open");
+      assert.equal(await triggerGet(dimmer.getCharacteristic(Characteristic.On)), false, "and HomeKit's read answers off, never On at a Brightness of zero");
     });
 
     test("updates the automation opener switch On to track the door state", () => {

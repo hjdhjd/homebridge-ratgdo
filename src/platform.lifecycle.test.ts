@@ -1,13 +1,13 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
  * platform.lifecycle.test.ts: The platform's connection lifecycle, driven for real. A RatgdoPlatform is built on the shared Homebridge test double with its
- * injectable defaults set to the doubles, an opener is discovered through the browser double and admitted through a fake dial, and the admitted client's lifecycle
- * events are delivered in the orders esphome-client emits them. Each row reads what the opener's users see: whether HomeKit answers, the info and error lines, the
- * MQTT availability statement, and the identity characteristics each session refreshes.
+ * injectable defaults set to the doubles, an opener is discovered through the browser double and admitted through a fake dial, and the admitted client delivers its
+ * lifecycle events in the orders esphome-client emits them and its telemetry in the shapes the wire carries. Each row reads what the opener's users see: whether
+ * HomeKit answers, the info and error lines, the MQTT availability statement, the identity characteristics each session refreshes, and the tiles telemetry moves.
  */
 import type { BuildPlatformResult, TestEspHomeClient } from "./testing.helpers.ts";
-import { Characteristic, Service, buildPlatform, makeFakeOpenClient, makeOpenerClient, makeOpenerService } from "./testing.helpers.ts";
-import { ConnectionError, EncryptionKeyInvalidError, LogLevel } from "esphome-client";
+import { Characteristic, Service, buildPlatform, makeCoverEvent, makeFakeOpenClient, makeOpenerClient, makeOpenerService, makeTelemetry } from "./testing.helpers.ts";
+import { ConnectionError, CoverOperation, EncryptionKeyInvalidError, LogLevel } from "esphome-client";
 import type { TestLogEntry, TestPlatformAccessory } from "homebridge-plugin-utils/testing";
 import { describe, test } from "node:test";
 import { expectAt, formatLogEntry, hapStatus, logCount, present, settleUntil, triggerGet } from "homebridge-plugin-utils/testing";
@@ -15,6 +15,7 @@ import { DeviceIdentityError } from "./connection.ts";
 import type { DeviceInfo } from "esphome-client";
 import { HAPStatus } from "homebridge-plugin-utils";
 import type { RatgdoAccessory } from "./device.ts";
+import { RatgdoService } from "./types.ts";
 import assert from "node:assert/strict";
 
 // The opener this suite discovers, in the plugin's identity form, and the address it advertises.
@@ -239,5 +240,48 @@ describe("RatgdoPlatform lifecycle listener", () => {
     assert.equal(logCount(since(opener), "error", "Encryption configuration error"), 1, "and its diagnostic is logged once");
     assert.ok(indexOf(since(opener), "info", "Ratgdo disconnected.") < indexOf(since(opener), "error", "Encryption configuration error"),
       "the announcement lands ahead of the diagnostic, so the diagnostic follows the disconnect it explains");
+  });
+});
+
+describe("RatgdoPlatform telemetry listener", () => {
+
+  test("reads a closed door's state, which arrives with no position, at the closed position, so the automation dimmer's Brightness returns to zero", async () => {
+
+    const opener = await admit({ userOptions: ["Enable.Opener.Dimmer"] });
+    const dimmer = present(opener.accessory.getServiceById(Service.Lightbulb, RatgdoService.DIMMER_OPENER_AUTOMATION), "the automation dimmer");
+
+    opener.client.emit("telemetry", makeCoverEvent("door", 1));
+
+    assert.equal(dimmer.getCharacteristic(Characteristic.Brightness).value, 100, "the open door's position reaches the dimmer as its Brightness");
+
+    opener.client.emit("telemetry", makeTelemetry("cover", "door", { currentOperation: CoverOperation.IDLE }));
+
+    assert.equal(await readDoor(opener), Characteristic.CurrentDoorState.CLOSED, "the state with no position reads as a closed door");
+    assert.equal(dimmer.getCharacteristic(Characteristic.Brightness).value, 0,
+      "and the dimmer's Brightness returns to zero rather than holding the open door's position");
+  });
+
+  test("reads the automation dimmer on while the door stands short of closed, and off at Brightness zero once a state with no position closes it", async () => {
+
+    const opener = await admit({ userOptions: ["Enable.Opener.Dimmer"] });
+    const dimmer = present(opener.accessory.getServiceById(Service.Lightbulb, RatgdoService.DIMMER_OPENER_AUTOMATION), "the automation dimmer");
+    const on = dimmer.getCharacteristic(Characteristic.On);
+
+    opener.client.emit("telemetry", makeCoverEvent("door", 0.4, CoverOperation.IS_OPENING));
+
+    assert.equal(on.value, true, "a door opening from closed turns the dimmer on as soon as its position leaves zero");
+
+    opener.client.emit("telemetry", makeCoverEvent("door", 1));
+    opener.client.emit("telemetry", makeCoverEvent("door", 0.5, CoverOperation.IS_CLOSING));
+
+    assert.equal(on.value, true, "the closing door's event leaves the dimmer on at the position the door has reached");
+    assert.equal(await triggerGet(on), true, "and HomeKit's read answers on too, beside the closing door's Brightness");
+    assert.equal(dimmer.getCharacteristic(Characteristic.Brightness).value, 50, "which is the position the closing door has reached");
+
+    opener.client.emit("telemetry", makeTelemetry("cover", "door", { currentOperation: CoverOperation.IDLE }));
+
+    assert.equal(on.value, false, "the state with no position closes the door and turns the dimmer off");
+    assert.equal(await triggerGet(on), false, "and HomeKit's read answers off");
+    assert.equal(dimmer.getCharacteristic(Characteristic.Brightness).value, 0, "at a Brightness of zero");
   });
 });

@@ -343,7 +343,7 @@ describe("RatgdoAccessory command dispatch", () => {
       assert.equal(dimmer.getCharacteristic(Characteristic.Brightness).value, 100, "and leaves Brightness on the open door's recorded position");
     });
 
-    test("refuses a dimmer close while the door is closing, and reverts On to the closing door the status record holds", async () => {
+    test("refuses a dimmer close while the door is closing, and reverts On to the position the closing door has reached", async () => {
 
       const { accessory, client, clock, ratgdo } = buildRatgdoAccessory({ userOptions: ["Enable.Opener.Dimmer"] });
       const dimmer = present(accessory.getServiceById(Service.Lightbulb, RatgdoService.DIMMER_OPENER_AUTOMATION), "the automation dimmer");
@@ -359,7 +359,8 @@ describe("RatgdoAccessory command dispatch", () => {
 
       clock.advance(RATGDO_UI_REVERT_DELAY);
 
-      assert.equal(dimmer.getCharacteristic(Characteristic.On).value, false, "the refused close reverts On to the closing door, which the dimmer's rule reads as closed");
+      assert.equal(dimmer.getCharacteristic(Characteristic.On).value, true,
+        "the refused close reverts On to the closing door, which is not fully closed at 50 percent, so the tile never shows Off at a Brightness above zero");
       assert.equal(dimmer.getCharacteristic(Characteristic.Brightness).value, 50, "and Brightness to the position the closing door has reached");
     });
 

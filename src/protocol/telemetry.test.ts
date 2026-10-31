@@ -41,6 +41,14 @@ describe("translateTelemetry", () => {
       assert.equal(translateTelemetry(makeCoverEvent("door", 0, CoverOperation.IDLE)).state, "CLOSED", "a zero position reads as CLOSED");
     });
 
+    test("reads a cover state with no position, the wire's omitted zero, as CLOSED at position 0", () => {
+
+      const closed = translateTelemetry(makeTelemetry("cover", "door", { currentOperation: CoverOperation.IDLE }));
+
+      assert.equal(closed.state, "CLOSED", "a cover state with no position reads as CLOSED");
+      assert.equal(closed.position, 0, "and carries position 0, so every consumer reads the closed position rather than an absence");
+    });
+
     test("translates each CoverOperation to its current_operation string", () => {
 
       assert.equal(translateTelemetry(makeCoverEvent("door", 1, CoverOperation.IS_OPENING)).current_operation, "OPENING", "IS_OPENING maps to OPENING");

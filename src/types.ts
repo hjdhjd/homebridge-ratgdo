@@ -81,7 +81,8 @@ export interface MdnsProject {
 /* Telemetry event payload dispatched into RatgdoAccessory.updateState(). The platform's protocol/telemetry translator maps each native ESPHome telemetry event into
  * this accessory-facing shape, so the device class consumes one stable contract and never sees the wire format. The snake_case current_operation mirrors the ESPHome
  * field name it carries across the boundary. The optional name and value fields are declared for completeness but are not currently populated by translateTelemetry or
- * read by updateState() - the active dispatch path uses only id, state, position, and current_operation.
+ * read by updateState() - the active dispatch path uses only id, state, position, and current_operation. The position is optional because only a cover carries one,
+ * and a cover's event always does: the translator reads the wire's omitted zero as 0, so a closed door arrives at the closed position rather than with none.
  */
 export interface EspHomeEvent {
 

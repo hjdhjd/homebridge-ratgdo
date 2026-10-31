@@ -220,8 +220,9 @@ function statusRowIndex(variant: RatgdoVariant): Map<EntityId, StatusRowId> {
 }
 
 /* Map a translated telemetry event to its display value for a given row. The switch is exhaustive over StatusRowId. The door reads current_operation first so a moving
- * door shows its transition, then falls back to position: a raw 0-1 cover position of >= 1 is Open, absent or <= 0 is Closed (protobuf omits a zero-valued position, so a
- * closed door legitimately arrives with none), and anything strictly between is a partial stop. The remaining rows are straight state translations.
+ * door shows its transition, then falls back to position: a raw 0-1 cover position of >= 1 is Open, <= 0 is Closed (the translation reads the wire's omitted zero as
+ * 0, so a closed door arrives at the closed position, and an absence the event's type still allows reads as Closed too), and anything strictly between is a partial
+ * stop. The remaining rows are straight state translations.
  */
 function mapRowValue(rowId: StatusRowId, event: EspHomeEvent): string {
 

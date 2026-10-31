@@ -869,10 +869,10 @@ export class RatgdoAccessory implements Disposable {
     const revertToDoor = (): void => this.scheduleUiRevert(() => {
 
       service.updateCharacteristic(this.hap.Characteristic.Brightness, this.status.doorPosition);
-      service.updateCharacteristic(this.hap.Characteristic.On, this.isDoorOpen());
+      service.updateCharacteristic(this.hap.Characteristic.On, this.isDimmerOn());
     });
 
-    service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.isDoorOpen()));
+    service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.isDimmerOn()));
 
     // The On characteristic only handles closing. Opening is driven by the Brightness onSet below, since HomeKit always sends a Brightness update alongside an On=true.
     service.getCharacteristic(this.hap.Characteristic.On).onSet(this.answering((value: CharacteristicValue) => {
@@ -911,7 +911,7 @@ export class RatgdoAccessory implements Disposable {
       }
     }));
 
-    service.updateCharacteristic(this.hap.Characteristic.On, this.isDoorOpen());
+    service.updateCharacteristic(this.hap.Characteristic.On, this.isDimmerOn());
     service.updateCharacteristic(this.hap.Characteristic.Brightness, this.status.doorPosition);
 
     return true;
@@ -1499,7 +1499,7 @@ export class RatgdoAccessory implements Disposable {
           this.status.doorPosition = event.position * 100;
 
           dimmerService?.updateCharacteristic(this.hap.Characteristic.Brightness, this.status.doorPosition);
-          dimmerService?.updateCharacteristic(this.hap.Characteristic.On, this.status.doorPosition > 0);
+          dimmerService?.updateCharacteristic(this.hap.Characteristic.On, this.isDimmerOn());
           this.log.debug("Door state: %s% open.", this.status.doorPosition.toFixed(0));
         }
 
@@ -1873,13 +1873,22 @@ export class RatgdoAccessory implements Disposable {
     return "unknown";
   }
 
-  /* Whether the door counts as open for the automation dimmer and switch: in any state but closed, which covers open, stopped, and an obstructed door. The
-   * tiles' reads, their writes at startup, the switch's writes as the door moves, and the tiles' reverts after a refused write answer by this one rule, so a tile
-   * is never put back to a state its own read would contradict.
+  /* Whether the door counts as open for the automation switch: in any state but closed, which covers open, stopped, and an obstructed door. The switch's read, its
+   * write at startup, its writes as the door moves, and its revert after a refused write answer by this one rule, so the switch is never put back to a state its own
+   * read would contradict.
    */
   private isDoorOpen(): boolean {
 
     return this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED;
+  }
+
+  /* Whether the automation dimmer reads on: whenever the door is not fully closed. The dimmer's Brightness is the door's position, so its On follows the position
+   * too, and every On this rule writes agrees with the Brightness written beside it, a closing or an obstructed door included. The dimmer's read, its write at
+   * startup, its writes as the door moves, and its revert after a refused write answer by this one rule.
+   */
+  private isDimmerOn(): boolean {
+
+    return this.status.doorPosition > 0;
   }
 
   // Whether the opener's wireless remotes are locked out, the one answer the lockout switch's read, its writes and its revert after a refused write all give.
@@ -1888,8 +1897,7 @@ export class RatgdoAccessory implements Disposable {
     return this.status.lock === this.hap.Characteristic.LockCurrentState.SECURED;
   }
 
-  // Utility function to return our bias for what the current door state should be. This backs the door-open rule the automation door position dimmer and switch
-  // answer by.
+  // Utility function to return our bias for what the current door state should be. This backs the door-open rule the automation switch answers by.
   private doorCurrentStateBias(state: CharacteristicValue): CharacteristicValue {
 
     // Our current door state reflects our opinion on what open or closed means in HomeKit terms. For the obvious states, this is easy. For some of the edge cases, it can
