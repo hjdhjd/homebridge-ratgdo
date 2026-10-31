@@ -2,19 +2,21 @@
  *
  * connection.test.ts: Unit tests for the connection layer - captureInitialState's fast / slow / timeout / shutdown paths, the error taxonomy both entry points
  * classify with, openManualConnection's identification of whatever answered at an address, the key rule and the identity checks every connection runs through,
- * applyDeviceInfo's identity refresh, and the isEncryptionError predicate.
+ * applyDeviceInfo's identity refresh, the isEncryptionError predicate, the identity comparison every later session is put to, and the describer that words a
+ * permanent cause once for every path that meets it.
  * The ESPHome client factory is injected as a fake (makeFakeOpenClient), and the state-capture budget (timeoutSeconds) is injected in fractional seconds (e.g. 0.02)
  * so each wait resolves in milliseconds of real time, driving every branch deterministically without a live device, fake timers, or a fake Homebridge harness.
  */
 import type { ConnectionOutcome, EncryptionKeyLookup, ManualConnectionOutcome, OpenConnectionOptions, OpenEspHomeClient,
   OpenManualConnectionOptions } from "./connection.ts";
-import { DeviceIdentityError, applyDeviceInfo, captureInitialState, isEncryptionError, openConnection, openManualConnection } from "./connection.ts";
+import { DeviceIdentityError, applyDeviceInfo, captureInitialState, describePermanentCause, identityRefusal, isEncryptionError, openConnection,
+  openManualConnection } from "./connection.ts";
 import type { DeviceInfo, EntityId, NoiseServerHello, TelemetryEvent } from "esphome-client";
 import { EncryptionKeyInvalidError, EncryptionKeyMissingError, EncryptionRequiredError, NegotiationFailedError, entityId } from "esphome-client";
 import { RATGDO_ENTITIES, idFor, ratgdoInitialStateEntityIds } from "./entities.ts";
 import { TestEspHomeClient, TestPermanentError, asEspHomeClient, makeCoverEvent, makeFakeOpenClient, makeLightEvent, makeTelemetry, makeTestDevice, openThroughHello,
   resolverOf } from "./testing.helpers.ts";
-import { capturingLog, logCount, loggedAt } from "homebridge-plugin-utils/testing";
+import { capturingLog, linesAt, logCount, loggedAt } from "homebridge-plugin-utils/testing";
 import { describe, test } from "node:test";
 import type { Nullable } from "homebridge-plugin-utils";
 import type { RatgdoEntityRef } from "./entities.ts";
@@ -135,11 +137,15 @@ describe("openConnection", () => {
   const coverId = entityId("cover", "door");
   const coverEntity = [{ objectId: "door", type: "cover" }];
 
+  // The device-info record of the device this suite's connections are for, so admission reads the MAC each connection is dialed for.
+  const deviceInfo = { macAddress: "AA:BB:CC:DD:EE:FF" };
+
   // A client whose snapshot already holds the required cover, so captureInitialState's fast path resolves.
-  const connectedClient = (): TestEspHomeClient => new TestEspHomeClient({ entities: coverEntity, snapshot: new Map([[ coverId, makeCoverEvent("door", 0) ]]) });
+  const connectedClient = (): TestEspHomeClient => new TestEspHomeClient({ deviceInfo, entities: coverEntity,
+    snapshot: new Map([[ coverId, makeCoverEvent("door", 0) ]]) });
 
   // A client that advertises the cover but whose snapshot never holds it, so the wait reaches the slow path (and times out or aborts).
-  const pendingClient = (): TestEspHomeClient => new TestEspHomeClient({ entities: coverEntity, snapshot: new Map() });
+  const pendingClient = (): TestEspHomeClient => new TestEspHomeClient({ deviceInfo, entities: coverEntity, snapshot: new Map() });
 
   /* Drive openConnection with the fixed host and wait-list this suite uses, varying only the injected factory and the optional shutdown signal / timeout per case.
    * Returns the capturing log alongside the result so each test asserts on both.
@@ -206,6 +212,18 @@ describe("openConnection", () => {
     assert.ok(!result.ok, "an encryption failure skips the discovery attempt");
     assert.equal(result.reason, "encryption-missing", "a device that requires but lacks a key carries the encryption-missing reason token");
     assert.ok(loggedAt(entries, "error", "API encryption key: key required"), "the user sees the encryption-key diagnostic naming the required key's fault");
+  });
+
+  test("logs the device's own words as the parameter of its diagnostic, never as part of the format, so the line carries them as the device wrote them", async () => {
+
+    const words = "The key is 100% wrong, and 50%% of a guess.";
+    const { entries } = await run(makeFakeOpenClient(new EncryptionKeyInvalidError(words)));
+
+    assert.deepEqual(entries.filter((entry) => entry.level === "error").map((entry) => [ entry.message, entry.params ]),
+      [[ "Encryption configuration error - check the device's API encryption key: %s", [words] ]],
+      "the device's words reach the log as the parameter of a complete sentence, so no logger ever reads a percent sign in them as a format token");
+    assert.deepEqual(linesAt(entries, "error"), ["Encryption configuration error - check the device's API encryption key: " + words],
+      "and the line carries the device's message exactly as the device wrote it, a single and a doubled percent sign included");
   });
 
   test("permanent error: returns null and logs the permanent-connection diagnostic", async () => {
@@ -565,6 +583,37 @@ describe("the key rule and the identity checks", () => {
     assert.equal(openClient.calls[0]?.psk, null, "the client is handed no resolver, so it tries plaintext first as it always has for a keyless device");
   });
 
+  test("a plaintext connection dialed for a MAC refuses a device whose device-info record names another, or none", async () => {
+
+    /* A keyless device's MAC is its own unauthenticated word, so this is no defense against a device that lies about who it is. It is the defense against another
+     * device answering at an address the opener has left, which a plaintext connection has no key to refuse.
+     */
+    const other = opener(OTHER_COLON);
+    const answeredOther = await discover(makeFakeOpenClient(other), keyStore({}).keyFor);
+
+    assert.ok(!answeredOther.result.ok && (answeredOther.result.reason === "identity-mismatch"), "a plaintext device naming another MAC is refused");
+    assert.equal(logCount(answeredOther.entries, "error", REFUSAL + OTHER + " answered, but this connection is for " + MAC + "."), 1,
+      "the refusal is logged once, naming the MAC that answered and the MAC expected");
+    assert.equal(other.disposeCount, 1, "and the client it opened is disposed, once");
+
+    const silent = await discover(makeFakeOpenClient(opener()), keyStore({}).keyFor);
+
+    assert.ok(!silent.result.ok && (silent.result.reason === "identity-mismatch"), "a plaintext device naming no MAC cannot be shown to be the opener, so it is refused");
+  });
+
+  test("an address connection keyed for the MAC its hello announced refuses a device whose device-info record names another", async () => {
+
+    const client = opener(OTHER_COLON);
+    const { entries, result } = await dialAddress(makeFakeOpenClient(openThroughHello({ client, hello: { macAddress: MAC_COLON } })),
+      keyStore({ [MAC]: "device-key" }).keyFor);
+
+    assert.ok(!result.ok, "the connection is refused");
+    assert.equal(result.reason, "identity-mismatch", "a key chosen for the hello's MAC is what the address connection is for, so a record naming another is refused");
+    assert.equal(logCount(entries, "error", REFUSAL + OTHER + " answered, but this connection is for " + MAC + "."), 1,
+      "the refusal names the MAC the device reported and the MAC the key was chosen for");
+    assert.equal(client.disposeCount, 1, "and the client it opened is disposed, once");
+  });
+
   test("an address connection keys for the MAC its hello announces, else the global key, and warns about firmware that announces none", async () => {
 
     /* The device's side of the handshake, played by hand: the resolver is handed the hello, what it answers is recorded, and the device then refuses that key. The
@@ -713,5 +762,71 @@ describe("isEncryptionError", () => {
     assert.equal(isEncryptionError(new Error("boom")), false, "a generic Error is not an encryption-configuration error");
     assert.equal(isEncryptionError(new TestPermanentError("the device refused permanently")), false,
       "a non-encryption PermanentError subclass is not an encryption-configuration error");
+  });
+});
+
+describe("identityRefusal", () => {
+
+  // A session whose device-info record names the given MAC, or carries no record at all.
+  const session = (macAddress?: string): ReturnType<typeof asEspHomeClient> => {
+
+    return asEspHomeClient(new TestEspHomeClient({ deviceInfo: (macAddress === undefined) ? null : { macAddress } }));
+  };
+
+  test("accepts a session whose device names the expected MAC in any spelling the MAC form folds", () => {
+
+    for(const macAddress of [ "AA:BB:CC:DD:EE:FF", "aa:bb:cc:dd:ee:ff", "AABBCCDDEEFF" ]) {
+
+      assert.equal(identityRefusal({ client: session(macAddress), expected: "AABBCCDDEEFF" }), null, macAddress + " names the expected device");
+    }
+  });
+
+  test("refuses a session whose device names another MAC, names none, or reports no record", () => {
+
+    const other = identityRefusal({ client: session("11:22:33:44:55:66"), expected: "AABBCCDDEEFF" });
+
+    assert.ok(other instanceof DeviceIdentityError, "another MAC is the identity refusal");
+    assert.equal(other.message, "112233445566 answered, but this connection is for AABBCCDDEEFF.",
+      "and the refusal names the reported and the expected MAC in the identity form");
+
+    for(const client of [ session(""), session() ]) {
+
+      assert.ok(identityRefusal({ client, expected: "AABBCCDDEEFF" }) instanceof DeviceIdentityError,
+        "a device that names no MAC cannot be shown to be the one expected, so it is refused");
+    }
+  });
+});
+
+describe("describePermanentCause", () => {
+
+  test("words and classifies each refusal a user can act on with the sentence a first open and a give-up share, the device's own words its parameter", () => {
+
+    const vectors: { cause: Error; diagnostic: [ string, string ]; reason: string }[] = [
+
+      { cause: new DeviceIdentityError({ expected: "AABBCCDDEEFF", reported: "112233445566" }),
+        diagnostic: [ "The wrong device answered, so the connection is refused: %s", "112233445566 answered, but this connection is for AABBCCDDEEFF." ],
+        reason: "identity-mismatch" },
+      { cause: new EncryptionKeyInvalidError("bad key"), diagnostic: [ "Encryption configuration error - check the device's API encryption key: %s", "bad key" ],
+        reason: "encryption-invalid" },
+      { cause: new EncryptionKeyMissingError("missing key"), diagnostic: [ "Encryption configuration error - check the device's API encryption key: %s", "missing key" ],
+        reason: "encryption-missing" },
+      { cause: new EncryptionRequiredError("key required"), diagnostic: [ "Encryption configuration error - check the device's API encryption key: %s", "key required" ],
+        reason: "encryption-missing" },
+      { cause: new NegotiationFailedError("api major 5 is outside the supported range", "API_MAJOR_OUT_OF_RANGE"),
+        diagnostic: [ "The device's ESPHome API version is not one this plugin supports: %s", "api major 5 is outside the supported range" ], reason: "unsupported" }
+    ];
+
+    for(const { cause, diagnostic, reason } of vectors) {
+
+      assert.deepEqual(describePermanentCause(cause), { diagnostic, reason }, cause.name + " is worded and classified once");
+    }
+  });
+
+  test("answers null for a cause no user can act on", () => {
+
+    for(const cause of [ new TestPermanentError("the device refused permanently"), new Error("connection refused"), undefined ]) {
+
+      assert.equal(describePermanentCause(cause), null, "each caller words a cause like this itself");
+    }
   });
 });

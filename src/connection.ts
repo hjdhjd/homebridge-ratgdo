@@ -40,9 +40,9 @@ export type OpenEspHomeClient = typeof openEspHomeClient;
  */
 export type EncryptionKeyLookup = (mac?: string) => Nullable<string | undefined>;
 
-/* The refusal of a device that is not the one its connection is for: a server hello announcing another MAC, or an encrypted connection whose device-info record names
- * a MAC other than the one its key was chosen for. It is a PermanentError, so esphome-client neither retries the construction nor continues a reconnect loop past it - a
- * device answering as another MAC does not become the right device on the next attempt - and the connect core classifies it once, as `identity-mismatch`.
+/* The refusal of a device that is not the one its connection is for: a server hello announcing another MAC, or a device-info record naming a MAC other than the one
+ * the connection is for, or naming none. It is a PermanentError, so esphome-client neither retries the construction nor continues a reconnect loop past it - a device
+ * answering as another MAC does not become the right device on the next attempt - and the connect core classifies it once, as `identity-mismatch`.
  *
  * @param identity.expected - The MAC the connection is for, in the plugin's identity form.
  * @param identity.reported - The MAC the device announced or reported, in the same form, or an empty string when it named none.
@@ -98,6 +98,18 @@ export interface ManualConnectionResult extends ConnectionResult {
 
 // `openManualConnection`'s outcome, the same discriminated union `ConnectionOutcome` is over the wider reason set and the identity-bearing success arm.
 export type ManualConnectionOutcome = ({ ok: true } & ManualConnectionResult) | { ok: false; reason: ManualConnectionFailureReason };
+
+/* What `describePermanentCause` answers for a refusal a user can act on: the one sentence that tells the user about it, and the reason a connect classifies it as.
+ *
+ * @property diagnostic - The arguments of the line a caller logs at error, spread into the call: a complete sentence as the format, and the device's own words about
+ *                        the fault as its parameter. The device's words are never the format, so no `%` in them is ever read as a format token.
+ * @property reason     - The classified reason a connect that ended on this cause reports.
+ */
+export interface PermanentCauseDescription {
+
+  diagnostic: readonly [format: string, message: string];
+  reason: Extract<ConnectionFailureReason, "encryption-invalid" | "encryption-missing" | "identity-mismatch" | "unsupported">;
+}
 
 /* Options for `captureInitialState`. The caller supplies the connected client, the wait-list of entities that must appear in the cache before construction proceeds,
  * and the one signal the wait honors. The function owns no budget, so a caller that wants the wait bounded composes its deadline into that signal, and a test bounds
@@ -233,8 +245,9 @@ export async function openManualConnection(options: OpenManualConnectionOptions)
  * The catch reads the signals this core itself holds, the shutdown signal first and then its own capture deadline. Shutdown is checked first because it is not a
  * failure - the platform is going away and any in-flight connect should tear down silently. A capture timeout is recognized by identity, the deadline having fired
  * and the caught value being that deadline's own reason, so a TimeoutError from any other source - the library's connect timeout among them - falls to the generic
- * branch as the library's failure. The identity refusal, encryption, and PermanentError each get a dedicated branch so the user sees a focused diagnostic instead of a
- * wrapped stack trace. Everything else falls through to the generic else with the unfiltered util.inspect output.
+ * branch as the library's failure. The refusals a user can act on - the identity refusal, a key fault, and an API version the client cannot speak - share the one
+ * branch the describer words, ahead of the branch every other PermanentError takes, so the user sees a focused diagnostic instead of a wrapped stack trace. Everything
+ * else falls through to the generic else with the unfiltered util.inspect output.
  *
  * Every failure - a thrown one and a refused one alike - leaves through the single tail below rather than returning from where it was decided, which is what makes
  * the dispose one statement instead of one per branch.
@@ -248,12 +261,15 @@ export async function openManualConnection(options: OpenManualConnectionOptions)
  * admission and the firmware warning read. A connection dialed for a MAC whose lookup answers no key gets no resolver at all and opens plaintext first, as a keyless
  * device always has: a resolver would make the client try the encrypted handshake first on every connect and reconnect, and it could only answer no key.
  *
- * Identity is what a connection is FOR: the MAC it was dialed for, or once admitted the MAC its device reported. It feeds only the refusals. A hello announcing another
- * MAC is refused inside the resolver, before the lookup is read, so no key is ever offered to it; and once the open resolves, a connection whose key was chosen for a
- * MAC admits its device only when the device-info record names that same MAC, an absent one included as a mismatch. Admission compares nothing on a connection keyed
- * for no MAC or on a plaintext one, whose device's MAC is its own unauthenticated word. A connection that is for no MAC and passes admission is for the MAC its device
- * reported from then on, so a reconnect whose hello announces another MAC is refused - while the key it offers stays the one its first contact chose. Every refusal
- * is the same error, so the catch classifies them once.
+ * Identity is what a connection is FOR, and one rule answers it: the MAC the connection was dialed for, else for an address dial the MAC its key was chosen for, else
+ * - once admitted - the MAC its device reported. It feeds only the refusals. A hello announcing another MAC is refused inside the resolver, before the lookup is read,
+ * so no key is ever offered to it; and once the open resolves, admission compares the device-info record's MAC with the MAC the connection is for whenever one is
+ * known, an absent one included as a mismatch, plaintext connections among them. On a plaintext connection that MAC is the device's own unauthenticated word, so there
+ * the rule guards against another device answering at an address the opener has left, not against a device that lies about who it is. Admission compares nothing
+ * only on an address dial keyed for no MAC or opened plaintext, which is for the MAC its device reported from then on, so a reconnect whose hello announces another
+ * MAC is refused - while the key it offers stays the one its first contact chose. The platform and the settings page put every later session to the same comparison
+ * through `identityRefusal`, so a device that takes the opener's address while the client is reconnecting is refused as a first contact would refuse it. Every
+ * refusal is the same error, so the catch classifies them once.
  *
  * @param options      - The connect options minus the wait-list.
  * @param resolveWaitList - The caller's step, run on the connected client before anything is captured.
@@ -317,12 +333,15 @@ resolveWaitList: (client: EspHomeClient) => WaitListOutcome<TIdentity, TRefusal>
 
     // Admission, ahead of the caller's step so a refused device is never classified or captured. It throws rather than returning, so its refusal leaves through
     // the catch below exactly as the resolver's does.
-    const reported = normalizeMac(client.deviceInfo()?.macAddress ?? "");
+    const expected = belongsTo ?? ((typeof keyedFor === "string") ? keyedFor : undefined);
+    const refusal = (expected === undefined) ? null : identityRefusal({ client, expected });
 
-    if((typeof keyedFor === "string") && (reported !== keyedFor)) {
+    if(refusal) {
 
-      throw new DeviceIdentityError({ expected: keyedFor, reported });
+      throw refusal;
     }
+
+    const reported = reportedMac(client);
 
     belongsTo ??= (reported.length > 0) ? reported : undefined;
 
@@ -341,39 +360,29 @@ resolveWaitList: (client: EspHomeClient) => WaitListOutcome<TIdentity, TRefusal>
     reason = waitList.reason;
   } catch(error) {
 
+    // The refusals a user can act on - the identity refusal from the resolver or from admission alike, a key fault, and an API version this plugin's client cannot
+    // speak - are worded and classified by the one describer the platform's lifecycle listener reads at a reconnect's give-up too.
+    const permanent = describePermanentCause(error);
+
     // Shutdown is not a failure - the platform is tearing down and this in-flight connect is no longer interesting. Silent classification so the log is not filled
     // with spurious "Failed to establish connection" lines on every device that happened to be mid-handshake when the user stopped Homebridge.
     if(shutdownSignal.aborted) {
 
       reason = "shutdown";
-    } else if(error instanceof DeviceIdentityError) {
+    } else if(permanent) {
 
-      // The identity refusal, from the resolver or from admission alike. It sits ahead of the PermanentError branch below because DeviceIdentityError extends it and
-      // the first matching branch wins. The message names both MACs, which is what the user needs to find the stale or reassigned address behind it.
-      log.error("The wrong device answered, so the connection is refused: %s", error.message);
-      reason = "identity-mismatch";
-    } else if(isEncryptionError(error)) {
-
-      log.error("Encryption configuration error - check the device's API encryption key: %s", error.message);
+      // Every cause the describer words is a PermanentError subclass, so this branch sits ahead of the PermanentError one below, where the first matching branch
+      // wins and the two in the other order would leave this one unreachable.
+      log.error(...permanent.diagnostic);
+      reason = permanent.reason;
 
       // A key chosen for no MAC means the device's firmware announced none, and that limit is worth naming beside the key fault: no key stored for this device can
       // ever be offered to it. A connection that works on the global key never reaches here, so the warning never repeats for a working device.
-      if(keyedFor === null) {
+      if(isEncryptionError(error) && (keyedFor === null)) {
 
         log.warn("This device can use only the global encryption key, because its firmware does not announce its MAC address. " +
           "Update it to ESPHome 2025.4.0 or newer to give it a key of its own.");
       }
-
-      // Split the encryption fault so a caller acts on which kind it is without re-inspecting the error: a mismatched key (EncryptionKeyInvalidError) reads as
-      // "encryption-invalid", while an absent-but-required key (EncryptionKeyMissingError or EncryptionRequiredError) reads as "encryption-missing".
-      reason = (error instanceof EncryptionKeyInvalidError) ? "encryption-invalid" : "encryption-missing";
-    } else if(error instanceof NegotiationFailedError) {
-
-      // A version mismatch is its own verdict rather than a generic permanent failure: the device and this plugin's client cannot agree on an API version, so the user
-      // acts by updating one side or the other. This branch sits ahead of the PermanentError one below because NegotiationFailedError extends it and the first matching
-      // branch wins, so the two in the other order would leave this one unreachable.
-      log.error("The device's ESPHome API version is not one this plugin supports: %s", error.message);
-      reason = "unsupported";
     } else if(error instanceof PermanentError) {
 
       log.error("Permanent connection error: %s", util.inspect(error, { depth: null }));
@@ -487,10 +496,70 @@ export async function captureInitialState({ client, expected, signal }: CaptureI
   return cache;
 }
 
+// The MAC a session's device-info record reports, in the plugin's identity form, or an empty string when the session has no record or the record names no MAC.
+function reportedMac(client: EspHomeClient): string {
+
+  return normalizeMac(client.deviceInfo()?.macAddress ?? "");
+}
+
+/* The one identity comparison: whether a session's device is the device its connection is for. The device-info record's MAC, in the plugin's identity form, must be
+ * the expected MAC, and a record naming no MAC is a mismatch, since a device that names none cannot be shown to be the one expected. The connect core's admission and
+ * every later session's check - the platform's lifecycle listener and the settings page's feed alike - ask it here, so a device is refused by one rule on its first
+ * contact and on every reconnect.
+ *
+ * @param options.client   - The connected client whose session is checked.
+ * @param options.expected - The MAC the connection is for, in the plugin's identity form.
+ *
+ * @returns The refusal to raise or report, or null when the session's device is the one expected.
+ */
+export function identityRefusal({ client, expected }: { client: EspHomeClient; expected: string }): Nullable<DeviceIdentityError> {
+
+  const reported = reportedMac(client);
+
+  return (reported === expected) ? null : new DeviceIdentityError({ expected, reported });
+}
+
+/* Word a permanent cause a user can act on, and classify it: a device other than the one the connection is for, a key the device refused or required, and an API
+ * version this plugin's client cannot speak. The connect core meets these causes on a first open and the platform's lifecycle listener meets them at a reconnect's
+ * give-up, and each logs what this answers, so a user reads one sentence for one fault whichever path met it. Any other cause answers null, because it is no refusal a
+ * user can act on and each caller has its own words for it.
+ *
+ * @param cause - The error a connect or a reconnect ended on.
+ *
+ * @returns The diagnostic and the classified reason, or null for a cause this does not word.
+ */
+export function describePermanentCause(cause: DeviceIdentityError): PermanentCauseDescription;
+export function describePermanentCause(cause: unknown): Nullable<PermanentCauseDescription>;
+export function describePermanentCause(cause: unknown): Nullable<PermanentCauseDescription> {
+
+  // The message names the MAC that answered and the MAC expected, which is what the user needs to find the stale or reassigned address behind the refusal.
+  if(cause instanceof DeviceIdentityError) {
+
+    return { diagnostic: [ "The wrong device answered, so the connection is refused: %s", cause.message ], reason: "identity-mismatch" };
+  }
+
+  // A mismatched key reads as `encryption-invalid`, and an absent-but-required one as `encryption-missing`, so a caller acts on which kind it is without
+  // re-inspecting the error.
+  if(isEncryptionError(cause)) {
+
+    return { diagnostic: [ "Encryption configuration error - check the device's API encryption key: %s", cause.message ],
+      reason: (cause instanceof EncryptionKeyInvalidError) ? "encryption-invalid" : "encryption-missing" };
+  }
+
+  // A version mismatch is its own verdict rather than a generic permanent failure: the device and this plugin's client cannot agree on an API version, so the user
+  // acts by updating one side or the other.
+  if(cause instanceof NegotiationFailedError) {
+
+    return { diagnostic: [ "The device's ESPHome API version is not one this plugin supports: %s", cause.message ], reason: "unsupported" };
+  }
+
+  return null;
+}
+
 /* Type predicate for the "configuration mistake" subset of the typed-error hierarchy. esphome-client exposes EncryptionKeyMissingError, EncryptionKeyInvalidError, and
- * EncryptionRequiredError as PermanentError subclasses; this helper enumerates them once so the catch handler in openConnection and the lifecycle disconnect
- * handler in platform.ts share one decision about what counts as an encryption-config error. If esphome-client adds a fourth encryption-related PermanentError subclass,
- * both call sites pick up the new branch by extending this predicate.
+ * EncryptionRequiredError as PermanentError subclasses; this helper enumerates them once so the cause describer and the connect core's firmware warning share one
+ * decision about what counts as an encryption-config error. If esphome-client adds another encryption-related PermanentError subclass, every reader picks up the
+ * new branch by extending this predicate.
  */
 export function isEncryptionError(error: unknown): error is EncryptionKeyMissingError | EncryptionKeyInvalidError | EncryptionRequiredError {
 

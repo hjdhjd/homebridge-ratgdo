@@ -389,6 +389,49 @@ export function openThroughHello({ client, hello }: { client: TestEspHomeClient;
   };
 }
 
+// One answer a scripted dial gives: a client the dial resolves with, an error it rejects with, or a promise the row settles itself when it chooses.
+export type ScriptedAnswer = Error | Promise<TestEspHomeClient> | TestEspHomeClient;
+
+/* Build a client factory that answers each host from that host's own script, one answer per dial in order, and parks every dial past the end of its host's script
+ * until the dial's own signal aborts. The bound is what lets a loop's row read a dial count: a loop that dials without pausing stops once its script runs out rather
+ * than spinning on answers that settle at once and starving the TestClock, so it fails the row's count instead of running the suite out to its timeout. A parked
+ * dial ends as a real one does at shutdown, rejecting with the signal's reason, and a dial made under a signal that has already aborted rejects at once, since no
+ * abort event is coming for it to wait on.
+ *
+ * @param scripts - Each host's answers, in the order its dials receive them. A host with no script parks its first dial.
+ *
+ * @returns The factory, recording every dial as makeFakeOpenClient does.
+ */
+export function makeScriptedOpenClient(scripts: Readonly<Partial<Record<string, readonly ScriptedAnswer[]>>>): ReturnType<typeof makeFakeOpenClient> {
+
+  const answered = new Map<string, number>();
+
+  return makeFakeOpenClient(async (options: RecordedOpenOptions): Promise<TestEspHomeClient> => {
+
+    const index = answered.get(options.host) ?? 0;
+
+    answered.set(options.host, index + 1);
+
+    const answer = scripts[options.host]?.[index];
+
+    if(answer === undefined) {
+
+      const { promise, reject } = Promise.withResolvers<TestEspHomeClient>();
+
+      onAbort(options.signal, () => reject(options.signal.reason));
+
+      return promise;
+    }
+
+    if(answer instanceof Error) {
+
+      throw answer;
+    }
+
+    return answer;
+  });
+}
+
 /* Build a single telemetry event in the wire-faithful shape the esphome-client snapshot carries, mirroring esphome-client's own test factory: a { entity, key, type,
  * ...fields } literal cast to TelemetryEvent at this construction boundary. The cast is the same one esphome-client's own latest-state-cache tests use - the wire shape
  * is a schema-derived union with all-optional value fields, so the boundary cast is the blessed way to synthesize one.

@@ -1,16 +1,17 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
  * manual.test.ts: The manual-address concern net - the canonical address list, the retryable-failure classification, the governance rule that settles two addresses
- * reaching one device, and the connect loop itself. The loop is pure over its ports, so every rule it follows is driven here directly: the dial, the readiness test,
- * and the log are all supplied by the test, and the pause runs on a TestClock so the pause between attempts is asserted in virtual time rather than waited out.
+ * reaching one device, and the slow loop with the listed-address connect built on it. The loop is pure over its ports, so every rule it follows is driven here
+ * directly: the dial, the readiness test, and the log are all supplied by the test, and the pause runs on a TestClock so the pause between attempts is asserted in
+ * virtual time rather than waited out.
  */
-import { TestClock, capturingLog, expectAt, loggedAt, settle } from "homebridge-plugin-utils/testing";
-import { canonicalManualAddress, governingAddress, isRetryableFailure, isZonedAddress, manualAddressList, runManualAddress } from "./manual.ts";
+import { TestClock, capturingLog, expectAt, logCount, loggedAt, settle } from "homebridge-plugin-utils/testing";
+import { canonicalManualAddress, governingAddress, isRetryableFailure, isZonedAddress, manualAddressList, runManualAddress, runRetryLoop } from "./manual.ts";
 import { describe, test } from "node:test";
 import type { CapturingLog } from "homebridge-plugin-utils/testing";
+import type { DialOutcome } from "./manual.ts";
 import type { HomebridgePluginLogging } from "homebridge-plugin-utils";
 import type { ManualConnectionFailureReason } from "./connection.ts";
-import type { ManualDialOutcome } from "./manual.ts";
 import { WakeableWait } from "homebridge-plugin-utils";
 import assert from "node:assert/strict";
 
@@ -132,7 +133,7 @@ describe("isRetryableFailure", () => {
     test(reason + " is " + (retryable ? "retried" : "final"), () => {
 
       assert.equal(isRetryableFailure(reason), retryable, retryable ? "another attempt could succeed without the user doing anything" :
-        "nothing changes here until a person acts, so retrying would dial forever");
+        "nothing changes here until a person acts, so a warm of the settings page does not dial it again");
     });
   }
 
@@ -188,7 +189,7 @@ describe("runManualAddress", () => {
    * a script of outcomes. Every attempt writes the same error line through the log it was handed, and the level each attempt's line reaches the capturing log at is
    * how the demotion is observed.
    */
-  const harness = (script: ManualDialOutcome[], options: { served?: () => boolean } = {}): { clock: TestClock; dialed: string[]; lifetime: AbortController;
+  const harness = (script: DialOutcome[], options: { served?: () => boolean } = {}): { clock: TestClock; dialed: string[]; lifetime: AbortController;
     log: CapturingLog; loop: Promise<void>; pause: WakeableWait; } => {
 
     const clock = new TestClock();
@@ -196,7 +197,7 @@ describe("runManualAddress", () => {
     const log = capturingLog();
     const pause = new WakeableWait({ clock, signal: lifetime.signal });
     const dialed: string[] = [];
-    const dial = async (attemptLog: Parameters<Parameters<typeof runManualAddress>[0]["dial"]>[0]): Promise<ManualDialOutcome> => {
+    const dial = async (attemptLog: Parameters<Parameters<typeof runManualAddress>[0]["dial"]>[0]): Promise<DialOutcome> => {
 
       // Every attempt says the same thing at error level. What differs between attempts is only whether the loop let that line through, which is what is asserted.
       attemptLog.error("Failed to establish connection: %s", "ECONNREFUSED");
@@ -235,32 +236,48 @@ describe("runManualAddress", () => {
     assert.equal(rig.clock.requested.length, 0, "and no pause was ever registered, so the loop ended rather than waiting to end");
   });
 
-  /* Every outcome that ends an address's loop without a retry, and what the user is told about each. The two key failures earn a line naming where the key is
-   * entered, because that is the one failure a user can fix and the one place they can fix it; the others have already said everything there is to say.
+  // The line a key failure earns, naming where a manually addressed device's key is entered.
+  const KEY_HINT = "garage.local: the device refused the encryption key. Enter this device's key through Add Device in the plugin's settings.";
+
+  /* Every refusal a person has to fix, retried on the slow interval rather than ending the address's loop: a key corrected on the device, a firmware update, or an
+   * address another device gives back is picked up by a later attempt rather than by a restart, which is the family's rule for a refused sign-in. The key failures
+   * earn a line naming where the key is entered, because that is the one place a user can fix it from the settings page, and it is quieted with the failure it
+   * explains, so a refusal that repeats every interval gives that advice once.
    */
-  const finalReasons: { guidance: boolean; reason: ManualConnectionFailureReason }[] = [
+  const refusals: { guidance: boolean; reason: ManualConnectionFailureReason }[] = [
 
     { guidance: true, reason: "encryption-invalid" },
     { guidance: true, reason: "encryption-missing" },
     { guidance: false, reason: "identity-mismatch" },
-    { guidance: false, reason: "shutdown" },
     { guidance: false, reason: "unrecognized" },
     { guidance: false, reason: "unsupported" }
   ];
 
-  for(const { guidance, reason } of finalReasons) {
+  for(const { guidance, reason } of refusals) {
 
-    test(reason + " ends the loop after one attempt" + (guidance ? ", naming where the key is entered" : ""), async () => {
+    test(reason + " is retried after the retry interval" + (guidance ? ", naming where the key is entered once" : ""), async () => {
 
-      const rig = harness([{ ok: false, reason }]);
+      const rig = harness([ { ok: false, reason }, { ok: false, reason }, { ok: true } ]);
+
+      await settle();
+
+      assert.equal(rig.dialed.length, 1, "the first attempt has run");
+      assert.deepEqual(rig.clock.requested, [300000], "and the refusal pauses for the retry interval rather than ending the loop");
+      assert.equal(logCount(rig.log.entries, "error", KEY_HINT), guidance ? 1 : 0,
+        guidance ? "a key failure tells the user where a manually addressed device's key is entered" : "and no other failure reaches for that advice");
+
+      rig.clock.advance(300000);
+      await settle();
+
+      assert.equal(rig.dialed.length, 2, "crossing the interval dials the refused address again");
+      assert.equal(logCount(rig.log.entries, "error", KEY_HINT), guidance ? 1 : 0, "the same refusal repeating repeats no advice at error");
+      assert.equal(logCount(rig.log.entries, "debug", KEY_HINT), guidance ? 1 : 0, "the repeat's advice is quieted to debug with the failure it explains");
+
+      rig.clock.advance(300000);
 
       await rig.loop;
 
-      assert.equal(rig.dialed.length, 1, "nothing here changes without the user acting, so a second attempt would dial forever");
-      assert.equal(rig.clock.requested.length, 0, "and no retry was scheduled");
-      assert.equal(loggedAt(rig.log.entries, "error",
-        "garage.local: the device refused the encryption key. Enter this device's key through Add Device in the plugin's settings."), guidance,
-      guidance ? "a key failure tells the user where a manually addressed device's key is entered" : "and no other failure reaches for that advice");
+      assert.equal(rig.dialed.length, 3, "and an attempt that lands once the refusal clears ends the loop");
     });
   }
 
@@ -285,9 +302,9 @@ describe("runManualAddress", () => {
     /* The script is timeout, timeout, encryption-invalid: the first timeout is news and reaches the user, the second is the same news and goes to debug, and the
      * encryption failure that follows is NEW news and must reach the user at error even though it arrived on the heels of a quieted run. An implementation that
      * decided the demotion from the previous attempt's reason - the only way to decide it without holding the line - demotes exactly that third report, which is the
-     * one that matters.
+     * one that matters. The attempt after it lands, which is what ends the loop.
      */
-    const rig = harness([ { ok: false, reason: "timeout" }, { ok: false, reason: "timeout" }, { ok: false, reason: "encryption-invalid" } ]);
+    const rig = harness([ { ok: false, reason: "timeout" }, { ok: false, reason: "timeout" }, { ok: false, reason: "encryption-invalid" }, { ok: true } ]);
 
     await settle();
 
@@ -300,11 +317,15 @@ describe("runManualAddress", () => {
     assert.equal(diagnostics(rig.log, "debug"), 1, "it is quieted to debug rather than dropped, so a support request can still find it");
 
     rig.clock.advance(300000);
+    await settle();
+
+    assert.equal(diagnostics(rig.log, "error"), 2, "a changed reason ends the quieting, so a new fault following a quieted run is reported in full");
+
+    rig.clock.advance(300000);
 
     await rig.loop;
 
-    assert.equal(diagnostics(rig.log, "error"), 2, "a changed reason ends the quieting, so a new fault following a quieted run is reported in full");
-    assert.equal(rig.dialed.length, 3, "and the loop ended on that final reason rather than pausing again");
+    assert.equal(rig.dialed.length, 4, "and the loop paused after that refusal too, ending only on the attempt that landed");
   });
 
   test("a line the kept connection writes after its attempt has ended reaches the log at its own level", async () => {
@@ -317,7 +338,7 @@ describe("runManualAddress", () => {
     const pause = new WakeableWait({ clock, signal: lifetime.signal });
     const kept: HomebridgePluginLogging[] = [];
 
-    await runManualAddress({ address: ADDRESS, dial: async (attemptLog): Promise<ManualDialOutcome> => {
+    await runManualAddress({ address: ADDRESS, dial: async (attemptLog): Promise<DialOutcome> => {
 
       kept.push(attemptLog);
 
@@ -375,7 +396,7 @@ describe("runManualAddress", () => {
     const pause = new WakeableWait({ clock, signal: lifetime.signal });
     let dials = 0;
 
-    await runManualAddress({ address: ADDRESS, dial: async (): Promise<ManualDialOutcome> => {
+    await runManualAddress({ address: ADDRESS, dial: async (): Promise<DialOutcome> => {
 
       dials++;
       lifetime.abort(new Error("shutdown"));
@@ -386,5 +407,62 @@ describe("runManualAddress", () => {
     assert.equal(dials, 1, "the loop ends on a shutdown rather than pausing to try again");
     assert.equal(clock.requested.length, 0, "and registers no pause on the way out");
     assert.equal(log.entries.filter((entry) => entry.level === "error").length, 0, "shutdown says nothing, because the platform is going away on purpose");
+  });
+});
+
+describe("runRetryLoop", () => {
+
+  /* A loop that pauses before its first attempt, as a redial does, over a dial answering from a script and a readiness test the row controls. The pause is the one
+   * the row wakes, on a TestClock, so the wait before the first attempt is asserted in virtual time.
+   */
+  const pausingFirst = (script: DialOutcome[], served: () => boolean = (): boolean => false): { clock: TestClock; dialed: () => number; loop: Promise<void>;
+    pause: WakeableWait; } => {
+
+    const clock = new TestClock();
+    const pause = new WakeableWait({ clock, signal: new AbortController().signal });
+    let dials = 0;
+    const loop = runRetryLoop({ dial: async (): Promise<DialOutcome> => script[dials++] ?? { ok: false, reason: "timeout" }, isServed: served, log: capturingLog(),
+      pause, pauseFirst: true, retrySeconds: RETRY_SECONDS });
+
+    return { clock, dialed: (): number => dials, loop, pause };
+  };
+
+  test("a loop that pauses first dials only once the retry interval has passed", async () => {
+
+    const rig = pausingFirst([{ ok: true }]);
+
+    await settle();
+
+    assert.equal(rig.dialed(), 0, "nothing is dialed before the first pause ends, so the release that started the loop is not answered by an immediate repeat");
+    assert.deepEqual(rig.clock.requested, [300000], "the first pause asks for the retry interval");
+
+    rig.clock.advance(300000);
+
+    await rig.loop;
+
+    assert.equal(rig.dialed(), 1, "crossing the interval produces the first attempt, and an attempt that lands ends the loop");
+  });
+
+  test("a wake during the first pause dials at once, and a loop something served meanwhile ends without dialing", async () => {
+
+    const woken = pausingFirst([{ ok: true }]);
+
+    await settle();
+    woken.pause.wake("advertised");
+
+    await woken.loop;
+
+    assert.equal(woken.dialed(), 1, "a wake ends the first pause early, so the opener speaking for itself is dialed at once");
+
+    let served = false;
+    const standing = pausingFirst([{ ok: true }], (): boolean => served);
+
+    await settle();
+    served = true;
+    standing.pause.wake("released");
+
+    await standing.loop;
+
+    assert.equal(standing.dialed(), 0, "the readiness test is read after the first pause too, so an opener another path connected is not dialed again");
   });
 });

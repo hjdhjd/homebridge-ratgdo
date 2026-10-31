@@ -5,18 +5,19 @@
 import type { API, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
 import { APIEvent, AccessoryPersistence, CoalescingTask, FeatureOptions, HbpuAbortError, MQTT_AVAILABILITY_OFFLINE, Perms, WakeableWait, createMqttClient,
   debugGatedLog, discoverServices, formatErrorMessage, isAdvertisedAt, mdnsBrowserFactory, mqttConnectionSettings, mqttTopic, notResponding, prefixedLog,
-  sanitizeName, superviseLoop, systemClock } from "homebridge-plugin-utils";
-import type { Clock, HomebridgePluginLogging, MdnsBrowserFactory, MdnsDiscovery, MdnsDiscoveryEvent, MqttClient, Nullable } from "homebridge-plugin-utils";
-import { DeviceIdentityError, applyDeviceInfo, isEncryptionError, openConnection, openManualConnection } from "./connection.ts";
-import type { EncryptionKeyLookup, OpenEspHomeClient } from "./connection.ts";
+  repeatDemotedLog, sanitizeName, superviseLoop, systemClock } from "homebridge-plugin-utils";
+import type { Clock, HomebridgePluginLogging, MdnsBrowserFactory, MdnsDiscovery, MdnsDiscoveryEvent, MqttClient, Nullable,
+  RepeatDemotedLog } from "homebridge-plugin-utils";
+import type { ConnectionFailureReason, EncryptionKeyLookup, ManualConnectionFailureReason, OpenEspHomeClient, PermanentCauseDescription } from "./connection.ts";
 import type { EntityId, EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
-import { LogLevel, openEspHomeClient } from "esphome-client";
-import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_MANUAL_RETRY_INTERVAL, RATGDO_MDNS_SERVICE_TYPE } from "./settings.ts";
+import { LogLevel, PermanentError, openEspHomeClient } from "esphome-client";
+import { PLATFORM_NAME, PLUGIN_NAME, RATGDO_MDNS_SERVICE_TYPE, RATGDO_RETRY_INTERVAL } from "./settings.ts";
+import { applyDeviceInfo, describePermanentCause, identityRefusal, openConnection, openManualConnection } from "./connection.ts";
 import { featureOptionCategories, featureOptions, normalizeConfig } from "./options.ts";
-import { governingAddress, isZonedAddress, manualAddressList, runManualAddress } from "./manual.ts";
+import { governingAddress, isZonedAddress, manualAddressList, runManualAddress, runRetryLoop } from "./manual.ts";
 import { normalizeMac, parseRatgdoService } from "./discovery.ts";
+import type { DialOutcome } from "./manual.ts";
 import type { DiscoveredRatgdo } from "./discovery.ts";
-import type { ManualDialOutcome } from "./manual.ts";
 import { RatgdoAccessory } from "./device.ts";
 import type { RatgdoDevice } from "./types.ts";
 import type { RatgdoResolvedConfig } from "./options.ts";
@@ -55,6 +56,18 @@ interface AdmitConnectionOptions {
   device: RatgdoDevice;
   discovered: DiscoveredRatgdo;
   initialState: ReadonlyMap<EntityId, TelemetryEvent>;
+}
+
+/* A released opener's redial: the slow loop that is the opener's only dialer while it holds no connection record.
+ *
+ * @property advertised - Where the opener last advertised itself, written by every discovery event and pass that names it and read by each dial of an opener no
+ *                        listed address governs, so a dial always reaches the latest address rather than the one a burst of wakes began with.
+ * @property pause      - The wakeable pause between attempts, ended early by the opener's own discovery event and by a second release.
+ */
+interface Redial {
+
+  advertised: string;
+  readonly pause: WakeableWait;
 }
 
 /* The platform's injectable defaults: the boundaries a suite substitutes to drive the real lifecycle with no network and no real time. Homebridge constructs the
@@ -116,6 +129,8 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   private readonly openClient: OpenEspHomeClient;
   // The one path a change to the accessory cache takes: saves are gathered into the library's save window, and a removal drops any save still waiting for it.
   private readonly persistence: AccessoryPersistence;
+  // The redial each released opener runs, keyed by MAC, at most one per opener: a second release wakes the redial already running rather than starting another.
+  private readonly redials: Map<string, Redial>;
   // The MQTT client's lifetime, and the platform's last word at shutdown: it aborts only once the client's graceful end has stated every opener's final words, so the
   // client tears itself down through its signal rather than through imperative cleanup.
   private readonly shutdownController: AbortController;
@@ -165,6 +180,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.mqtt = null;
     this.openClient = openClient;
     this.persistence = new AccessoryPersistence({ api, clock: this.clock, platformName: PLATFORM_NAME, pluginIdentifier: PLUGIN_NAME });
+    this.redials = new Map();
     this.shutdownController = new AbortController();
     this.shutdownRun = null;
     this.stopController = new AbortController();
@@ -392,18 +408,18 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
    * @param address - The listed address this loop keeps connected.
    * @param pause   - The wakeable pause this loop waits on between attempts.
    *
-   * @returns The loop, running until the address is served, gives up, or the platform shuts down.
+   * @returns The loop, running until the address is served or the platform shuts down.
    */
   private runManualAddressLoop(address: string, pause: WakeableWait): Promise<void> {
 
     return runManualAddress({
 
       address,
-      dial: (log: HomebridgePluginLogging): Promise<ManualDialOutcome> => this.dialManualAddress(address, log),
+      dial: (log: HomebridgePluginLogging): Promise<DialOutcome> => this.dialManualAddress(address, log),
       isServed: (): boolean => this.isAddressServed(address),
       log: this.log,
       pause,
-      retrySeconds: RATGDO_MANUAL_RETRY_INTERVAL
+      retrySeconds: RATGDO_RETRY_INTERVAL
     });
   }
 
@@ -423,7 +439,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
    *
    * @returns What became of the address.
    */
-  private async dialManualAddress(address: string, log: HomebridgePluginLogging): Promise<ManualDialOutcome> {
+  private async dialManualAddress(address: string, log: HomebridgePluginLogging): Promise<DialOutcome> {
 
     const outcome = await openManualConnection({
 
@@ -525,6 +541,10 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
    * device's latest advertisement. A lost advertisement is noted and nothing more: a device we hold a connection to is the ESPHome client's to report on, and a
    * device we do not is simply one we will hear from again.
    *
+   * The one thing read from the event itself is which device it names. An opener this platform has released into its redial is dialed at once when it speaks for
+   * itself - a reboot after a firmware update, a return to the network - at the address it advertises. Only its own event does that: the pass every opener's
+   * event triggers reads its advertisement too, but there it only updates where the redial dials, so a released opener is never dialed at its neighbors' cadence.
+   *
    * @param event     - The transition the discovery derived.
    * @param reconcile - The single-flight pass every transition asks for.
    */
@@ -535,6 +555,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       case "found":
       case "updated": {
 
+        this.retargetRedial(event.device)?.pause.wake("advertised");
         reconcile.schedule();
 
         return;
@@ -573,9 +594,9 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
    * rejects the pass nor stops a sibling's reconcile.
    *
    * Three outcomes, in the order they are decided: a device the user disabled is already settled and returns; a device we have configured takes the address-change
-   * path, which is a no-op unless the advertised address has actually moved; anything else is a first discovery and runs the full flow in phases - build the device
-   * record, log discovery, gate on the disabled feature option, connect, capture initial state, register the platform accessory, construct the RatgdoAccessory with
-   * real state, and bind the connection. Each phase is a single block; the function reads top-to-bottom as a timeline.
+   * path, which dials only a connected device whose advertised address has actually moved; anything else is a first discovery and runs the full flow in phases -
+   * build the device record, log discovery, gate on the disabled feature option, connect, capture initial state, register the platform accessory, construct the
+   * RatgdoAccessory with real state, and bind the connection. Each phase is a single block; the function reads top-to-bottom as a timeline.
    *
    * The central design choice: `RatgdoAccessory` is constructed AFTER the ESPHome client has connected AND the LatestStateCache has populated with the device's
    * initial state. The accessory is born with real telemetry data and configureXxx writes real values to HAP from frame zero, so no placeholder default ever reaches
@@ -594,7 +615,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       const uuid = this.hap.uuid.generate(discovered.macColon);
 
       // A device we have already configured is reconciled against its advertisement rather than discovered again. The accessory, its services, and its HomeKit
-      // identity all stand; only the connection is replaced, and only when the address it was opened against has left the set the device advertises.
+      // identity all stand; only a held connection is replaced, and only when the address it was opened against has left the set the device advertises.
       const configured = this.configuredDevices.get(uuid);
 
       if(configured) {
@@ -943,12 +964,13 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   /* Follow a configured device to a new address.
    *
    * ESPHome clients reconnect to the host they were opened against, so a device that moves - a changed DHCP reservation, a new subnet - is unreachable until its
-   * connection is replaced. Its advertisement is what tells us it moved, and this is the one place that acts on it: the accessory, its HomeKit identity, and every
-   * service it owns stand untouched, and only the connection underneath is re-dialed.
+   * connection is replaced. Its advertisement is what tells us it moved, and this is where a held connection acts on it: the accessory, its HomeKit identity, and
+   * every service it owns stand untouched, and only the connection underneath is re-dialed.
    *
-   * `device.address` is written only once the new address has connected, so the field always names the address the live connection was actually opened against. A
-   * failed dial therefore leaves the device offline at its last good address and the next pass retries, which is the same next-refresh-retries rule a failed first
-   * connect follows.
+   * Only a device holding a connection record is dialed here. A device holding none has been released into its redial, which is its only dialer until any path
+   * connects it again, so its advertisement only tells the redial where the device answers. Were this pass to dial it as well, every opener's event would dial
+   * every released one, undemoted and racing the redial for the device's few API connections. A dial of a moved device that fails hands the device to its redial the
+   * same way, and that redial reaches the device at its new address once the device answers there.
    *
    * @param ratgdo     - The configured accessory whose connection is reconciled.
    * @param discovered - The identity derived from the advertisement that triggered this pass.
@@ -968,72 +990,242 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       return;
     }
 
-    // A live connection at an address the device still advertises needs nothing, whether or not that address is the one the pick now favors: a re-advertisement
-    // carrying only a changed TXT record, a changed port, or a changed address list lands here, and the identity fields it might have moved are refreshed by the
-    // per-session refresh on the client's own next connect.
-    if(this.connections.has(ratgdo.device.mac) && isAdvertisedAt(discovered.addresses, ratgdo.device.address)) {
+    if(!this.connections.has(ratgdo.device.mac)) {
+
+      this.retargetRedial(discovered);
 
       return;
     }
 
-    // Two ways to arrive here, and the operator is told which: a live connection whose device moved, or no connection at all, which is a device whose last reconnect
-    // attempt failed and left it without one.
-    if(this.connections.has(ratgdo.device.mac)) {
+    // A live connection at an address the device still advertises needs nothing, whether or not that address is the one the pick now favors: a re-advertisement
+    // carrying only a changed TXT record, a changed port, or a changed address list lands here, and the identity fields it might have moved are refreshed by the
+    // per-session refresh on the client's own next connect.
+    if(isAdvertisedAt(discovered.addresses, ratgdo.device.address)) {
 
-      ratgdo.log.info("Address changed from %s to %s. Reconnecting.", ratgdo.device.address, discovered.address);
-    } else {
-
-      ratgdo.log.info("Reconnecting at %s.", discovered.address);
+      return;
     }
+
+    ratgdo.log.info("Address changed from %s to %s. Reconnecting.", ratgdo.device.address, discovered.address);
 
     /* The existing connection goes before the new one is dialed, rather than after it lands. A device that moved is not answering at the address its client keeps
      * retrying, and leaving that client running through the dial would have two clients racing for one device's API slots. The cost is that a failed dial leaves the
-     * device offline with no connection, which is the same next-refresh-retries rule a failed first connect follows.
+     * device with no connection, which is what hands it to its redial.
      */
     this.releaseConnection(ratgdo);
 
+    /* The release opens the episode the redial continues should this dial fail, and the dial is that episode's first attempt, run through the adapter the redial
+     * takes. A redial whose first dial fails the same way is then repeating what this dial reported, and says so at debug rather than at error a second time.
+     */
+    const failures = this.openRedialEpisode(ratgdo);
+    const dial = (log: HomebridgePluginLogging): Promise<Nullable<ConnectionFailureReason>> => this.dialAndInstall(ratgdo, discovered.address, log);
+    const failure = await failures.attempt(dial, (reason: Nullable<ConnectionFailureReason>): ConnectionFailureReason | undefined => reason ?? undefined);
+
+    // The dial has already logged what went wrong. A shutdown that cut it short is no failure, and nothing may dial an opener once the platform is stopping.
+    if((failure !== null) && (failure !== "shutdown")) {
+
+      this.startRedial(ratgdo, discovered.address, failures);
+    }
+  }
+
+  /* Dial a configured device and put it onto what answers: the dial, the re-check and the install that the address follow and the redial share, so a configured
+   * device gets its new connection by one rule whichever of them dialed it. It never goes through the admit chokepoint, which disposes a second client for a device
+   * already configured: the accessory stands, and only the connection underneath it is new.
+   *
+   * The re-check is why this needs one where the admit chokepoint does not. Every other connect decides what it owns synchronously after its own await; this one read
+   * the governance BEFORE its await and would write after it, so what it read is read again once the dial resolves rather than trusted from before it. A shutdown that
+   * began meanwhile stands the dial down, since openConnection's fast paths do not consult the stopping signal. A connection record for this MAC that this call did
+   * not install means another path - a listed address's dial, which installs directly - connected the device while this dial was in flight; installing over it
+   * would overwrite that record without disposing the client it holds, leaving that client connected, unreferenced, and beyond the reach of shutdown. So this dial's
+   * client goes, and the device is served all the same. And a listed address that came to govern the device during the await means this dial reached an address the
+   * user has overruled, so its client goes and the governing address is dialed at once, since nothing else will dial a device that holds no record. Nothing awaits
+   * between the last re-check and installConnection, so what is true there is still true at that write.
+   *
+   * @param ratgdo  - The configured accessory being connected.
+   * @param address - The address to dial.
+   * @param log     - The log the dial speaks through, which the redial quiets while the same failure repeats.
+   *
+   * @returns null once the device holds a connection record, or the classified reason the dial produced no connection.
+   */
+  private async dialAndInstall(ratgdo: RatgdoAccessory, address: string, log: HomebridgePluginLogging): Promise<Nullable<ConnectionFailureReason>> {
+
+    const governing = ratgdo.device.manualAddress;
     const outcome = await openConnection({
 
       expected: ratgdoInitialStateEntityIds(ratgdo.device.variant),
-      host: discovered.address,
+      host: address,
       keyFor: this.keyFor,
-      log: prefixedLog(this.log, () => ratgdo.device.name),
+      log,
       mac: ratgdo.device.mac,
       openClient: this.openClient,
       shutdownSignal: this.stopController.signal
     });
 
-    // openConnection has already logged what went wrong, so there is nothing to say here.
     if(!outcome.ok) {
 
-      return;
+      return outcome.reason;
     }
 
-    // The same re-check the first-discovery path makes, for the same reason: openConnection's fast paths do not consult the stopping signal.
     if(this.stopController.signal.aborted) {
 
       outcome.client.disconnect();
 
-      return;
+      return "shutdown";
     }
 
-    /* The governance re-check, and the reason this method needs one where the admit chokepoint does not. Every other connect decides what it owns synchronously after
-     * its own await; this one read the governance BEFORE its await and would write after it. A manual dial that adopted this device inside that window has already
-     * installed its connection and set the governing address, and installing over it would replace the connection record without disposing what it replaced - leaving
-     * the manual client connected, unreferenced, and beyond the reach of shutdown, with the device sitting at the discovered address the user had overruled.
-     *
-     * Two things are re-read here rather than trusted from before the await: whether a listed address now governs this device, and whether a connection for this MAC
-     * exists that this call did not install - the same question asked of the store rather than of the device. Either one means this dial lost the race, so its client
-     * is disposed and nothing is written. Nothing awaits between this check and installConnection, so what is true here is still true at that write.
-     */
-    if((ratgdo.device.manualAddress !== undefined) || this.connections.has(ratgdo.device.mac)) {
+    if(this.connections.has(ratgdo.device.mac)) {
 
       outcome.client[Symbol.dispose]();
 
+      return null;
+    }
+
+    // Governance only ever moves to a listed address, so a governing address that differs from the one read before the await is the address to dial instead.
+    const current = ratgdo.device.manualAddress;
+
+    if((current !== undefined) && (current !== governing)) {
+
+      outcome.client[Symbol.dispose]();
+
+      return this.dialAndInstall(ratgdo, current, log);
+    }
+
+    this.installConnection(ratgdo, address, outcome.client, outcome.initialState);
+
+    return null;
+  }
+
+  /* Redial an opener this platform holds no connection for, on the slow loop the listed addresses run on, until any path connects it again or the platform stops.
+   *
+   * An opener is released into its redial by a reconnect the ESPHome client gave up for good, by a session whose device turned out not to be the opener, and by a
+   * dial of a moved opener that failed. In each the opener holds no connection record and nothing else will dial it, so without this it would stay unreachable until
+   * Homebridge restarts, though most of these causes clear on the device's side: a reflash back to the configured key, a firmware update, the opener reclaiming an
+   * address another device held.
+   *
+   * One redial per opener, and a release while one runs wakes it instead of starting another, so an opener released again through a connection another path made
+   * keeps one cadence, and that redial keeps the adapter it began with. The redial pauses before its first dial, because whatever released the opener has just
+   * said why and dialing at once would only say it again. Its attempts run through the adapter of the episode the release opened, because a release and the redial
+   * it starts are one episode of one fault: the release's report was that episode's first attempt, so a first dial that meets the same refusal repeats it at
+   * debug. It opens a fresh client on every attempt rather than reconnecting the given-up one, which is frozen to its address and its key mode and reports a failed
+   * reconnect to no listener, and it installs through the address follow's own tail. The info line reads its interval from the constant the loop waits on, so the
+   * two cannot disagree.
+   *
+   * @param ratgdo   - The released opener.
+   * @param address  - Where the opener last answered or was last seen advertising, which its dials read until its advertisements say otherwise.
+   * @param failures - The adapter of the episode the release opened, which a redial this call starts runs its attempts through.
+   */
+  private startRedial(ratgdo: RatgdoAccessory, address: string, failures: RepeatDemotedLog<ManualConnectionFailureReason>): void {
+
+    const { mac } = ratgdo.device;
+    const running = this.redials.get(mac);
+
+    if(running) {
+
+      running.pause.wake("released");
+
       return;
     }
 
-    this.installConnection(ratgdo, discovered.address, outcome.client, outcome.initialState);
+    const redial: Redial = { advertised: address, pause: new WakeableWait({ clock: this.clock, signal: this.stopController.signal }) };
+
+    this.redials.set(mac, redial);
+    ratgdo.log.info("The connection will be retried every %s minutes, and a change to this opener's encryption key takes effect once Homebridge restarts.",
+      RATGDO_RETRY_INTERVAL / 60);
+
+    void superviseLoop({
+
+      loop: async (): Promise<void> => {
+
+        try {
+
+          await runRetryLoop({
+
+            dial: (log: HomebridgePluginLogging): Promise<DialOutcome> => this.redialOnce(ratgdo, redial, log),
+            failures,
+            isServed: (): boolean => this.connections.has(mac),
+            pause: redial.pause,
+            pauseFirst: true,
+            retrySeconds: RATGDO_RETRY_INTERVAL
+          });
+        } finally {
+
+          this.redials.delete(mac);
+        }
+      },
+      onError: (error: unknown): void => ratgdo.log.error("Reconnecting to this opener failed and will not restart until Homebridge restarts: %s.",
+        formatErrorMessage(error)),
+      signal: this.stopController.signal
+    });
+  }
+
+  /* One attempt of a redial. A listed address governing the opener is where it is dialed, at that address and at no other; otherwise it is dialed where it last
+   * advertised itself. Each is read at the dial rather than when the redial began, because a listed address can take the opener over and the opener can move while the
+   * redial pauses.
+   *
+   * @param ratgdo - The released opener.
+   * @param redial - Its redial.
+   * @param log    - The log the redial's demoting adapter handed this attempt.
+   *
+   * @returns What became of the attempt.
+   */
+  private async redialOnce(ratgdo: RatgdoAccessory, redial: Redial, log: HomebridgePluginLogging): Promise<DialOutcome> {
+
+    const failure = await this.dialAndInstall(ratgdo, ratgdo.device.manualAddress ?? redial.advertised, log);
+
+    return (failure === null) ? { ok: true } : { ok: false, reason: failure };
+  }
+
+  /* Open the episode a release begins: an adapter on the log the opener's redial reports through, with the release's report of the refusal that released the
+   * opener run through it as the episode's first attempt.
+   *
+   * The report is classified by the reason the redial's own dial answers for that refusal, the one the describer gives it on every path, so a redial whose first
+   * dial meets the same refusal reads it as a repeat and reports it at debug. A release with no refusal to report opens the episode knowing nothing: a dial of a
+   * moved opener reports its own failure as the first attempt, and a permanent cause the describer does not word is left for the redial's first dial to report.
+   *
+   * @param ratgdo    - The released opener.
+   * @param permanent - The refusal that released it, as the describer words it, or null when the release has none to report.
+   *
+   * @returns The episode's adapter, for the redial to continue.
+   */
+  private openRedialEpisode(ratgdo: RatgdoAccessory, permanent: Nullable<PermanentCauseDescription> = null): RepeatDemotedLog<ManualConnectionFailureReason> {
+
+    const failures = repeatDemotedLog<ManualConnectionFailureReason>(this.redialLog(ratgdo));
+
+    if(permanent) {
+
+      failures.attempt((log: HomebridgePluginLogging): void => log.error(...permanent.diagnostic), (): ManualConnectionFailureReason => permanent.reason);
+    }
+
+    return failures;
+  }
+
+  /* The log each release opens a released opener's redial episode on, which the episode's adapter carries into the redial, so the release's report and every attempt
+   * after it are written under one prefix and weighed by one adapter.
+   *
+   * @param ratgdo - The released opener.
+   *
+   * @returns The log.
+   */
+  private redialLog(ratgdo: RatgdoAccessory): HomebridgePluginLogging {
+
+    return prefixedLog(this.log, () => ratgdo.device.name);
+  }
+
+  /* Record where a released opener advertises itself, for the next dial of its redial to read.
+   *
+   * @param discovered - The identity derived from the opener's latest advertisement.
+   *
+   * @returns The opener's redial, or undefined when it is running none.
+   */
+  private retargetRedial(discovered: DiscoveredRatgdo): Redial | undefined {
+
+    const redial = this.redials.get(discovered.strippedMac);
+
+    if(redial) {
+
+      redial.advertised = discovered.address;
+    }
+
+    return redial;
   }
 
   /* Tell the operator that a device set to a listed address is announcing itself somewhere else, once per address it announces.
@@ -1068,7 +1260,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   }
 
   /* Give up a device's connection: announce it offline and tear the connection record down. Both halves belong together - a connection record this platform no
-   * longer holds means a device HomeKit should be showing as unreachable - so neither caller decides them separately.
+   * longer holds means a device HomeKit should be showing as unreachable - so no caller decides them separately.
    *
    * @param ratgdo - The accessory whose connection is released.
    */
@@ -1116,12 +1308,13 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
   /* Lifecycle subscription. Availability follows the client's reachability verdicts through the one translation the webUI applies too (protocol/lifecycle.ts), and
    * the statement is applied before anything else so a diagnostic line lands after the disconnect it explains. The work that belongs to a session rather than to
-   * availability is this listener's own. Every `connect` refreshes the identity fields, because a session can begin on new firmware whether or not an outage came
-   * before it, and a `connect` that finds the opener still online is a drop the client healed on its first attempt, which the log reports at info so a flaky link
-   * stays visible without a false offline. A `connect` after `lost` says nothing of its own, since `recovered` follows it and makes the announcement. A `disconnect`
-   * carries the encryption and identity diagnostics: only the terminal disconnect is sure to hold a permanent cause, because `lost` carries the first failed
-   * attempt's error and a permanent one can arrive on a later attempt. The connect that opened this client emitted before this subscription existed, so
-   * `bindConnection` runs that first session's work itself.
+   * availability is this listener's own. Every `connect` first puts the session to the identity rule its first contact answered, then refreshes the identity fields,
+   * because a session can begin on new firmware whether or not an outage came before it, and a `connect` that finds the opener still online is a drop the client
+   * healed on its first attempt, which the log reports at info so a flaky link stays visible without a false offline. A `connect` after `lost` says nothing of its
+   * own, since `recovered` follows it and makes the announcement. A `disconnect` carrying a permanent cause is the client giving up: only the terminal disconnect is
+   * sure to hold that cause, because `lost` carries the first failed attempt's error and a permanent one can arrive on a later attempt, so it is where the cause's
+   * diagnostic is logged and where the opener is released into its redial. The connect that opened this client emitted before this subscription existed, so
+   * `bindConnection` runs that first session's work itself, and admission has already put that session to the identity rule.
    */
   private buildLifecycleListener(ratgdo: RatgdoAccessory, client: EspHomeClient): (event: LifecycleEvent) => void {
 
@@ -1158,7 +1351,26 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
       switch(event.kind) {
 
-        case "connect":
+        case "connect": {
+
+          /* A device other than the opener can answer a reconnect - one that took the opener's address while the client was retrying - and a plaintext session has
+           * no key to refuse it, so every session is put to the comparison its first contact passed, ahead of anything the session would write: the wrong device's
+           * model and firmware never reach the opener's information service, and no healed-drop line claims the opener is back. The opener is released first, so it
+           * reads offline ahead of the line explaining why, and then handed to its redial. The client withholds `recovered` from a session a listener tore down, so
+           * nothing states the opener online behind this.
+           */
+          const refusal = identityRefusal({ client, expected: ratgdo.device.mac });
+
+          if(refusal) {
+
+            this.releaseConnection(ratgdo);
+
+            const failures = this.openRedialEpisode(ratgdo, describePermanentCause(refusal));
+
+            this.startRedial(ratgdo, ratgdo.device.address, failures);
+
+            return;
+          }
 
           this.refreshIdentity(ratgdo, client);
 
@@ -1168,23 +1380,28 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
           }
 
           return;
+        }
 
-        case "disconnect":
+        case "disconnect": {
 
-          // Disconnect cause narrows through the typed error hierarchy. The auto-reconnect supervisor already filters PermanentError subclasses out of the retry
-          // budget, so the encryption-key and wrong-device cases below are diagnostic only - the reconnect loop has ended, and the device will not come back without
-          // a configuration fix or, for a device another one has replaced at its address, a fresh connection.
-          if(isEncryptionError(event.cause)) {
+          // The client's reconnect supervisor refuses a PermanentError, so the reconnect loop has ended and the client will never dial again. Any other cause is a
+          // disconnect the client's own reconnects answer.
+          if(!(event.cause instanceof PermanentError)) {
 
-            ratgdo.log.error("Encryption configuration error - check the device's API encryption key: %s", event.cause.message);
+            return;
           }
 
-          if(event.cause instanceof DeviceIdentityError) {
+          /* The refusals a user can act on are worded by the describer the connect core uses on a first open, so one fault reads as one sentence whichever path met
+           * it, and every cause the describer words is a PermanentError. The release reports it as the first attempt of the episode the opener's redial continues,
+           * and the redial reaches the opener once the device's side clears.
+           */
+          const failures = this.openRedialEpisode(ratgdo, describePermanentCause(event.cause));
 
-            ratgdo.log.error("The wrong device answered, so the connection is refused: %s", event.cause.message);
-          }
+          this.releaseConnection(ratgdo);
+          this.startRedial(ratgdo, ratgdo.device.address, failures);
 
           return;
+        }
 
         case "lost":
         case "recovered":

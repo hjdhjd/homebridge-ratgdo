@@ -156,15 +156,20 @@ const announce = (browser: TestMdnsBrowser, service: MdnsService): void => {
 // Count the factory calls that targeted one device address, so a per-device connect / reconnect assertion is exact.
 const callsForHost = (openClient: { calls: RecordedOpenOptions[] }, host: string): RecordedOpenOptions[] => openClient.calls.filter((call) => call.host === host);
 
-/* This suite's ESPHome client double: the shared harness class seeded with the entity set a healthy Disco-class ratgdo advertises. Which entities a device advertises
- * is this file's fixture policy rather than part of the double's contract, so the default lives here once and the shared class keeps its empty default for every other
- * suite that constructs it directly. A case that advertises something else - the Konnected variant, or an extra switch - passes its own `entities` and overrides it.
- */
-const makeClient = (options: TestEspHomeClientOptions = {}): TestEspHomeClient => new TestEspHomeClient({ entities: ADVERTISED, ...options });
-
 // The colon-delimited MAC a device-info record carries, from the stripped form the rest of this file keys on. The wire spells it one way and the pool keys on the
 // other, and this is the one place that translation is written.
 const colonMac = (mac: string): string => (mac.match(/../g) ?? []).join(":");
+
+/* This suite's ESPHome client double: the shared harness class seeded with the entity set a healthy Disco-class ratgdo advertises, and a device-info record naming
+ * the device the session is for, which every connection's admission and every later session's identity check read. Which entities a device advertises is this
+ * file's fixture policy rather than part of the double's contract, so the default lives here once and the shared class keeps its empty default for every other
+ * suite that constructs it directly. A case that advertises something else - the Konnected variant, or an extra switch - passes its own `entities` and overrides
+ * it, a session for another device passes that device's `mac`, and a case describing a record of its own passes `deviceInfo`.
+ */
+const makeClient = ({ mac = MAC, ...options }: TestEspHomeClientOptions & { mac?: string } = {}): TestEspHomeClient => {
+
+  return new TestEspHomeClient({ deviceInfo: { macAddress: colonMac(mac) }, entities: ADVERTISED, ...options });
+};
 
 /* The one factory the address-dial sections build their clients through: a client that answers a device-info record naming the given device, so an address dial
  * identifies it exactly as a real opener's handshake would. Overrides reach the record itself, which is how a test describes a device that names no project, no
@@ -251,7 +256,7 @@ describe("StatusFeed pool connect", () => {
   test("connects every discovered warmed device concurrently, and a view switch between two live devices constructs and disposes nothing", async () => {
 
     const clientA = makeClient({ snapshot: restingCache() });
-    const clientB = makeClient({ snapshot: restingCache() });
+    const clientB = makeClient({ mac: MAC_TWO, snapshot: restingCache() });
     const pendingA = Promise.withResolvers<TestEspHomeClient>();
     const pendingB = Promise.withResolvers<TestEspHomeClient>();
     const openClient = makeFakeOpenClient((options) => (options.host === ADDR_TWO) ? pendingB.promise : pendingA.promise);
@@ -372,7 +377,7 @@ describe("StatusFeed key diff", () => {
     // the inheritance contract, both directions.
     const clientA1 = makeClient({ isEncrypted: true, snapshot: restingCache() });
     const clientA2 = makeClient({ isEncrypted: true, snapshot: restingCache() });
-    const clientB = makeClient({ snapshot: restingCache() });
+    const clientB = makeClient({ mac: MAC_TWO, snapshot: restingCache() });
     let aCall = 0;
     const openClient = makeFakeOpenClient((options) => {
 
@@ -1271,6 +1276,42 @@ describe("StatusFeed availability", () => {
     assert.equal(openClient.calls.length, 2, "the dropped plaintext session reconnects on the changed key rather than adopting it in place");
     assert.equal(offeredKey(callsForHost(openClient, ADDR)[1]), "k2", "the reconnect offers the changed key");
   });
+
+  test("refuses a later session whose device is another opener, pushes the identity verdict, and dials the device again at the next warm", async () => {
+
+    // The session's record is held by reference, so the row moves its MAC the way a different device answering the reconnect would report it.
+    const record: DeviceInfo = { macAddress: colonMac(MAC) };
+    const client = makeClient({ deviceInfo: record, snapshot: restingCache() });
+    const answering = makeClient({ snapshot: restingCache() });
+    const openClient = makeFakeOpenClient(async (_options, index) => (index === 0) ? client : answering);
+    const { browser, feed, pushes } = makeFeed({ openClient });
+
+    feed.startDiscovery();
+    browser().found(makeService());
+
+    await settle();
+
+    feed.warm(warmOf([MAC]));
+
+    await settle();
+
+    const before = pushes.length;
+
+    Object.assign(record, { macAddress: colonMac(MAC_TWO) });
+    client.emit("lifecycle", { cause: undefined, kind: "disconnect" });
+    client.emit("lifecycle", { encrypted: false, kind: "connect" });
+
+    assert.deepEqual(pushes.slice(before).map((event) => [ event.kind, (event.kind === "error") ? event.reason : undefined ]), [[ "error", "unreachable" ]],
+      "the refused session pushes the classified identity verdict, which the panel reads as the device not being reached, and nothing states it online");
+    assert.equal(client.disposeCount, 1, "the session is torn down, releasing its client");
+
+    feed.warm(warmOf([MAC]));
+
+    await settle();
+
+    assert.equal(openClient.calls.length, 2, "the next warm dials the device again, as it dials any device it could not reach");
+    assert.ok(pushes.slice(before).some((event) => (event.kind === "snapshot") && (event.serialNumber === MAC)), "and the opener answering that dial is served");
+  });
 });
 
 describe("StatusFeed connection failures", () => {
@@ -1936,7 +1977,7 @@ describe("StatusFeed isolation", () => {
   test("leaves sibling connects unaffected when one device's connect fails", async () => {
 
     const clientA = makeClient({ snapshot: restingCache() });
-    const clientC = makeClient({ snapshot: restingCache() });
+    const clientC = makeClient({ mac: MAC_THREE, snapshot: restingCache() });
     const openClient = makeFakeOpenClient(async (options) => {
 
       if(options.host === ADDR_TWO) {

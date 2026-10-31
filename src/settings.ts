@@ -31,11 +31,12 @@ export const RATGDO_INITIAL_STATE_TIMEOUT = 5;
 // this long, then the HomeKit toggle flips back to off so the user can trigger it again. Matches the audio length the Konnected firmware emits.
 export const RATGDO_KONNECTED_PCW_DURATION = 5;
 
-// Duration, in seconds, between connect attempts against a listed device address that has not answered. This is the family's cadence: the PowerView plugin retries
-// its manually configured gateways once per discovery cycle, POWERVIEW_DISCOVERY_INTERVAL, which is this same five minutes. A listed address is a device the user
-// says is there, so the retry is patient by design - it covers a device that is powered down, rebooting, or briefly off the network, and a user who wants an answer
-// now reaches for the settings page's own connection test rather than waiting on this.
-export const RATGDO_MANUAL_RETRY_INTERVAL = 300;
+// Duration, in seconds, between the attempts of the slow loop that dials an opener this plugin cannot reach on its own: a listed address that has not answered,
+// and an opener whose connection was refused for good. This is the family's cadence: the PowerView plugin retries its manually configured gateways once per
+// discovery cycle, POWERVIEW_DISCOVERY_INTERVAL, which is this same five minutes. The retry is patient by design - it covers a device that is powered down,
+// rebooting, or briefly off the network, and a refusal its owner clears on the device's side - and a user who wants an answer now reaches for the settings page's
+// own connection test rather than waiting on this.
+export const RATGDO_RETRY_INTERVAL = 300;
 
 // The DNS-SD service type every ESPHome device advertises under, spelled as the fully qualified type name the library's browser takes. Both discovery consumers -
 // the platform and the webUI status feed - browse this one type, so the spelling lives here rather than in either of them.

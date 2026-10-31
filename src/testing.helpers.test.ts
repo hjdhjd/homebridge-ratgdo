@@ -12,9 +12,9 @@ import { ConnectionError, CoverOperation, EncryptionKeyMissingError, EncryptionR
   isConnectionLive } from "esphome-client";
 import { PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import { Service, TestEspHomeClient, asEspHomeClient, buildRatgdoAccessory, makeBinarySensorEvent, makeCoverEvent, makeFakeOpenClient, makeKonnectedInitialState,
-  makeLightEvent, makeLockEvent, makeRatgdoInitialState, makeRatgdoService, makeSwitchEvent, makeTelemetry, makeTestDevice, makeTestPlatform, openThroughHello,
-  resolverOf } from "./testing.helpers.ts";
-import { TestHomebridgeApi, TestMqttClient, logCount, loggedAt } from "homebridge-plugin-utils/testing";
+  makeLightEvent, makeLockEvent, makeRatgdoInitialState, makeRatgdoService, makeScriptedOpenClient, makeSwitchEvent, makeTelemetry, makeTestDevice, makeTestPlatform,
+  openThroughHello, resolverOf } from "./testing.helpers.ts";
+import { TestHomebridgeApi, TestMqttClient, logCount, loggedAt, settle } from "homebridge-plugin-utils/testing";
 import { describe, test } from "node:test";
 import type { LifecycleEvent } from "esphome-client";
 import { RatgdoVariant } from "./types.ts";
@@ -369,6 +369,33 @@ describe("asEspHomeClient and makeFakeOpenClient", () => {
     assert.deepEqual(seen, [ [ "192.0.2.10", 0 ], [ "192.0.2.11", 1 ] ], "the handler receives each call's own options and its zero-based index");
     assert.deepEqual(open.calls.map((call) => call.host), [ "192.0.2.10", "192.0.2.11" ],
       "every call is recorded once, on the single recording path the fixed and handler forms share");
+  });
+});
+
+describe("makeScriptedOpenClient", () => {
+
+  // What a dial has come to after one macrotask turn: its client or its rejection once it has settled, and "pending" while it has not.
+  const outcome = async (dial: Promise<unknown>): Promise<unknown> => Promise.race([ dial.then((client) => client, (error: unknown) => error),
+    settle().then(() => "pending") ]);
+
+  test("answers a host from its script and parks a dial past it until the dial's signal aborts, rejecting at once under a signal already aborted", async () => {
+
+    const client = new TestEspHomeClient();
+    const open = makeScriptedOpenClient({ "192.0.2.10": [client] });
+    const reason = new Error("The dial was abandoned.");
+    const parked = new AbortController();
+
+    assert.equal(await open({ host: "192.0.2.10", signal: new AbortController().signal }), client, "a host's first dial is answered from its script");
+
+    const waiting = open({ host: "192.0.2.10", signal: parked.signal });
+
+    assert.equal(await outcome(waiting), "pending", "a dial past its host's script parks");
+
+    parked.abort(reason);
+
+    assert.equal(await outcome(waiting), reason, "and rejects with its signal's reason once that signal aborts");
+    assert.equal(await outcome(open({ host: "192.0.2.11", signal: AbortSignal.abort(reason) })), reason,
+      "a dial under a signal that has already aborted rejects at once, rather than parking for an abort event that never comes");
   });
 });
 

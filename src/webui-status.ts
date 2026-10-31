@@ -37,7 +37,7 @@ import { RATGDO_ENTITIES, idFor, presentEntityIds, ratgdoInitialStateEntityIds, 
 import { RATGDO_MDNS_SERVICE_TYPE, RATGDO_MOTION_DURATION, RATGDO_WEBUI_DISCOVERY_TIMEOUT, RATGDO_WEBUI_PROBE_TIMEOUT } from "./settings.ts";
 import { canonicalManualAddress, governingAddress, isRetryableFailure, isZonedAddress, manualAddressList } from "./manual.ts";
 import { featureOptionCategories, featureOptions } from "./options.ts";
-import { openConnection, openManualConnection } from "./connection.ts";
+import { identityRefusal, openConnection, openManualConnection } from "./connection.ts";
 import type { DiscoveredRatgdo } from "./discovery.ts";
 import type { EspHomeEvent } from "./types.ts";
 import { RatgdoVariant } from "./types.ts";
@@ -324,6 +324,10 @@ const STATUS_ROW_SIZERS: Record<StatusRowId, string> = {
  *
  * @returns The panel's reason, or null when there is nothing to surface.
  */
+function statusErrorFor(reason: Exclude<ManualConnectionFailureReason, "shutdown">): StatusErrorReason;
+
+function statusErrorFor(reason: ManualConnectionFailureReason): Nullable<StatusErrorReason>;
+
 function statusErrorFor(reason: ManualConnectionFailureReason): Nullable<StatusErrorReason> {
 
   switch(reason) {
@@ -769,7 +773,7 @@ export class StatusFeed implements Disposable {
           return { kind: "error", reason: "unreachable" };
         }
 
-        return { kind: "error", reason: statusErrorFor(outcome.reason) ?? "unreachable" };
+        return { kind: "error", reason: statusErrorFor(outcome.reason) };
       }
 
       const identity = outcome.discovered;
@@ -1007,6 +1011,17 @@ export class StatusFeed implements Disposable {
 
       client.on("lifecycle", (lifecycle: LifecycleEvent): void => {
 
+        /* Every later session is put to the identity rule this session's first contact passed, so a device that takes the address while the client is reconnecting
+         * is refused as a first open would refuse it. The session is torn down with its device's verdict recorded and pushed as the classified identity failure, and
+         * the warm protocol dials the device again as it dials any device it could not reach.
+         */
+        if((lifecycle.kind === "connect") && (identityRefusal({ client, expected: session.mac }) !== null)) {
+
+          this.#recordFailure(session, statusErrorFor("identity-mismatch"));
+
+          return;
+        }
+
         const statement = translateLifecycle(lifecycle);
 
         switch(statement) {
@@ -1160,9 +1175,9 @@ export class StatusFeed implements Disposable {
   /* Whether a listed address is worth dialing now.
    *
    * An address with no record has never been dialed. A dial in flight needs no second one - the record IS the guard. A resolved address is answered, and the device
-   * it named is served through its mac from here on. A failed address repeats on exactly the terms the platform's own loop retries on, plus the pool's key rule: a
-   * reachability failure may succeed on the next try, while a refused key repeats only once the key it was refused with has moved, because re-sending the very key
-   * that just failed is churn that re-flashes the panel for nothing.
+   * it named is served through its mac from here on. A failed address repeats only for a reason a later attempt could get past without anyone acting, plus the pool's
+   * key rule: a reachability failure may succeed on the next try, while a refused key repeats only once the key it was refused with has moved, because re-sending the
+   * very key that just failed is churn that re-flashes the panel for nothing.
    *
    * @param address - The listed address.
    *
