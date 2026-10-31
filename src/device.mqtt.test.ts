@@ -388,6 +388,29 @@ describe("RatgdoAccessory MQTT configuration", () => {
         { payload: "online", retain: true, topic: DEVICE_MAC + "/availability" } ],
       "the plugin-level statement is recorded first, and the opener's own retained statement follows it");
     });
+
+    test("states the opener's retained offline as its final word when the client ends", async () => {
+
+      const { mqtt } = buildRatgdoAccessory({ mqtt: true });
+
+      assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
+
+      assert.deepEqual(await mqtt.end(), [], "the client's end meets no refusal");
+      assert.deepEqual(mqtt.publishedTo(DEVICE_MAC + "/availability"), [{ payload: "offline", retain: true, topic: DEVICE_MAC + "/availability" }],
+        "the end states the opener offline, retained, while the session still holds");
+    });
+
+    test("an opener disposed before the client ends states no final word", async () => {
+
+      const { mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true });
+
+      assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
+
+      ratgdo[Symbol.dispose]();
+      await mqtt.end();
+
+      assert.deepEqual(mqtt.publishedTo(DEVICE_MAC + "/availability"), [], "disposing the opener released its final word with every other registration it held");
+    });
   });
 
   /* The restatement covers the enabled state topics that report held state, and the rows below hold each opener's default set and the sets an option adds or

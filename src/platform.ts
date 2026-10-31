@@ -3,9 +3,9 @@
  * platform.ts: homebridge-ratgdo platform class.
  */
 import type { API, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
-import { AccessoryPersistence, CoalescingTask, FeatureOptions, HbpuAbortError, MQTT_AVAILABILITY_OFFLINE, Perms, WakeableWait, createMqttClient, debugGatedLog,
-  discoverServices, formatErrorMessage, isAdvertisedAt, mdnsBrowserFactory, mqttConnectionSettings, mqttTopic, notResponding, prefixedLog, sanitizeName,
-  superviseLoop, systemClock } from "homebridge-plugin-utils";
+import { APIEvent, AccessoryPersistence, CoalescingTask, FeatureOptions, HbpuAbortError, MQTT_AVAILABILITY_OFFLINE, Perms, WakeableWait, createMqttClient,
+  debugGatedLog, discoverServices, formatErrorMessage, isAdvertisedAt, mdnsBrowserFactory, mqttConnectionSettings, mqttTopic, notResponding, prefixedLog,
+  sanitizeName, superviseLoop, systemClock } from "homebridge-plugin-utils";
 import type { Clock, HomebridgePluginLogging, MdnsBrowserFactory, MdnsDiscovery, MdnsDiscoveryEvent, MqttClient, Nullable } from "homebridge-plugin-utils";
 import { DeviceIdentityError, applyDeviceInfo, isEncryptionError, openConnection, openManualConnection } from "./connection.ts";
 import type { EncryptionKeyLookup, OpenEspHomeClient } from "./connection.ts";
@@ -116,9 +116,15 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   private readonly openClient: OpenEspHomeClient;
   // The one path a change to the accessory cache takes: saves are gathered into the library's save window, and a removal drops any save still waiting for it.
   private readonly persistence: AccessoryPersistence;
-  // AbortController scoped to the platform's lifetime. Aborted on Homebridge shutdown so that every signal-aware resource we own (the MQTT client, any future
-  // signal-driven primitive) tears itself down through one composed signal instead of per-resource imperative cleanup.
+  // The MQTT client's lifetime, and the platform's last word at shutdown: it aborts only once the client's graceful end has stated every opener's final words, so the
+  // client tears itself down through its signal rather than through imperative cleanup.
   private readonly shutdownController: AbortController;
+  // The one shutdown this platform runs, held so a second call answers the first one's outcome rather than tearing down twice.
+  private shutdownRun: Nullable<Promise<void>>;
+  /* Raised first at shutdown. Everything that admits, dials, discovers or commands an opener reads this signal rather than the MQTT client's lifetime, so from the
+   * moment it aborts nothing new reaches an opener and no loop treats the teardown as a fault, while the MQTT client still holds its session to state the final words.
+   */
+  private readonly stopController: AbortController;
 
   constructor(log: Logging, config: PlatformConfig | undefined, api: API, { browserFactory = mdnsBrowserFactory, clock = systemClock,
     mqttFactory = createMqttClient, openClient = openEspHomeClient }: RatgdoPlatformDefaults = {}) {
@@ -160,6 +166,8 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.openClient = openClient;
     this.persistence = new AccessoryPersistence({ api, clock: this.clock, platformName: PLATFORM_NAME, pluginIdentifier: PLUGIN_NAME });
     this.shutdownController = new AbortController();
+    this.shutdownRun = null;
+    this.stopController = new AbortController();
 
     // We can't start without being configured.
     if(!config) {
@@ -170,7 +178,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     /* Initialize MQTT, if needed. The resolver and the guarded factory each answer for a way MQTT can fail to start, and both land on the same degradation - MQTT
      * stays off and the rest of the plugin loads. The resolver answers null when no broker is configured anywhere or the user turned the option off; the factory
      * answers null for a URL the client cannot parse, reporting that one once at error level with the URL redacted so a broker password embedded in it never reaches
-     * the log. The platform's shutdown signal ties the client's lifetime to ours, so we never have to imperatively disconnect it.
+     * the log. The client lives on the platform's lifetime signal, which shutdown aborts only after the client's graceful end, so we never disconnect it by hand.
      */
     const settings = mqttConnectionSettings({ config: legacy, featureOptions: this.featureOptions });
 
@@ -183,36 +191,58 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.log.debug("Debug logging on. Expect a lot of data.");
 
     // Fire up the Ratgdo API once Homebridge has loaded all the cached accessories it knows about and called configureAccessory() on each.
-    api.on("didFinishLaunching", () => this.configureRatgdo());
+    api.on(APIEvent.DID_FINISH_LAUNCHING, () => this.configureRatgdo());
 
-    // Make sure we take ourselves offline when we shutdown. Every cleanup the platform owns - the signal abort, the ESPHome teardown, the accessory offline
-    // announcement - flows through here in one ordered pass. The accessory cache's final save is the persistence helper's, made from a shutdown listener of its own,
-    // and nothing here marks the cache, so the order the shutdown listeners run in never matters.
-    api.on("shutdown", () => {
+    // Take ourselves offline when Homebridge shuts down. The accessory cache's final save is the persistence helper's, made from a shutdown listener of its own, and
+    // nothing in shutdown marks the cache, so the order the shutdown listeners run in never matters.
+    api.on(APIEvent.SHUTDOWN, () => void this.shutdown());
+  }
 
-      // Abort the platform signal first. This cancels every signal-aware resource (the MQTT client, the discovery stream, anything else composed onto our lifetime)
-      // before the imperative teardown below runs, so nothing scheduled on a later event-loop tick can race against the synchronous cleanup. The discovery stream
-      // ends on this abort and disposes itself inside its own supervised loop, which is why there is no browser teardown step here.
-      this.shutdownController.abort(new HbpuAbortError("shutdown"));
+  /* Shut the platform down: stop admitting and commanding openers, then state every opener's retained offline to the broker, then end the platform's lifetime. Safe
+   * to call more than once, since every call answers the one shutdown the first call started.
+   *
+   * Homebridge emits its shutdown without awaiting any listener and exits a few seconds later, so this runs inside that window, and it is public so a suite can await
+   * the whole sequence.
+   */
+  public async shutdown(): Promise<void> {
 
-      // Release each connection's stack. A stack disposes in reverse of the order things went onto it, so every listener comes off before the client's disconnect:
-      // the disconnect event therefore re-enters no lifecycle handler and schedules no further state update during teardown. The ESPHome client's auto-reconnect
-      // supervisor sees the manual disconnect as intentional and does not try to reconnect.
-      for(const conn of this.connections.values()) {
+    this.shutdownRun ??= this.stop();
 
-        conn.stack.dispose();
-      }
+    return this.shutdownRun;
+  }
 
-      this.connections.clear();
+  /* The shutdown sequence, in the order the family's final words need. The stopping signal is raised and every connection released before the first await,
+   * so no connect that resolves afterward can slip between them.
+   *
+   *   1. Raise the stopping signal. Every admit, dial, discovery pass, loop and re-check reads it, so from here nothing new is admitted, no loop logs the teardown as a
+   *      fault, and an in-flight connect stands down silently as it resolves.
+   *   2. Release every connection's stack. A stack disposes in reverse of the order things went onto it, so every listener comes off before the client's disconnect,
+   *      which therefore reaches no lifecycle handler: no `recovered` can state an opener online behind its final word, and with the record gone no command reaches
+   *      an opener. The ESPHome client's reconnect supervisor reads the disconnect as intentional.
+   *   3. End the MQTT client gracefully. Each opener registered its retained offline as a final word, and the client states them while its session still holds,
+   *      waits for them within a bounded grace, and then tears down, which fires its will for the plugin-level topic.
+   *   4. Abort the platform's lifetime and dispose the openers, cancelling every pending one-shot timer before it fires into a torn-down accessory or holds the
+   *      event loop open past shutdown. Disposing an opener releases its final word too, which is why it comes only once the words have been stated.
+   */
+  private async stop(): Promise<void> {
 
-      // Inform our accessories we're going offline, then dispose them so any pending one-shot timers (motion timeout, occupancy timeout, UI revert, etc.) are cancelled
-      // before they fire into a torn-down accessory and keep the Node event loop alive past shutdown.
-      for(const device of this.configuredDevices.values()) {
+    this.stopController.abort(new HbpuAbortError("shutdown"));
 
-        device.updateState({ id: "availability", state: "offline" });
-        device[Symbol.dispose]();
-      }
-    });
+    for(const connection of this.connections.values()) {
+
+      connection.stack.dispose();
+    }
+
+    this.connections.clear();
+
+    await this.mqtt?.end();
+
+    this.shutdownController.abort(new HbpuAbortError("shutdown"));
+
+    for(const device of this.configuredDevices.values()) {
+
+      device[Symbol.dispose]();
+    }
   }
 
   /* The platform's only availability statement: a retained offline for every MAC this run knows and has not configured, stated on each broker session. A MAC this
@@ -314,15 +344,16 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
    * is not answering would hold every later discovery event behind its connect timeout if it were dialed inside that pass. Keeping them apart costs the two paths
    * one meeting point instead - the synchronous admit below, which is where they agree about who owns a device.
    *
-   * Two lifetimes meet here. Each loop's is the platform's: it runs until the shutdown signal aborts, and `superviseLoop` swallows that unwind silently because an
-   * abort we caused is not a fault. `onError` is for the other case - a throw out of a loop body, which would be a defect in this platform rather than anything the
-   * network did. A browser that loses its sockets is neither: it ends the stream in order, and `runDiscovery` reports that from the loop's own end.
+   * Each loop's lifetime is the platform's: it runs until the stopping signal shutdown raises aborts, and `superviseLoop`, bound to that same signal, swallows
+   * that unwind silently because an abort we caused is not a fault. `onError` is for the other case - a throw out of a loop body, which would be a defect in
+   * this platform rather than anything the network did. A browser that loses its sockets is neither: it ends the stream in order, and `runDiscovery` reports that
+   * from the loop's own end.
    */
   private configureRatgdo(): void {
 
     void superviseLoop({ loop: (): Promise<void> => this.runDiscovery(),
       onError: (error: unknown): void => this.log.error("Device discovery failed and will not restart until Homebridge restarts: %s.", formatErrorMessage(error)),
-      signal: this.shutdownController.signal });
+      signal: this.stopController.signal });
 
     for(const address of this.manualAddresses) {
 
@@ -341,7 +372,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       /* The pause this address's loop takes between attempts, held here so the admit chokepoint can end it early. The clock is the platform's own, matching
        * the one time source every other timer on this platform reads.
        */
-      const pause = new WakeableWait({ clock: this.clock, signal: this.shutdownController.signal });
+      const pause = new WakeableWait({ clock: this.clock, signal: this.stopController.signal });
 
       this.manualPauses.set(address, pause);
 
@@ -351,7 +382,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       void superviseLoop({ loop: (): Promise<void> => this.runManualAddressLoop(address, pause),
         onError: (error: unknown): void => this.log.error("The connection to %s failed and will not restart until Homebridge restarts: %s.", address,
           formatErrorMessage(error)),
-        signal: this.shutdownController.signal });
+        signal: this.stopController.signal });
     }
   }
 
@@ -400,7 +431,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       keyFor: this.keyFor,
       log: prefixedLog(log, () => address),
       openClient: this.openClient,
-      shutdownSignal: this.shutdownController.signal
+      shutdownSignal: this.stopController.signal
     });
 
     if(!outcome.ok) {
@@ -462,12 +493,12 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   private async runDiscovery(): Promise<void> {
 
     await using discovery = discoverServices<DiscoveredRatgdo>({ browserFactory: this.browserFactory, classify: parseRatgdoService, clock: this.clock,
-      log: this.log, serviceType: RATGDO_MDNS_SERVICE_TYPE, signal: this.shutdownController.signal });
+      log: this.log, serviceType: RATGDO_MDNS_SERVICE_TYPE, signal: this.stopController.signal });
 
     /* One reconciliation pass at a time, over the discovery's own snapshot. Every event asks for a pass, and a burst of events arriving during a pass buys exactly
      * one follow-up rather than one pass apiece, so an address change that lands while a device is mid-connect is applied after that connect settles instead of
-     * racing it. The task's lifetime is the stream's own signal, which aborts on our shutdown and on the browser's own end alike, so a follow-up queued as the
-     * stream ends is abandoned and no pass ever reads a finished stream.
+     * racing it. The task's lifetime is the stream's own signal, which aborts on our stopping signal and on the browser's own end alike, so a follow-up queued as
+     * the stream ends is abandoned and no pass ever reads a finished stream.
      */
     const reconcile = new CoalescingTask({ label: "device discovery", log: this.log, run: (): Promise<void> => this.reconcileDevices(discovery),
       signal: discovery.signal });
@@ -478,9 +509,10 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     }
 
     /* The browser ends the stream rather than throwing when it loses its last network socket, so the loop's own end is the one place this platform can see that
-     * fault. Connected devices keep their ESPHome clients and their own reconnect supervisors; what stops is the discovery of new devices and of moved ones.
+     * fault. Connected devices keep their ESPHome clients and their own reconnect supervisors; what stops is the discovery of new devices and of moved ones. The
+     * stream also ends when the stopping signal aborts, and the check reads that same signal, so a shutdown is never reported as the fault.
      */
-    if(!this.shutdownController.signal.aborted) {
+    if(!this.stopController.signal.aborted) {
 
       this.log.error("Device discovery stopped because the mDNS browser lost its network sockets, and it will not restart until Homebridge restarts: %s.",
         formatErrorMessage(discovery.signal.reason));
@@ -582,7 +614,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       }
 
       /* Connect to the device AND wait for the initial-state burst before we construct the accessory. The connect path lives in openConnection() so the dual await
-       * (openEspHomeClient + captureInitialState) shares a single try/catch with consistent error logging and cleanup. We pass only the platform-wide shutdown signal -
+       * (openEspHomeClient + captureInitialState) shares a single try/catch with consistent error logging and cleanup. We pass only the platform's stopping signal -
        * openConnection builds the capture deadline once the client is open, so the state-capture budget covers exactly what its name implies (state capture, not the
        * preceding handshake). The `expected` list is built from the same canonical entity registry that buildInitialStatus reads, so the two are hand-kept in sync -
        * there is no type-level check that would catch a future divergence, so any change to what buildInitialStatus reads must be mirrored in
@@ -602,7 +634,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
         log: connectLog,
         mac: device.mac,
         openClient: this.openClient,
-        shutdownSignal: this.shutdownController.signal
+        shutdownSignal: this.stopController.signal
       });
 
       if(!connection.ok) {
@@ -696,7 +728,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
      * about which device is at it - so a listed address that reaches a device discovery already configured would otherwise announce it a second time. And a connect
      * that resolves during shutdown has nobody to tell. Neither case is a device to announce, so neither announces.
      */
-    if(!this.configuredDevices.has(this.hap.uuid.generate(macColon)) && !this.shutdownController.signal.aborted) {
+    if(!this.configuredDevices.has(this.hap.uuid.generate(macColon)) && !this.stopController.signal.aborted) {
 
       this.log.info("Discovered: %s.", this.describeDevice(device));
     }
@@ -740,9 +772,10 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
    */
   private admitConnection({ client, device, discovered, initialState }: AdmitConnectionOptions): void {
 
-    // openConnection's fast paths hand back a connected client without consulting the shutdown signal, so a shutdown landing during the handshake can resolve here
-    // after the shutdown handler has already torn every connection down. Re-checking after the connect resolves is what keeps a client from outliving the platform.
-    if(this.shutdownController.signal.aborted) {
+    // openConnection's fast paths hand back a connected client without consulting the stopping signal, so a shutdown landing during the handshake can resolve here
+    // after shutdown has already torn every connection down. Re-checking after the connect resolves is what keeps a client from outliving the platform, and what
+    // keeps an opener from being admitted, and stated online, behind the final word shutdown is stating for it.
+    if(this.stopController.signal.aborted) {
 
       client.disconnect();
 
@@ -967,7 +1000,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       log: prefixedLog(this.log, () => ratgdo.device.name),
       mac: ratgdo.device.mac,
       openClient: this.openClient,
-      shutdownSignal: this.shutdownController.signal
+      shutdownSignal: this.stopController.signal
     });
 
     // openConnection has already logged what went wrong, so there is nothing to say here.
@@ -976,8 +1009,8 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       return;
     }
 
-    // The same re-check the first-discovery path makes, for the same reason: openConnection's fast paths do not consult the shutdown signal.
-    if(this.shutdownController.signal.aborted) {
+    // The same re-check the first-discovery path makes, for the same reason: openConnection's fast paths do not consult the stopping signal.
+    if(this.stopController.signal.aborted) {
 
       outcome.client.disconnect();
 

@@ -218,8 +218,9 @@ export class RatgdoAccessory implements Disposable {
     return this.accessory.UUID;
   }
 
-  /* Synchronous disposal hook. Tears down every resource this accessory owns: the pending timers in the registry, and the per-accessory MQTT subscriptions composed onto
-   * `mqttAbort`. The platform invokes this at shutdown so no pending timer or MQTT subscription outlives the accessory.
+  /* Synchronous disposal hook. Tears down every resource this accessory owns: the pending timers in the registry, and the per-accessory MQTT registrations composed
+   * onto `mqttAbort`, its final word among them. The platform invokes this at shutdown, once the final words have been stated, so no pending timer or MQTT
+   * registration outlives the accessory.
    */
   public [Symbol.dispose](): void {
 
@@ -703,6 +704,13 @@ export class RatgdoAccessory implements Disposable {
         this.publishTopic(key);
       }
     }, { signal });
+
+    /* The opener's final word as the plugin shuts down: its retained offline, stated by the client's graceful end while the broker session still holds. The
+     * registration carries this accessory's signal, so disposing the accessory releases it, and the publish carries the end's window, so a word the broker never
+     * takes comes back as a refusal rather than holding shutdown. The word carries no change gate, because a final word is stated whatever the topic last carried.
+     */
+    this.platform.mqtt?.onEnd((window: AbortSignal) => this.platform.mqtt?.publish(mqttTopic(this.device.mac, mqttTopics.availability.topic),
+      MQTT_AVAILABILITY_OFFLINE, { retain: true, signal: window }), { signal });
 
     return true;
   }
