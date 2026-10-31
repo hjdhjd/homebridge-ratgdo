@@ -20,11 +20,11 @@ export interface RatgdoEntityRef<T extends RatgdoEntityType = RatgdoEntityType> 
 }
 
 /* Variant-keyed registries of every ESPHome entity ratgdo identifies. Each variant has its own required set of entities, expressed as a typed map so the
- * compiler enforces "this entity exists on this variant" at every access site. Cross-variant entities live in `BaseEntities` (cover, light, lock, obstruction,
- * refresh); each variant extends the base with its own additions. No field is optional - the absence-on-the-wrong-variant case is expressed by the variant's type
- * not declaring the field at all, which means consumers narrow on `this.device.variant` to reach variant-specific entities and the access at that narrowed site is
- * statically guaranteed to be defined. Adding a new required field fails compilation at the `RATGDO_ENTITIES` literal (and at any consumer that already requires
- * that field); adding a new variant fails compilation only at the sites that already switch exhaustively over `RatgdoVariant`.
+ * compiler enforces "this entity exists on this variant" at every access site. Cross-variant entities live in `BaseEntities`; each variant extends the base with
+ * its own additions. No field is optional - the absence-on-the-wrong-variant case is expressed by the variant's type not declaring the field at all, which means
+ * consumers narrow on `this.device.variant` to reach variant-specific entities and the access at that narrowed site is statically guaranteed to be defined. Adding
+ * a new required field fails compilation at the `RATGDO_ENTITIES` literal (and at any consumer that already requires that field); adding a new variant fails
+ * compilation only at the sites that already switch exhaustively over `RatgdoVariant`.
  *
  * A momentary binary sensor joins the registry only when a consumer addresses it by entity id; membership here is driven by "does something resolve this by id",
  * nothing more. Even when present, a momentary sensor stays out of the initial-state wait lists (ratgdoInitialStateEntityIds): it pushes no state on SUBSCRIBE until it
@@ -36,7 +36,6 @@ interface BaseEntities {
   readonly light: RatgdoEntityRef<"light">;
   readonly lock: RatgdoEntityRef<"lock">;
   readonly obstruction: RatgdoEntityRef<"binary_sensor">;
-  readonly refresh: RatgdoEntityRef<"button">;
 }
 
 interface RatgdoEntities extends BaseEntities {
@@ -72,7 +71,6 @@ export const RATGDO_ENTITIES: RatgdoEntityRegistry = {
     lock: { objectId: "lock", type: "lock" },
     obstruction: { objectId: "obstruction", type: "binary_sensor" },
     pcw: { objectId: "pre-close_warning", type: "button" },
-    refresh: { objectId: "query_status", type: "button" },
     strOutput: { objectId: "str_output", type: "switch" }
   },
   [RatgdoVariant.RATGDO]: {
@@ -84,7 +82,6 @@ export const RATGDO_ENTITIES: RatgdoEntityRegistry = {
     lock: { objectId: "lock_remotes", type: "lock" },
     motion: { objectId: "motion", type: "binary_sensor" },
     obstruction: { objectId: "obstruction", type: "binary_sensor" },
-    refresh: { objectId: "query_status", type: "button" },
     vehicleDetected: { objectId: "vehicle_detected", type: "binary_sensor" }
   }
 };
@@ -95,9 +92,9 @@ export const idFor = <T extends RatgdoEntityType>(ref: RatgdoEntityRef<T>): Enti
 
 /* Derive the initial-state wait set from the registry. captureInitialState gates RatgdoAccessory construction on every one of these entities appearing in the ESPHome
  * client's LatestStateCache, so the list controls exactly which entities must push state before HomeKit sees the device. We switch on variant so each branch reads
- * from its variant-narrowed registry and the entity refs are required (no optional handling). Stateless triggers (`refresh`, `pcw`) are intentionally absent from
- * the lists - buttons never push state, so waiting on them would hang. The switch is exhaustive: adding a new variant fails compilation here until handled, which
- * is the architectural guarantee that this list cannot fall out of sync with the variant taxonomy.
+ * from its variant-narrowed registry and the entity refs are required (no optional handling). A stateless trigger such as the Konnected `pcw` button is
+ * intentionally absent from the lists - a button never pushes state, so waiting on one would hang. The switch is exhaustive: adding a new variant fails compilation
+ * here until handled, which is the architectural guarantee that this list cannot fall out of sync with the variant taxonomy.
  */
 export function ratgdoInitialStateEntityIds(variant: RatgdoVariant): readonly EntityId[] {
 

@@ -37,14 +37,14 @@ describe("ratgdoInitialStateEntityIds", () => {
 
     assert.deepEqual(ratgdoInitialStateEntityIds(RatgdoVariant.RATGDO),
       [ "cover-door", "switch-laser", "switch-led", "light-light", "lock-lock_remotes", "binary_sensor-obstruction", "binary_sensor-vehicle_detected" ],
-      "the ratgdo wait set covers every stateful entity and excludes the momentary motion sensor and the stateless refresh button");
+      "the ratgdo wait set covers every stateful entity and excludes the momentary motion sensor");
   });
 
   test("lists the stateful entities the Konnected variant must push before construction", () => {
 
     assert.deepEqual(ratgdoInitialStateEntityIds(RatgdoVariant.KONNECTED),
       [ "cover-garage_door", "light-garage_light", "lock-lock", "binary_sensor-obstruction", "switch-str_output" ],
-      "the Konnected wait set covers every stateful entity and excludes the stateless query-status button");
+      "the Konnected wait set covers every stateful entity and excludes the stateless pre-close warning button");
   });
 });
 

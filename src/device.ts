@@ -598,8 +598,8 @@ export class RatgdoAccessory implements Disposable {
     this.platform.mqtt?.publishGuarded(mqttTopic(this.device.mac, mqttTopics.availability.topic), payload, { retain: true });
   }
 
-  // Configure MQTT services. Every subscribe* call passes the per-accessory `mqttAbort.signal` so the MqttClient removes our handlers when this accessory disposes -
-  // critical for the connect-retry recovery path, where an in-flight accessory would otherwise leak handlers into the next attempt's accessory instance.
+  // Configure MQTT services. Every registration below passes the per-accessory `mqttAbort.signal`, because the MQTT client is shared by every opener and outlives
+  // each accessory: disposing this accessory aborts the signal, and that is what removes its handlers and its final word from the client, so none outlives it.
   private configureMqtt(): boolean {
 
     const signal = this.mqttAbort.signal;
@@ -789,7 +789,7 @@ export class RatgdoAccessory implements Disposable {
 
     service.updateCharacteristic(this.hap.Characteristic.On, this.status.light);
     service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.status.light));
-    service.getCharacteristic(this.hap.Characteristic.On).onSet(this.answering(this.toggleOnSet("light", service)));
+    service.getCharacteristic(this.hap.Characteristic.On).onSet(this.answering(this.toggleOnSet({ service, state: () => this.status.light, topic: "light" })));
 
     return true;
   }
@@ -797,20 +797,20 @@ export class RatgdoAccessory implements Disposable {
   /* Shared configuration path for sensor services that follow the same shape: a binary state characteristic (motion / contact / occupancy) plus a StatusActive
    * characteristic held true. StatusActive answers whether a sensor is operating, and the opener reports no fact that would take any of these sensors out of operation,
    * so every sensor of this shape reads true and binds no read handler for it. Reachability is a separate question the accessory answers on its own: while the opener
-   * cannot be reached, every handler refuses through `answering` and HomeKit shows the whole accessory as No Response, never through this characteristic. The binary
-   * characteristic is seeded from `initialState` - the caller's corresponding RatgdoStatus field, which is the single source of truth - rather than a hardcoded
-   * default, so the momentary-versus-persistent distinction lives entirely in buildInitialStatus: momentary sensors (motion, the vehicle arriving and leaving contacts)
-   * resolve to false there and start clear, while a persistent sensor like vehicle presence carries the state captured at construction straight onto its
-   * characteristic. Every sensor service of this shape shares this block, so a future sensor variant is a single declarative entry and any cross-cutting change (a new
-   * StatusActive answer, an added characteristic) lands in exactly one place. Deviation logging is the caller's responsibility via `this.logFeature()` at the top of
-   * the calling configureXxx, so this helper stays focused on service wiring and carries no logging concern of its own.
+   * cannot be reached, every handler refuses through `answering` and HomeKit shows the whole accessory as No Response, never through this characteristic. The state
+   * characteristic is seeded from `initialValue` - HAP's value for the caller's corresponding RatgdoStatus field, which is the single source of truth - rather than
+   * a hardcoded default, so the momentary-versus-persistent distinction lives entirely in buildInitialStatus: momentary sensors (motion, the vehicle arriving and
+   * leaving contacts) resolve to false there and start clear, while a persistent sensor like vehicle presence carries the state captured at construction straight
+   * onto its characteristic. Every sensor service of this shape shares this block, so a future sensor variant is a single declarative entry and any cross-cutting
+   * change (a new StatusActive answer, an added characteristic) lands in exactly one place. Deviation logging is the caller's responsibility via `this.logFeature()`
+   * at the top of the calling configureXxx, so this helper stays focused on service wiring and carries no logging concern of its own.
    */
   private configureSensor(opts: {
 
     cacheKey: RatgdoService;
     hint: boolean;
     initialCharacteristic: CharacteristicTarget;
-    initialState: boolean;
+    initialValue: CharacteristicValue;
     nameSuffix?: string;
     service: AcquireServiceTarget;
     subtype?: string;
@@ -826,7 +826,7 @@ export class RatgdoAccessory implements Disposable {
 
     this.services[opts.cacheKey] = service;
 
-    service.updateCharacteristic(opts.initialCharacteristic, opts.initialState);
+    service.updateCharacteristic(opts.initialCharacteristic, opts.initialValue);
     service.updateCharacteristic(this.hap.Characteristic.StatusActive, true);
 
     return true;
@@ -842,7 +842,7 @@ export class RatgdoAccessory implements Disposable {
       cacheKey: RatgdoService.MOTION_SENSOR,
       hint: this.hints.motionSensor,
       initialCharacteristic: this.hap.Characteristic.MotionDetected,
-      initialState: this.status.motion,
+      initialValue: this.status.motion,
       service: this.hap.Service.MotionSensor
     });
   }
@@ -862,9 +862,6 @@ export class RatgdoAccessory implements Disposable {
 
     this.services[RatgdoService.DIMMER_OPENER_AUTOMATION] = service;
 
-    // The dimmer is on whenever the opener is in any state other than closed, which covers open and stopped.
-    const dimmerOn = (): boolean => this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED;
-
     /* Put the dimmer back on the door once HomeKit has acknowledged the onSet, after a door write the dimmer made was refused. A refused write leaves the door where
      * it was, so Brightness and On are restored from the status record - the position the door is at, and On by the same rule its getter answers with - rather than
      * from the value the user wrote.
@@ -872,10 +869,10 @@ export class RatgdoAccessory implements Disposable {
     const revertToDoor = (): void => this.scheduleUiRevert(() => {
 
       service.updateCharacteristic(this.hap.Characteristic.Brightness, this.status.doorPosition);
-      service.updateCharacteristic(this.hap.Characteristic.On, dimmerOn());
+      service.updateCharacteristic(this.hap.Characteristic.On, this.isDoorOpen());
     });
 
-    service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(dimmerOn));
+    service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.isDoorOpen()));
 
     // The On characteristic only handles closing. Opening is driven by the Brightness onSet below, since HomeKit always sends a Brightness update alongside an On=true.
     service.getCharacteristic(this.hap.Characteristic.On).onSet(this.answering((value: CharacteristicValue) => {
@@ -914,7 +911,7 @@ export class RatgdoAccessory implements Disposable {
       }
     }));
 
-    service.updateCharacteristic(this.hap.Characteristic.On, dimmerOn());
+    service.updateCharacteristic(this.hap.Characteristic.On, this.isDoorOpen());
     service.updateCharacteristic(this.hap.Characteristic.Brightness, this.status.doorPosition);
 
     return true;
@@ -935,9 +932,10 @@ export class RatgdoAccessory implements Disposable {
 
     this.services[RatgdoService.SWITCH_OPENER_AUTOMATION] = service;
 
-    // The switch is on whenever the opener is in any state other than closed, which covers open and stopped.
-    service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.doorCurrentStateBias(this.status.door) !==
-      this.hap.Characteristic.CurrentDoorState.CLOSED));
+    service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.isDoorOpen()));
+
+    // A refused door write leaves the door where it was, so the switch goes back to what the door is doing rather than to the opposite of what the user wrote, which
+    // would show a closed door when a scene turns an open door's switch on.
     service.getCharacteristic(this.hap.Characteristic.On).onSet(this.answering((value: CharacteristicValue) => {
 
       if(this.hints.logOpener) {
@@ -947,11 +945,11 @@ export class RatgdoAccessory implements Disposable {
 
       if(!this.setDoorState(value ? this.hap.Characteristic.TargetDoorState.OPEN : this.hap.Characteristic.TargetDoorState.CLOSED)) {
 
-        this.scheduleUiRevert(() => service.updateCharacteristic(this.hap.Characteristic.On, !value));
+        this.scheduleUiRevert(() => service.updateCharacteristic(this.hap.Characteristic.On, this.isDoorOpen()));
       }
     }));
 
-    service.updateCharacteristic(this.hap.Characteristic.On, this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED);
+    service.updateCharacteristic(this.hap.Characteristic.On, this.isDoorOpen());
 
     return true;
   }
@@ -992,7 +990,7 @@ export class RatgdoAccessory implements Disposable {
     this.services[RatgdoService.SWITCH_DISCO_LASER] = service;
 
     service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.status.discoLaser));
-    service.getCharacteristic(this.hap.Characteristic.On).onSet(this.answering(this.toggleOnSet("disco-laser", service)));
+    service.getCharacteristic(this.hap.Characteristic.On).onSet(this.answering(this.toggleOnSet({ service, state: () => this.status.discoLaser, topic: "disco-laser" })));
     service.updateCharacteristic(this.hap.Characteristic.On, this.status.discoLaser);
 
     return true;
@@ -1014,7 +1012,7 @@ export class RatgdoAccessory implements Disposable {
     this.services[RatgdoService.SWITCH_DISCO_LED] = service;
 
     service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.status.discoLed));
-    service.getCharacteristic(this.hap.Characteristic.On).onSet(this.answering(this.toggleOnSet("disco-led", service)));
+    service.getCharacteristic(this.hap.Characteristic.On).onSet(this.answering(this.toggleOnSet({ service, state: () => this.status.discoLed, topic: "disco-led" })));
     service.updateCharacteristic(this.hap.Characteristic.On, this.status.discoLed);
 
     return true;
@@ -1030,7 +1028,7 @@ export class RatgdoAccessory implements Disposable {
       cacheKey: RatgdoService.CONTACT_DISCO_VEHICLE_ARRIVING,
       hint: this.hints.discoVehicleArriving,
       initialCharacteristic: this.hap.Characteristic.ContactSensorState,
-      initialState: this.status.discoVehicleArriving,
+      initialValue: this.contactSensorState(this.status.discoVehicleArriving),
       nameSuffix: " Vehicle Arriving",
       service: this.hap.Service.ContactSensor,
       subtype: RatgdoService.CONTACT_DISCO_VEHICLE_ARRIVING
@@ -1047,7 +1045,7 @@ export class RatgdoAccessory implements Disposable {
       cacheKey: RatgdoService.CONTACT_DISCO_VEHICLE_LEAVING,
       hint: this.hints.discoVehicleLeaving,
       initialCharacteristic: this.hap.Characteristic.ContactSensorState,
-      initialState: this.status.discoVehicleLeaving,
+      initialValue: this.contactSensorState(this.status.discoVehicleLeaving),
       nameSuffix: " Vehicle Leaving",
       service: this.hap.Service.ContactSensor,
       subtype: RatgdoService.CONTACT_DISCO_VEHICLE_LEAVING
@@ -1064,7 +1062,7 @@ export class RatgdoAccessory implements Disposable {
       cacheKey: RatgdoService.OCCUPANCY_DISCO_VEHICLE_PRESENCE,
       hint: this.hints.discoVehiclePresence,
       initialCharacteristic: this.hap.Characteristic.OccupancyDetected,
-      initialState: this.status.discoVehiclePresence,
+      initialValue: this.occupancyDetected(this.status.discoVehiclePresence),
       nameSuffix: " Vehicle Presence",
       service: this.hap.Service.OccupancySensor,
       subtype: RatgdoService.OCCUPANCY_DISCO_VEHICLE_PRESENCE
@@ -1124,7 +1122,8 @@ export class RatgdoAccessory implements Disposable {
     this.services[RatgdoService.SWITCH_KONNECTED_STROBE] = service;
 
     service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.status.konnectedStrobe));
-    service.getCharacteristic(this.hap.Characteristic.On).onSet(this.answering(this.toggleOnSet("konnected-strobe", service)));
+    service.getCharacteristic(this.hap.Characteristic.On).onSet(this.answering(this.toggleOnSet({ service, state: () => this.status.konnectedStrobe,
+      topic: "konnected-strobe" })));
     service.updateCharacteristic(this.hap.Characteristic.On, this.status.konnectedStrobe);
 
     return true;
@@ -1145,19 +1144,19 @@ export class RatgdoAccessory implements Disposable {
 
     this.services[RatgdoService.SWITCH_LOCKOUT] = service;
 
-    // The switch is on whenever the remote lockout is engaged.
-    service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.status.lock === this.hap.Characteristic.LockCurrentState.SECURED));
+    // The switch is on whenever the remote lockout is engaged, and a command that never reached the opener puts it back on the lockout the opener holds.
+    service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.remotesLockedOut()));
     service.getCharacteristic(this.hap.Characteristic.On).onSet(this.answering((value: CharacteristicValue) => {
 
       this.log.info("Automation wireless remote lockout switch: remotes are %s.", value ? "locked out" : "permitted");
 
       if(!this.command("lock", value ? "lock" : "unlock")) {
 
-        this.scheduleUiRevert(() => service.updateCharacteristic(this.hap.Characteristic.On, !value));
+        this.scheduleUiRevert(() => service.updateCharacteristic(this.hap.Characteristic.On, this.remotesLockedOut()));
       }
     }));
 
-    service.updateCharacteristic(this.hap.Characteristic.On, this.status.lock === this.hap.Characteristic.LockCurrentState.SECURED);
+    service.updateCharacteristic(this.hap.Characteristic.On, this.remotesLockedOut());
 
     return true;
   }
@@ -1172,7 +1171,7 @@ export class RatgdoAccessory implements Disposable {
       cacheKey: RatgdoService.OCCUPANCY_SENSOR_DOOR_OPEN,
       hint: this.hints.doorOpenOccupancySensor,
       initialCharacteristic: this.hap.Characteristic.OccupancyDetected,
-      initialState: this.status.doorOpenOccupancy,
+      initialValue: this.occupancyDetected(this.status.doorOpenOccupancy),
       nameSuffix: " Open",
       service: this.hap.Service.OccupancySensor,
       subtype: RatgdoService.OCCUPANCY_SENSOR_DOOR_OPEN
@@ -1189,7 +1188,7 @@ export class RatgdoAccessory implements Disposable {
       cacheKey: RatgdoService.OCCUPANCY_SENSOR_MOTION,
       hint: this.hints.motionOccupancySensor,
       initialCharacteristic: this.hap.Characteristic.OccupancyDetected,
-      initialState: this.status.motionOccupancy,
+      initialValue: this.occupancyDetected(this.status.motionOccupancy),
       service: this.hap.Service.OccupancySensor,
       subtype: RatgdoService.OCCUPANCY_SENSOR_MOTION
     });
@@ -1432,21 +1431,21 @@ export class RatgdoAccessory implements Disposable {
 
       case "binary_sensor-vehicle_arriving":
 
-        discoVehicleArrivingContactService?.updateCharacteristic(this.hap.Characteristic.ContactSensorState, event.state === "ON");
+        discoVehicleArrivingContactService?.updateCharacteristic(this.hap.Characteristic.ContactSensorState, this.contactSensorState(event.state === "ON"));
         this.updateVehicleSensorState("discoVehicleArriving", event.state, "Vehicle arriving", "vehicleArriving");
 
         break;
 
       case "binary_sensor-vehicle_detected":
 
-        discoVehiclePresenceOccupancyService?.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, event.state === "ON");
+        discoVehiclePresenceOccupancyService?.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, this.occupancyDetected(event.state === "ON"));
         this.updateVehicleSensorState("discoVehiclePresence", event.state, "Vehicle", "vehiclePresence");
 
         break;
 
       case "binary_sensor-vehicle_leaving":
 
-        discoVehicleLeavingContactService?.updateCharacteristic(this.hap.Characteristic.ContactSensorState, event.state === "ON");
+        discoVehicleLeavingContactService?.updateCharacteristic(this.hap.Characteristic.ContactSensorState, this.contactSensorState(event.state === "ON"));
         this.updateVehicleSensorState("discoVehicleLeaving", event.state, "Vehicle leaving", "vehicleLeaving");
 
         break;
@@ -1537,7 +1536,7 @@ export class RatgdoAccessory implements Disposable {
         garageDoorService?.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.status.door);
 
         // Update our automation switch, if configured.
-        switchService?.updateCharacteristic(this.hap.Characteristic.On, this.doorTargetStateBias(this.status.door) === this.hap.Characteristic.TargetDoorState.OPEN);
+        switchService?.updateCharacteristic(this.hap.Characteristic.On, this.isDoorOpen());
 
         if(this.hints.logOpener) {
 
@@ -1613,7 +1612,7 @@ export class RatgdoAccessory implements Disposable {
         garageDoorService?.updateCharacteristic(this.hap.Characteristic.LockTargetState, (event.state === "LOCKED") ?
           this.hap.Characteristic.LockTargetState.SECURED : this.hap.Characteristic.LockTargetState.UNSECURED);
         garageDoorService?.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.status.lock);
-        lockoutService?.updateCharacteristic(this.hap.Characteristic.On, this.status.lock === this.hap.Characteristic.LockCurrentState.SECURED);
+        lockoutService?.updateCharacteristic(this.hap.Characteristic.On, this.remotesLockedOut());
 
         this.log.info("Wireless remotes are %s.", (event.state === "LOCKED") ? "locked out" : "permitted");
 
@@ -1646,17 +1645,24 @@ export class RatgdoAccessory implements Disposable {
   }
 
   /* Build an onSet handler for a HomeKit On characteristic. Maps the boolean value into the "on" / "off" payload command() expects, and on command failure routes the UI
-   * back to its prior state through scheduleUiRevert(). Every toggle-style service shares this exact shape; centralizing it here means the on/off wire format AND the
-   * failure-revert contract both live in one place. Passing the service through the closure lets the failure path target the specific characteristic to revert without
-   * burdening the caller with the boilerplate.
+   * back through scheduleUiRevert() to the state the opener reports, read from the status record the toggle's getter answers with. A refused write leaves the toggle
+   * where it was, so restoring the opposite of the written value would be wrong whenever the user wrote the state it already had - a scene turning on a light that is
+   * already on would show it off. Every toggle-style service shares this exact shape; centralizing it here means the on/off wire format AND the failure-revert
+   * contract both live in one place.
+   *
+   * @param options.service - The service whose On characteristic the revert writes.
+   * @param options.state   - The status record's answer for this toggle.
+   * @param options.topic   - The command topic the write dispatches to.
+   *
+   * @returns The onSet handler.
    */
-  private toggleOnSet(topic: CommandTopic, service: Service): (value: CharacteristicValue) => void {
+  private toggleOnSet({ service, state, topic }: { service: Service; state: () => boolean; topic: CommandTopic }): (value: CharacteristicValue) => void {
 
     return (value) => {
 
       if(!this.command(topic, (value === true) ? "on" : "off")) {
 
-        this.scheduleUiRevert(() => service.updateCharacteristic(this.hap.Characteristic.On, !value));
+        this.scheduleUiRevert(() => service.updateCharacteristic(this.hap.Characteristic.On, state()));
       }
     };
   }
@@ -1670,11 +1676,14 @@ export class RatgdoAccessory implements Disposable {
 
     /* Ensure the ESPHome API client can carry the command. The client is absent once its connection has been released, and a held client between sessions -
      * the patience window before its reachability verdict - drops a frame it has no session to send on, so a command is refused unless the session is live, and the
-     * caller reverts its UI rather than showing a write that never reached the door.
+     * caller reverts its UI rather than showing a write that never reached the opener. An MQTT set has no UI to revert, so the refusal is noted at debug, naming the
+     * topic, where a support request can find a command that went nowhere.
      */
     const client = this.platform.getEspHomeClient(this.device.mac);
 
     if(!client || !isConnectionLive(client.health())) {
+
+      this.log.debug("The %s command was not sent, because the opener cannot be reached.", topic);
 
       return false;
     }
@@ -1864,8 +1873,23 @@ export class RatgdoAccessory implements Disposable {
     return "unknown";
   }
 
-  // Utility function to return our bias for what the current door state should be. This backs both the initial characteristic writes at startup and the live
-  // onGet handlers for the automation door position dimmer and switch.
+  /* Whether the door counts as open for the automation dimmer and switch: in any state but closed, which covers open, stopped, and an obstructed door. The
+   * tiles' reads, their writes at startup, the switch's writes as the door moves, and the tiles' reverts after a refused write answer by this one rule, so a tile
+   * is never put back to a state its own read would contradict.
+   */
+  private isDoorOpen(): boolean {
+
+    return this.doorCurrentStateBias(this.status.door) !== this.hap.Characteristic.CurrentDoorState.CLOSED;
+  }
+
+  // Whether the opener's wireless remotes are locked out, the one answer the lockout switch's read, its writes and its revert after a refused write all give.
+  private remotesLockedOut(): boolean {
+
+    return this.status.lock === this.hap.Characteristic.LockCurrentState.SECURED;
+  }
+
+  // Utility function to return our bias for what the current door state should be. This backs the door-open rule the automation door position dimmer and switch
+  // answer by.
   private doorCurrentStateBias(state: CharacteristicValue): CharacteristicValue {
 
     // Our current door state reflects our opinion on what open or closed means in HomeKit terms. For the obvious states, this is easy. For some of the edge cases, it can
@@ -1978,6 +2002,21 @@ export class RatgdoAccessory implements Disposable {
     }
   }
 
+  /* HAP's own value for a contact sensor's state. A Disco vehicle sensor is triggered while a vehicle is arriving or leaving, which HomeKit shows as an open contact,
+   * the state that raises its alert, so a triggered sensor is CONTACT_NOT_DETECTED and a clear one CONTACT_DETECTED. The characteristic is a uint8 whose constants
+   * HAP defines, so it is written those constants rather than a boolean HAP would have to coerce.
+   */
+  private contactSensorState(triggered: boolean): CharacteristicValue {
+
+    return triggered ? this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED : this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
+  }
+
+  // HAP's own value for an occupancy sensor's state, written as the uint8 constants HAP defines rather than a boolean HAP would have to coerce.
+  private occupancyDetected(detected: boolean): CharacteristicValue {
+
+    return detected ? this.hap.Characteristic.OccupancyDetected.OCCUPANCY_DETECTED : this.hap.Characteristic.OccupancyDetected.OCCUPANCY_NOT_DETECTED;
+  }
+
   /* Single source of truth for an occupancy-indicator transition. From the RATGDO_OCCUPANCY descriptor for the given kind, it writes the status field, the HomeKit
    * OccupancyDetected characteristic, the gated log line, and the MQTT publish - every piece that must move together. The caller owns the transition gate (when to
    * raise or clear); this method owns the write so the pieces can never drift out of sync.
@@ -1987,7 +2026,7 @@ export class RatgdoAccessory implements Disposable {
     const descriptor = RATGDO_OCCUPANCY[kind];
 
     this.status[descriptor.field] = detected;
-    this.services[descriptor.service]?.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, detected);
+    this.services[descriptor.service]?.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, this.occupancyDetected(detected));
 
     // Both occupancy kinds share the motion log gate: there is no dedicated door-open logging hint, so the door-open indicator's log goes through Log.Motion by design.
     if(this.hints.logMotion) {

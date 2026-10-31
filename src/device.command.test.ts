@@ -10,12 +10,13 @@
  * (RATGDO_KONNECTED_PCW_DURATION) - run on the platform double's test clock, so the deferred characteristic write is observed deterministically without a real-time
  * delay.
  */
-import { Characteristic, Service, buildRatgdoAccessory, makeCoverEvent, makeKonnectedInitialState, makeRatgdoInitialState } from "./testing.helpers.ts";
+import { Characteristic, Service, buildRatgdoAccessory, makeCoverEvent, makeKonnectedInitialState, makeLightEvent, makeLockEvent,
+  makeRatgdoInitialState } from "./testing.helpers.ts";
+import { LockCommand, LockState } from "esphome-client";
 import { RATGDO_KONNECTED_PCW_DURATION, RATGDO_UI_REVERT_DELAY } from "./settings.ts";
 import { RatgdoService, RatgdoVariant } from "./types.ts";
 import { describe, test } from "node:test";
 import { loggedAt, present, triggerSet } from "homebridge-plugin-utils/testing";
-import { LockCommand } from "esphome-client";
 import { MQTT_SET_SUFFIX } from "homebridge-plugin-utils";
 import assert from "node:assert/strict";
 
@@ -340,6 +341,87 @@ describe("RatgdoAccessory command dispatch", () => {
 
       assert.equal(dimmer.getCharacteristic(Characteristic.On).value, true, "the refused close reverts On to the open door the status record holds");
       assert.equal(dimmer.getCharacteristic(Characteristic.Brightness).value, 100, "and leaves Brightness on the open door's recorded position");
+    });
+
+    test("refuses a dimmer close while the door is closing, and reverts On to the closing door the status record holds", async () => {
+
+      const { accessory, client, clock, ratgdo } = buildRatgdoAccessory({ userOptions: ["Enable.Opener.Dimmer"] });
+      const dimmer = present(accessory.getServiceById(Service.Lightbulb, RatgdoService.DIMMER_OPENER_AUTOMATION), "the automation dimmer");
+
+      // The current_operation field mirrors the snake_case ESPHome wire shape EspHomeEvent declares, so the camelcase rule is scoped off for this one literal.
+      // eslint-disable-next-line camelcase
+      ratgdo.updateState({ current_operation: "CLOSING", id: "cover-door", position: 0.5, state: "CLOSING" });
+      client.live = false;
+
+      await triggerSet(dimmer.getCharacteristic(Characteristic.On), false);
+
+      assert.deepEqual(client.commands, [], "the stop a close of a moving door sends never reaches a client that holds no live session");
+
+      clock.advance(RATGDO_UI_REVERT_DELAY);
+
+      assert.equal(dimmer.getCharacteristic(Characteristic.On).value, false, "the refused close reverts On to the closing door, which the dimmer's rule reads as closed");
+      assert.equal(dimmer.getCharacteristic(Characteristic.Brightness).value, 50, "and Brightness to the position the closing door has reached");
+    });
+
+    /* The automation opener switch, every toggle and the lockout switch revert from the status record, so a refused write puts each tile back on what the opener
+     * holds. Each row writes the state the tile already shows, the case where restoring the opposite of the written value would show the opposite of the truth.
+     */
+    test("reverts a refused automation opener switch write to the door the status record holds", async () => {
+
+      const { accessory, client, clock } = buildRatgdoAccessory({ initialState: makeRatgdoInitialState([makeCoverEvent("door", 1)]),
+        userOptions: [ "Enable.Opener.ReadOnly", "Enable.Opener.Switch" ] });
+      const on = present(accessory.getServiceById(Service.Switch, RatgdoService.SWITCH_OPENER_AUTOMATION), "the automation opener switch")
+        .getCharacteristic(Characteristic.On);
+
+      assert.equal(on.value, true, "the switch of an open door is born on");
+
+      await triggerSet(on, true);
+      clock.advance(RATGDO_UI_REVERT_DELAY);
+
+      assert.deepEqual(client.commands, [], "read-only mode dispatches nothing");
+      assert.equal(on.value, true, "the refused write leaves the switch on, the open door the status record holds, rather than showing it closed");
+    });
+
+    test("reverts a refused toggle write to the state the status record holds", async () => {
+
+      const { accessory, client, clock } = buildRatgdoAccessory({ initialState: makeRatgdoInitialState([makeLightEvent("light", true)]) });
+      const on = present(accessory.getService(Service.Lightbulb), "the light service").getCharacteristic(Characteristic.On);
+
+      client.live = false;
+
+      await triggerSet(on, true);
+      clock.advance(RATGDO_UI_REVERT_DELAY);
+
+      assert.deepEqual(client.commands, [], "the toggle never reaches a client that holds no live session");
+      assert.equal(on.value, true, "the refused write leaves the light on, as the status record holds it, rather than turning a lit light's tile off");
+    });
+
+    test("reverts a refused lockout switch write to the lockout the status record holds", async () => {
+
+      const { accessory, client, clock } = buildRatgdoAccessory({ initialState: makeRatgdoInitialState([makeLockEvent("lock_remotes", LockState.LOCKED)]),
+        userOptions: ["Enable.Opener.Switch.RemoteLockout"] });
+      const on = present(accessory.getServiceById(Service.Switch, RatgdoService.SWITCH_LOCKOUT), "the lockout switch").getCharacteristic(Characteristic.On);
+
+      client.live = false;
+
+      await triggerSet(on, true);
+      clock.advance(RATGDO_UI_REVERT_DELAY);
+
+      assert.deepEqual(client.commands, [], "the lockout write never reaches a client that holds no live session");
+      assert.equal(on.value, true, "the refused write leaves the switch on, the lockout the opener holds");
+    });
+
+    test("notes a command the opener cannot be reached for at debug, naming its topic", async () => {
+
+      const { client, entries, mqtt } = buildRatgdoAccessory({ config: { debug: true, options: undefined }, mqtt: true });
+
+      client.live = false;
+
+      await mqtt?.invokeSet("garagedoor" + MQTT_SET_SUFFIX, "open");
+
+      // The plugin's debug setting routes an enabled debug line through warn, the level Homebridge prints without its own debug switch.
+      assert.ok(loggedAt(entries, "warn", "The door command was not sent, because the opener cannot be reached."),
+        "an MQTT set has no tile to revert, so the refusal is noted on the debug channel, where a support request can find it");
     });
 
     /* Read-only mode refuses every door write, and the target goes back to where the status record says the door is headed. A stopped door targets open, so a
