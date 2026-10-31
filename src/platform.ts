@@ -3,10 +3,10 @@
  * platform.ts: homebridge-ratgdo platform class.
  */
 import type { API, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
+import { AccessoryPersistence, CoalescingTask, FeatureOptions, HbpuAbortError, MQTT_AVAILABILITY_OFFLINE, Perms, WakeableWait, createMqttClient, debugGatedLog,
+  discoverServices, formatErrorMessage, isAdvertisedAt, mdnsBrowserFactory, mqttConnectionSettings, mqttTopic, notResponding, prefixedLog, sanitizeName,
+  superviseLoop, systemClock } from "homebridge-plugin-utils";
 import type { Clock, HomebridgePluginLogging, MdnsBrowserFactory, MdnsDiscovery, MdnsDiscoveryEvent, MqttClient, Nullable } from "homebridge-plugin-utils";
-import { CoalescingTask, FeatureOptions, HbpuAbortError, MQTT_AVAILABILITY_OFFLINE, Perms, WakeableWait, createMqttClient, debugGatedLog, discoverServices,
-  formatErrorMessage, isAdvertisedAt, mdnsBrowserFactory, mqttConnectionSettings, mqttTopic, notResponding, prefixedLog, sanitizeName, superviseLoop,
-  systemClock } from "homebridge-plugin-utils";
 import { DeviceIdentityError, applyDeviceInfo, isEncryptionError, openConnection, openManualConnection } from "./connection.ts";
 import type { EncryptionKeyLookup, OpenEspHomeClient } from "./connection.ts";
 import type { EntityId, EspHomeClient, LifecycleEvent, LogEventData, TelemetryEvent } from "esphome-client";
@@ -114,6 +114,8 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
   public readonly mqtt: Nullable<MqttClient>;
   // How every dial this platform makes opens its ESPHome client, the production factory in the field and a suite's fake under test.
   private readonly openClient: OpenEspHomeClient;
+  // The one path a change to the accessory cache takes: saves are gathered into the library's save window, and a removal drops any save still waiting for it.
+  private readonly persistence: AccessoryPersistence;
   // AbortController scoped to the platform's lifetime. Aborted on Homebridge shutdown so that every signal-aware resource we own (the MQTT client, any future
   // signal-driven primitive) tears itself down through one composed signal instead of per-resource imperative cleanup.
   private readonly shutdownController: AbortController;
@@ -156,6 +158,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.log = debugGatedLog(log, (): boolean => this.config.debug);
     this.mqtt = null;
     this.openClient = openClient;
+    this.persistence = new AccessoryPersistence({ api, clock: this.clock, platformName: PLATFORM_NAME, pluginIdentifier: PLUGIN_NAME });
     this.shutdownController = new AbortController();
 
     // We can't start without being configured.
@@ -182,8 +185,9 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     // Fire up the Ratgdo API once Homebridge has loaded all the cached accessories it knows about and called configureAccessory() on each.
     api.on("didFinishLaunching", () => this.configureRatgdo());
 
-    // Make sure we take ourselves offline when we shutdown. This is the single owner of platform shutdown - every cleanup (signal abort, ESPHome teardown, accessory
-    // offline announcement) flows through here in one ordered pass, so future readers find the entire teardown sequence in one place.
+    // Make sure we take ourselves offline when we shutdown. Every cleanup the platform owns - the signal abort, the ESPHome teardown, the accessory offline
+    // announcement - flows through here in one ordered pass. The accessory cache's final save is the persistence helper's, made from a shutdown listener of its own,
+    // and nothing here marks the cache, so the order the shutdown listeners run in never matters.
     api.on("shutdown", () => {
 
       // Abort the platform signal first. This cancels every signal-aware resource (the MQTT client, the discovery stream, anything else composed onto our lifetime)
@@ -706,7 +710,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
       if(accessory) {
 
         this.log.info("%s: Removing device from HomeKit.", accessory.displayName);
-        this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+        this.persistence.unregister([accessory]);
         this.accessories.delete(uuid);
       }
 
@@ -803,7 +807,11 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
     this.bindConnection(ratgdo, client);
     this.configuredDevices.set(uuid, ratgdo);
-    this.api.updatePlatformAccessories([accessory]);
+
+    /* One save, once construction is done. Every service and characteristic gate the accessory has runs inside its construction, and so does every name it writes,
+     * so this mark follows each change construction made to what the cache holds, and the save window gathers it with the other openers configuring alongside it.
+     */
+    this.persistence.persist(accessory);
 
     return ratgdo;
   }
@@ -1210,8 +1218,26 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
    */
   private refreshIdentity(ratgdo: RatgdoAccessory, client: EspHomeClient): void {
 
+    const { firmwareVersion, model } = ratgdo.device;
+
     applyDeviceInfo(ratgdo.device, client);
     ratgdo.refreshInfo();
+
+    /* A session that moves an identity field changes what the cache holds, and the settings sidebar groups each device under the Model it reads back off its
+     * cached accessory, so the accessory is saved. A session on unchanged firmware moves no field and saves nothing. The fresh client's bridge meets the same
+     * fields construction was born with, since configureDevice applies the device info before it constructs, so the bridge saves nothing here as well.
+     */
+    if((ratgdo.device.model === model) && (ratgdo.device.firmwareVersion === firmwareVersion)) {
+
+      return;
+    }
+
+    const accessory = this.accessories.get(ratgdo.uuid);
+
+    if(accessory) {
+
+      this.persistence.persist(accessory);
+    }
   }
 
   /* The online statement: announce the connection in the log, with the encryption indicator, and dispatch availability=online so the accessory answers HomeKit

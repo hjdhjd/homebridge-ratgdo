@@ -2,12 +2,15 @@
  *
  * mqtt.ts: The single source of truth for the MQTT topics ratgdo publishes and subscribes to.
  */
-import { mqttAvailabilityEntry, mqttTopicCatalog } from "homebridge-plugin-utils";
+import { mqttAvailabilityEntryFor, mqttTopicCatalog } from "homebridge-plugin-utils";
 
 /* The plugin's whole MQTT topic surface, declared once and read from here by everything that spells a topic. Each publish and subscribe site in the device class
  * takes its tail and its log label from this catalog, and the documentation build projects it into the two marked regions of docs/MQTT.md, so what the document
  * prints cannot disagree with what the plugin puts on the wire. The presence of `publish`, `get`, and `set` on an entry is the declaration that the plugin performs
  * that verb, which is why an entry's message text and the code path that sends it are one statement rather than two that have to be kept in step.
+ *
+ * The availability entry is the family's own, composed for this plugin's nouns: what the plugin reaches, and what it declares available, is the opener, so the
+ * library's sentence carries that word while the library keeps the sentence itself.
  *
  * The library's builder validates the whole declaration the moment this module is evaluated - a duplicate wire tail, an empty topic, an entry declaring no verb at
  * all - so a malformed catalog fails the plugin's own import rather than reaching a broker. The export carries no type annotation because the builder types it:
@@ -21,7 +24,7 @@ import { mqttAvailabilityEntry, mqttTopicCatalog } from "homebridge-plugin-utils
  */
 export const mqttTopics = mqttTopicCatalog({
 
-  availability: mqttAvailabilityEntry,
+  availability: mqttAvailabilityEntryFor({ reaches: "the opener", subject: "An opener" }),
   doorOpenOccupancy: { get: "`true` will trigger a publish event of the current garage door opener door open indicator occupancy status.",
     label: "Door Open Indicator Occupancy",
     publish: "`true` when the garage door open indicator occupancy is detected. `false` when the garage door open indicator occupancy event is reset.",

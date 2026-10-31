@@ -8,7 +8,7 @@
  */
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { mqttAvailabilityEntry } from "homebridge-plugin-utils";
+import { mqttAvailabilityEntryFor } from "homebridge-plugin-utils";
 import { mqttTopics } from "./mqtt.ts";
 
 // The wire tails the plugin ships, written out rather than derived, so this list is the receipt a reader compares the declaration against.
@@ -60,13 +60,15 @@ describe("the MQTT topic catalog", () => {
     assert.deepEqual(labels, SUBSCRIPTION_LABELS, "each subscribed tail carries its own label, which is what a user reads in the client's get and set log lines");
   });
 
-  // The per-opener availability entry is the library's, spread unchanged, so every plugin in the family states a device's reachability on the same tail, in the same
-  // words, with the same document text. It is compared against the library's own entry rather than a restated literal, so its text is written in the library alone.
-  test("carries the library's availability entry unchanged", () => {
+  // The per-opener availability entry is the library's, composed with the opener's nouns, so every plugin in the family states a device's reachability on the same
+  // tail and in the same sentence while this document names the opener. It is compared against the library's own composition rather than a restated sentence, so
+  // the sentence is written in the library alone and only the nouns are written here.
+  test("carries the library's availability entry in the opener's words", () => {
 
     const { label, publish, topic } = mqttTopics.availability;
 
-    assert.deepEqual({ label, publish, topic }, { label: mqttAvailabilityEntry.label, publish: mqttAvailabilityEntry.publish, topic: mqttAvailabilityEntry.topic },
-      "the availability entry carries the library entry's label, publish text, and topic");
+    assert.deepEqual({ label, publish, topic }, mqttAvailabilityEntryFor({ reaches: "the opener", subject: "An opener" }),
+      "the availability entry is the library's, composed with the opener as what the plugin reaches and what it declares available");
+    assert.ok(publish.includes("An opener is available only when"), "so the document speaks of the opener rather than a generic device");
   });
 });
