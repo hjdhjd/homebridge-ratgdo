@@ -4,7 +4,7 @@
  */
 import type { FeatureCategoryEntry, FeatureOptionEntry, FeatureOptionScope } from "homebridge-plugin-utils";
 import { RATGDO_MQTT_TOPIC, RATGDO_OCCUPANCY_DURATION } from "./settings.ts";
-import { buildFixedScopeDescribers, mqttFeatureOptions } from "homebridge-plugin-utils";
+import { buildFixedScopeDescribers, expandOption, mqttFeatureOptions } from "homebridge-plugin-utils";
 import type { PlatformConfig } from "homebridge";
 import { RatgdoVariant } from "./types.ts";
 
@@ -88,8 +88,8 @@ const mqtt = mqttFeatureOptions<RatgdoOptionMeta>({ defaultTopic: RATGDO_MQTT_TO
 
 /* The plugin's own annotation on a catalog entry, carried through the opaque meta channel the library's category and option types thread along untouched. An entry that
  * names a variant is shown only to devices of that variant, and an entry that names none is shown to every device. Which hardware has which feature is therefore stated
- * once, here in the catalog, and the settings page decides what a device's page offers by reading this declaration rather than by matching category or option names of
- * its own.
+ * once, here in the catalog: the settings page decides what a device's page offers by reading this declaration rather than by matching category or option names of its
+ * own, and the plugin reads it through optionFitsVariant.
  */
 export interface RatgdoOptionMeta {
 
@@ -166,7 +166,7 @@ const motionOptions: RatgdoFeatureOption[] = [
 
   { default: true, description: "Make the motion sensor on the opener available in HomeKit.", name: "", scopes: [ "device", "global" ] },
   { default: false, description: "Add an occupancy sensor accessory using motion sensor activity to determine occupancy.", name: "OccupancySensor", scopes: [ "device", "global" ] },
-  { default: true, defaultValue: RATGDO_OCCUPANCY_DURATION, description: "Duration, in seconds, to wait without receiving a motion event to determine when occupancy is no longer detected.", group: "OccupancySensor", name: "OccupancySensor.Duration", scopes: [ "device", "global" ] }
+  { default: true, defaultValue: RATGDO_OCCUPANCY_DURATION, description: "Duration, in seconds, to wait without receiving a motion event to determine when occupancy is no longer detected.", group: "OccupancySensor", name: "OccupancySensor.Duration", render: "seconds", scopes: [ "device", "global" ] }
 ];
 
 // Opener options.
@@ -178,7 +178,7 @@ const openerOptions: RatgdoFeatureOption[] = [
   { default: false, description: "Add a dimmer accessory to control the opener. This can be useful in automation scenarios where you want to set the door to a specific percentage.", name: "Dimmer", scopes: [ "device", "global" ] },
   { default: false, description: "Add a switch accessory to control the opener. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling garage door openers.", name: "Switch", scopes: [ "device", "global" ] },
   { default: false, description: "Add an occupancy sensor accessory using the open state of the opener to determine occupancy. This can be useful in automation scenarios where you want to trigger an action based on the opener being open for an extended period of time.", name: "OccupancySensor", scopes: [ "device", "global" ] },
-  { default: true, defaultValue: RATGDO_OCCUPANCY_DURATION, description: "Duration, in seconds, to wait once the opener has reached the open state before indicating occupancy.", group: "OccupancySensor", name: "OccupancySensor.Duration", scopes: [ "device", "global" ] }
+  { default: true, defaultValue: RATGDO_OCCUPANCY_DURATION, description: "Duration, in seconds, to wait once the opener has reached the open state before indicating occupancy.", group: "OccupancySensor", name: "OccupancySensor.Duration", render: "seconds", scopes: [ "device", "global" ] }
 ];
 /* eslint-enable @stylistic/max-len */
 
@@ -202,6 +202,35 @@ export const featureOptions: Record<string, FeatureOptionEntry<RatgdoOptionMeta>
 
   "Opener": openerOptions
 };
+
+// The variant each option belongs to, keyed by its fully formed name: the option's own declaration, else its category's. An option absent here belongs to every device.
+const optionVariants = new Map<string, RatgdoVariant>();
+
+for(const category of featureOptionCategories) {
+
+  for(const option of featureOptions[category.name] ?? []) {
+
+    const variant = option.meta?.variant ?? category.meta?.variant;
+
+    if(variant) {
+
+      optionVariants.set(expandOption(category.name, option.name), variant);
+    }
+  }
+}
+
+/**
+ * Whether a feature option applies to a device of the given variant, as the catalog declares it.
+ *
+ * @param option  - The fully formed option name, in the catalog's casing.
+ * @param variant - The device's variant.
+ *
+ * @returns `true` when the option names no variant or names this one.
+ */
+export function optionFitsVariant(option: string, variant: RatgdoVariant): boolean {
+
+  return (optionVariants.get(option) ?? variant) === variant;
+}
 
 /* Documentation hooks: the scope prose the generated feature-option reference renders. The library's fixed sentences are written for a device-facing option
  * configurable at both levels and for a platform-wide fact configurable globally alone, so the sentences themselves belong to the library and choosing them is all

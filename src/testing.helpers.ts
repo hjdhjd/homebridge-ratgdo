@@ -722,6 +722,17 @@ export function buildRatgdoAccessory(options: BuildRatgdoAccessoryOptions = {}):
   const device = makeTestDevice(options.device);
   const { client, clock, entries, mqtt, platform } = makeTestPlatform({ clientUnavailable: options.clientUnavailable, clock: options.clock, config: options.config,
     mqtt: options.mqtt, userOptions: options.userOptions });
+  const { accessory, ratgdo } = addRatgdoAccessory(platform, device, options);
+
+  return { accessory, client, clock, entries, mqtt, platform, ratgdo };
+}
+
+/* Bring an opener onto a platform double, restored and constructed the way buildRatgdoAccessory's comment above describes. A suite calls this directly for a second
+ * opener on the platform it already holds, to assert what openers sharing one FeatureOptions engine do between them.
+ */
+export function addRatgdoAccessory(platform: TestPlatform, device: RatgdoDevice, options: Pick<BuildRatgdoAccessoryOptions, "initialState" | "seed"> = {}):
+Pick<BuildRatgdoAccessoryResult, "accessory" | "ratgdo"> {
+
   const accessory = new platform.api.platformAccessory(device.name, platform.hap.uuid.generate(device.mac));
   const initialState = options.initialState ?? ((device.variant === RatgdoVariant.KONNECTED) ? makeKonnectedInitialState() : makeRatgdoInitialState());
 
@@ -730,9 +741,7 @@ export function buildRatgdoAccessory(options: BuildRatgdoAccessoryOptions = {}):
   platform.api.restorePlatformAccessories({ accessories: [accessory], platform: { configureAccessory: (): void => undefined }, platformName: PLATFORM_NAME,
     pluginIdentifier: PLUGIN_NAME });
 
-  const ratgdo = constructRatgdo(platform, accessory, device, initialState);
-
-  return { accessory, client, clock, entries, mqtt, platform, ratgdo };
+  return { accessory, ratgdo: constructRatgdo(platform, accessory, device, initialState) };
 }
 
 // Construct a REAL RatgdoAccessory on the platform double. The platform cast bridges the double to the production constructor's parameter type, the one cast a

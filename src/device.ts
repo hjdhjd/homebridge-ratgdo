@@ -17,6 +17,7 @@ import { RATGDO_VARIANT_LABELS } from "./webui/variants.ts";
 import type { RatgdoEntityRef } from "./entities.ts";
 import type { RatgdoPlatform } from "./platform.ts";
 import { mqttTopics } from "./mqtt.ts";
+import { optionFitsVariant } from "./options.ts";
 
 /* Command topics dispatched to the ESPHome client by command(). Each topic accepts a different payload shape:
  *
@@ -233,6 +234,11 @@ export class RatgdoAccessory implements Disposable {
      * any log call that depends on them) is enforced by program order, not by reviewer discipline.
      */
     this.logFeature("Opener.ReadOnly", "Read-only mode");
+    this.logFeature("Log.Light", "Light event logging");
+    this.logFeature("Log.Motion", "Motion event logging");
+    this.logFeature("Log.Obstruction", "Obstruction event logging");
+    this.logFeature("Log.Opener", "Opener event logging");
+    this.logFeature("Log.VehiclePresence", "Vehicle presence event logging");
     this.logNaming();
 
     this.lifetime = new AbortController();
@@ -454,33 +460,32 @@ export class RatgdoAccessory implements Disposable {
 
   /* Build the hints record from feature-option configuration. Resolves every option exactly once at construction time and returns the populated structure. The
    * caching contract is structural: any reader (the opener's names, the configureXxx methods, the updateState hot path) reads from `this.hints.X` instead of re-issuing
-   * the underlying featureOptions lookup. The variant gates fold here too so configureXxx() methods can treat a single hint boolean as the source of truth for whether
-   * a feature applies to this device. Motion sits under the same gate as the disco hardware: Konnected firmware advertises no motion entity, so both motion hints
-   * resolve false on that variant and the accessory carries neither the motion sensor nor the occupancy sensor its activity would drive.
+   * the underlying featureOptions lookup. The catalog's variant declarations fold here too, through hasFeature(), so configureXxx() methods can treat a single hint
+   * boolean as the source of truth for whether a feature applies to this device. Motion is declared for the same hardware as the disco features: Konnected firmware
+   * advertises no motion entity, so both motion hints resolve false on that variant and the accessory carries neither the motion sensor nor the occupancy sensor its
+   * activity would drive.
    *
    * No side effects: this function returns a value and does not touch `this.hints`, `this.log`, or any other field that depends on construction order. Side effects
    * that depend on the resolved hints (e.g., the read-only announcement) belong in the constructor, after `this.hints` is assigned.
    */
   private buildHints(): RatgdoHints {
 
-    const isRatgdo = this.device.variant === RatgdoVariant.RATGDO;
-    const isKonnected = this.device.variant === RatgdoVariant.KONNECTED;
     const featureOptions = this.platform.featureOptions;
 
     return {
 
       automationDimmer: this.hasFeature("Opener.Dimmer"),
       automationSwitch: this.hasFeature("Opener.Switch"),
-      discoBattery: isRatgdo && this.hasFeature("Disco.Battery"),
-      discoLaserSwitch: isRatgdo && this.hasFeature("Disco.Switch.Laser"),
-      discoLedSwitch: isRatgdo && this.hasFeature("Disco.Switch.Led"),
-      discoVehicleArriving: isRatgdo && this.hasFeature("Disco.ContactSensor.Vehicle.Arriving"),
-      discoVehicleLeaving: isRatgdo && this.hasFeature("Disco.ContactSensor.Vehicle.Leaving"),
-      discoVehiclePresence: isRatgdo && this.hasFeature("Disco.OccupancySensor.Vehicle.Presence"),
+      discoBattery: this.hasFeature("Disco.Battery"),
+      discoLaserSwitch: this.hasFeature("Disco.Switch.Laser"),
+      discoLedSwitch: this.hasFeature("Disco.Switch.Led"),
+      discoVehicleArriving: this.hasFeature("Disco.ContactSensor.Vehicle.Arriving"),
+      discoVehicleLeaving: this.hasFeature("Disco.ContactSensor.Vehicle.Leaving"),
+      discoVehiclePresence: this.hasFeature("Disco.OccupancySensor.Vehicle.Presence"),
       doorOpenOccupancyDuration: featureOptions.getInteger("Opener.OccupancySensor.Duration", this.device.mac) ?? RATGDO_OCCUPANCY_DURATION,
       doorOpenOccupancySensor: this.hasFeature("Opener.OccupancySensor"),
-      konnectedPcwSwitch: isKonnected && this.hasFeature("Konnected.Switch.Pcw"),
-      konnectedStrobeSwitch: isKonnected && this.hasFeature("Konnected.Switch.Strobe"),
+      konnectedPcwSwitch: this.hasFeature("Konnected.Switch.Pcw"),
+      konnectedStrobeSwitch: this.hasFeature("Konnected.Switch.Strobe"),
       light: this.hasFeature("Light"),
       lock: this.hasFeature("Opener.Lock"),
       lockoutSwitch: this.hasFeature("Opener.Switch.RemoteLockout"),
@@ -490,8 +495,8 @@ export class RatgdoAccessory implements Disposable {
       logOpener: this.hasFeature("Log.Opener"),
       logVehiclePresence: this.hasFeature("Log.VehiclePresence"),
       motionOccupancyDuration: featureOptions.getInteger("Motion.OccupancySensor.Duration", this.device.mac) ?? RATGDO_OCCUPANCY_DURATION,
-      motionOccupancySensor: isRatgdo && this.hasFeature("Motion.OccupancySensor"),
-      motionSensor: isRatgdo && this.hasFeature("Motion"),
+      motionOccupancySensor: this.hasFeature("Motion.OccupancySensor"),
+      motionSensor: this.hasFeature("Motion"),
       nameOverride: resolveNameOverride(featureOptions.value(RATGDO_NAME_OPTION, this.device.mac)),
       readOnly: this.hasFeature("Opener.ReadOnly"),
       syncName: this.hasFeature("Device.SyncName")
@@ -1242,6 +1247,12 @@ export class RatgdoAccessory implements Disposable {
 
     this.logFeature("Opener.OccupancySensor", "Door open indicator occupancy sensor");
 
+    // The duration configures the sensor, so an opener without the sensor has no duration to report.
+    if(this.hints.doorOpenOccupancySensor) {
+
+      this.logFeature("Opener.OccupancySensor.Duration", "Door open indicator occupancy sensor duration");
+    }
+
     return this.configureSensor({
 
       cacheKey: RatgdoService.OCCUPANCY_SENSOR_DOOR_OPEN,
@@ -1257,6 +1268,12 @@ export class RatgdoAccessory implements Disposable {
   private configureMotionOccupancySensor(): boolean {
 
     this.logFeature("Motion.OccupancySensor", "Motion occupancy sensor");
+
+    // The duration configures the sensor, so an opener without the sensor has no duration to report.
+    if(this.hints.motionOccupancySensor) {
+
+      this.logFeature("Motion.OccupancySensor.Duration", "Motion occupancy sensor duration");
+    }
 
     return this.configureSensor({
 
@@ -2165,17 +2182,24 @@ export class RatgdoAccessory implements Disposable {
     this.timers.schedule(revert, RATGDO_UI_REVERT_DELAY);
   }
 
-  // Utility for checking feature options on a device.
+  // Utility for checking feature options on a device. An option the catalog declares for another variant is off on this opener, whatever the configuration says.
   private hasFeature(option: string): boolean {
 
-    return this.platform.featureOptions.test(option, this.device.mac);
+    return optionFitsVariant(option, this.device.variant) && this.platform.featureOptions.test(option, this.device.mac);
   }
 
-  // Per-accessory ergonomic wrapper for HBPU's logFeature primitive. Hides `this.log` and `this.device.mac` so call sites stay terse and uniform with `hasFeature()`.
-  // The deviation-reporting convention itself lives upstream in `homebridge-plugin-utils/FeatureOptions.logFeature`; this wrapper carries no convention logic.
+  /* Per-accessory wrapper for HBPU's logFeature primitive, naming this opener and the plugin's logger so call sites stay terse and uniform with `hasFeature()`. HBPU
+   * decides whether a setting earns a line, at which level, and writes it once. The variant check is the one thing this wrapper adds...an opener without the hardware
+   * has nothing to report, and calling through would announce a global setting on an install where no opener has the feature.
+   */
   private logFeature(option: string, label: string): void {
 
-    this.platform.featureOptions.logFeature(option, label, this.log, this.device.mac);
+    if(!optionFitsVariant(option, this.device.variant)) {
+
+      return;
+    }
+
+    this.platform.featureOptions.logFeature({ device: { id: this.device.mac, log: this.log }, label, log: this.platform.log, option });
   }
 
   /* Tell the user, once per accessory, what the naming options do for this opener. The custom-name line names the name the plugin applies, the custom name as HomeKit's

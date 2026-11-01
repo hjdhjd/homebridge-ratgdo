@@ -6,7 +6,7 @@
  */
 import type { FeatureCategoryEntry, FeatureOptionEntry } from "homebridge-plugin-utils";
 import { describe, test } from "node:test";
-import { describeCategoryScope, describeOptionScope, featureOptionCategories, featureOptions, normalizeConfig } from "./options.ts";
+import { describeCategoryScope, describeOptionScope, featureOptionCategories, featureOptions, normalizeConfig, optionFitsVariant } from "./options.ts";
 import { FeatureOptions } from "homebridge-plugin-utils";
 import type { PlatformConfig } from "homebridge";
 import type { RatgdoOptionMeta } from "./options.ts";
@@ -398,6 +398,26 @@ describe("the feature-option catalog", () => {
         "Motion": RatgdoVariant.RATGDO
       }, "the Disco and Motion categories and the vehicle-presence log belong to Ratgdo hardware, the Konnected category to Konnected hardware, and nothing else " +
         "narrows to a variant");
+    });
+
+    test("optionFitsVariant reads an option's own declaration, else its category's, and an option naming neither fits every variant", () => {
+
+      const cases: { konnected: boolean; option: string; ratgdo: boolean }[] = [
+
+        { konnected: false, option: "Disco.Battery", ratgdo: true },
+        { konnected: true, option: "Konnected.Switch.Pcw", ratgdo: false },
+        { konnected: false, option: "Log.VehiclePresence", ratgdo: true },
+        { konnected: false, option: "Motion", ratgdo: true },
+        { konnected: false, option: "Motion.OccupancySensor.Duration", ratgdo: true },
+        { konnected: true, option: "Log.Opener", ratgdo: true },
+        { konnected: true, option: "Opener.ReadOnly", ratgdo: true }
+      ];
+
+      for(const { konnected, option, ratgdo } of cases) {
+
+        assert.equal(optionFitsVariant(option, RatgdoVariant.RATGDO), ratgdo, option + " on a Ratgdo device");
+        assert.equal(optionFitsVariant(option, RatgdoVariant.KONNECTED), konnected, option + " on a Konnected device");
+      }
     });
 
     test("every declared variant is one the plugin knows", () => {

@@ -9,9 +9,11 @@
  * (disco* hints exist only on the Ratgdo variant, konnected* hints only on Konnected) hold even when the underlying option is enabled on the wrong variant; the
  * value-centric duration hints fall back to RATGDO_OCCUPANCY_DURATION by default and honor a userOptions override; and the custom name resolves through HBPU's
  * custom-name rule, a name HomeKit can carry nothing of resolving to none. The deviation logs the constructor fires after hints resolve - read-only mode and the
- * custom name - are asserted from the captured log entries.
+ * custom name - are asserted from the captured log entries, as is the wiring of every option's deviation line: the logger each level writes through, the variant
+ * check, the occupancy durations, and the event log toggles.
  */
-import { Characteristic, Service, buildRatgdoAccessory, customNameEntry, makeKonnectedInitialState, makeRatgdoInitialState } from "./testing.helpers.ts";
+import { Characteristic, Service, addRatgdoAccessory, buildRatgdoAccessory, customNameEntry, makeKonnectedInitialState, makeRatgdoInitialState,
+  makeTestDevice } from "./testing.helpers.ts";
 import { describe, test } from "node:test";
 import { linesAt, loggedAt, triggerSet } from "homebridge-plugin-utils/testing";
 import { LockCommand } from "esphome-client";
@@ -22,8 +24,8 @@ import assert from "node:assert/strict";
 
 /* The fully-spelled hint record a default Ratgdo device resolves to. Spelling it out rather than deriving it from the production code makes this the test's independent
  * contract for "what every default is", and it doubles as the baseline every single-option test deviates exactly one field from. A Konnected device at default reads
- * the same record but for motionSensor: the disco* and konnected* gates all multiply against an option whose default is false, so both collapse to false on either
- * variant, while Motion defaults on and its gate is what turns it off for firmware that reports no motion.
+ * the same record but for motionSensor and logVehiclePresence: the disco* and konnected* gates all multiply against an option whose default is false, so both collapse
+ * to false on either variant, while Motion and the vehicle-presence log default on and the gate is what turns them off for firmware that reports neither.
  */
 const DEFAULT_HINTS = {
 
@@ -100,7 +102,7 @@ describe("RatgdoAccessory hints", () => {
 
       const { ratgdo } = buildRatgdoAccessory({ device: { variant: RatgdoVariant.KONNECTED }, initialState: makeKonnectedInitialState() });
 
-      assert.deepEqual(ratgdo.hints, { ...DEFAULT_HINTS, motionSensor: false },
+      assert.deepEqual(ratgdo.hints, { ...DEFAULT_HINTS, logVehiclePresence: false, motionSensor: false },
         "an unconfigured Konnected device resolves the same defaults - the disco and konnected gates collapse to false - but for the motion its firmware never reports");
     });
   });
@@ -257,6 +259,140 @@ describe("RatgdoAccessory hints", () => {
 
       assert.equal(loggedAt(entries, "info", "Read-only mode"), false, "leaving read-only at its disabled default emits no read-only deviation log");
     });
+  });
+
+  /* The plugin's wiring of HBPU's logFeature, run through the REAL engine. HBPU owns which level earns a line, so these assert what this plugin decides: the logger each
+   * level writes through, the variant check, and which options report at all. The two loggers are told apart by the prefix, since the opener's prefixes its name and
+   * the plugin's carries none.
+   */
+  describe("feature-option deviation lines", () => {
+
+    const SECOND_OPENER = makeTestDevice({ mac: "112233445566", name: "Second Ratgdo" });
+
+    test("a global setting writes one line through the plugin's logger, however many openers it governs", () => {
+
+      const { entries, platform } = buildRatgdoAccessory({ userOptions: ["Enable.Opener.ReadOnly"] });
+
+      addRatgdoAccessory(platform, SECOND_OPENER);
+
+      assert.deepEqual(linesAt(entries, "info"), ["Read-only mode enabled."], "both openers are read-only, and the setting that made them so is announced once");
+    });
+
+    test("a setting on one opener writes through that opener's logger", () => {
+
+      const { entries } = buildRatgdoAccessory({ userOptions: ["Enable.Opener.ReadOnly.AABBCCDDEEFF"] });
+
+      assert.deepEqual(linesAt(entries, "info"), ["Test Ratgdo: Read-only mode enabled."], "the line names the opener the setting was made on");
+    });
+
+    test("an opener overriding a global setting back to the default says so itself, and the global line still reaches the openers that follow it", () => {
+
+      const { entries, platform } = buildRatgdoAccessory({ userOptions: [ "Enable.Opener.ReadOnly", "Disable.Opener.ReadOnly.AABBCCDDEEFF" ] });
+
+      assert.deepEqual(linesAt(entries, "info"), ["Test Ratgdo: Read-only mode disabled."], "the overriding opener reports its own setting and nothing global");
+
+      addRatgdoAccessory(platform, SECOND_OPENER);
+
+      assert.deepEqual(linesAt(entries, "info"), [ "Test Ratgdo: Read-only mode disabled.", "Read-only mode enabled." ],
+        "the opener that inherits the global setting announces it through the plugin's logger");
+    });
+
+    /* Options the catalog declares for the other variant, enabled or disabled globally and on the opener. Each stays silent because the opener has no such hardware,
+     * which is what keeps a global setting from announcing a feature on an install holding no opener that has it.
+     */
+    const OTHER_VARIANT_CASES: { option: string; variant: RatgdoVariant }[] = [
+
+      { option: "Enable.Konnected.Switch.Pcw", variant: RatgdoVariant.RATGDO },
+      { option: "Enable.Konnected.Switch.Pcw.AABBCCDDEEFF", variant: RatgdoVariant.RATGDO },
+      { option: "Enable.Konnected.Switch.Strobe", variant: RatgdoVariant.RATGDO },
+      { option: "Enable.Disco.Battery", variant: RatgdoVariant.KONNECTED },
+      { option: "Enable.Disco.Battery.AABBCCDDEEFF", variant: RatgdoVariant.KONNECTED },
+      { option: "Enable.Disco.ContactSensor.Vehicle.Arriving", variant: RatgdoVariant.KONNECTED },
+      { option: "Enable.Disco.ContactSensor.Vehicle.Leaving", variant: RatgdoVariant.KONNECTED },
+      { option: "Enable.Disco.OccupancySensor.Vehicle.Presence", variant: RatgdoVariant.KONNECTED },
+      { option: "Enable.Disco.Switch.Laser", variant: RatgdoVariant.KONNECTED },
+      { option: "Enable.Disco.Switch.Led", variant: RatgdoVariant.KONNECTED },
+      { option: "Disable.Log.VehiclePresence", variant: RatgdoVariant.KONNECTED },
+      { option: "Disable.Motion", variant: RatgdoVariant.KONNECTED },
+      { option: "Enable.Motion.OccupancySensor", variant: RatgdoVariant.KONNECTED }
+    ];
+
+    for(const { option, variant } of OTHER_VARIANT_CASES) {
+
+      test(option + " writes nothing from a " + variant + " opener", () => {
+
+        const { entries } = buildRatgdoAccessory({ device: { variant }, userOptions: [option] });
+
+        assert.deepEqual(linesAt(entries, "info"), [], "the opener has no such hardware to report on");
+      });
+    }
+
+    test("a hardware-specific option reports from an opener that has the hardware", () => {
+
+      const ratgdo = buildRatgdoAccessory({ userOptions: [ "Disable.Motion", "Enable.Disco.Battery" ] });
+      const konnected = buildRatgdoAccessory({ device: { variant: RatgdoVariant.KONNECTED }, userOptions: ["Enable.Konnected.Switch.Pcw"] });
+
+      assert.deepEqual(linesAt(ratgdo.entries, "info"), [ "Motion sensor disabled.", "Ratgdo (ESP32) backup battery status enabled." ],
+        "a Ratgdo opener reports the Motion and Disco settings");
+      assert.deepEqual(linesAt(konnected.entries, "info"), ["Konnected pre-close warning switch enabled."], "a Konnected opener reports the Konnected settings");
+    });
+
+    test("on a mixed install a global hardware-specific setting is announced when the first opener with the hardware arrives", () => {
+
+      const { entries, platform } = buildRatgdoAccessory({ device: { variant: RatgdoVariant.KONNECTED }, userOptions: ["Enable.Disco.Battery"] });
+
+      assert.deepEqual(linesAt(entries, "info"), [], "the Konnected opener says nothing about a Disco feature");
+
+      addRatgdoAccessory(platform, SECOND_OPENER);
+
+      assert.deepEqual(linesAt(entries, "info"), ["Ratgdo (ESP32) backup battery status enabled."], "the Ratgdo opener announces it");
+    });
+
+    // Each event log toggle defaults on, so turning one off is the setting a reader wants to see when the events they expected stop appearing.
+    const EVENT_LOG_CASES: { line: string; option: string }[] = [
+
+      { line: "Light event logging disabled.", option: "Log.Light" },
+      { line: "Motion event logging disabled.", option: "Log.Motion" },
+      { line: "Obstruction event logging disabled.", option: "Log.Obstruction" },
+      { line: "Opener event logging disabled.", option: "Log.Opener" },
+      { line: "Vehicle presence event logging disabled.", option: "Log.VehiclePresence" }
+    ];
+
+    for(const { line, option } of EVENT_LOG_CASES) {
+
+      test("disabling " + option + " globally reports through the plugin's logger, and on the opener through the opener's", () => {
+
+        assert.deepEqual(linesAt(buildRatgdoAccessory({ userOptions: ["Disable." + option] }).entries, "info"), [line]);
+        assert.deepEqual(linesAt(buildRatgdoAccessory({ userOptions: ["Disable." + option + ".AABBCCDDEEFF"] }).entries, "info"), ["Test Ratgdo: " + line]);
+      });
+    }
+
+    // The occupancy durations, as the deviation lines they earn. Each case lists the entries configured beside the expected duration line, if any.
+    const DURATION_CASES: { expected: string[]; name: string; options: string[]; variant?: RatgdoVariant }[] = [
+
+      { expected: ["Motion occupancy sensor duration set to 45 s."], name: "a global motion duration names the plugin's logger, rendered",
+        options: [ "Enable.Motion.OccupancySensor", "Enable.Motion.OccupancySensor.Duration.45" ] },
+      { expected: ["Door open indicator occupancy sensor duration set to 10 min."], name: "a global door-open duration names the plugin's logger, rendered",
+        options: [ "Enable.Opener.OccupancySensor", "Enable.Opener.OccupancySensor.Duration.600" ] },
+      { expected: ["Test Ratgdo: Motion occupancy sensor duration set to 45 s."], name: "a duration set on the opener names the opener's logger",
+        options: [ "Enable.Motion.OccupancySensor", "Enable.Motion.OccupancySensor.Duration.AABBCCDDEEFF.45" ] },
+      { expected: [], name: "a duration at the default is silent", options: [ "Enable.Motion.OccupancySensor", "Enable.Motion.OccupancySensor.Duration.300" ] },
+      { expected: [], name: "an unset duration is silent", options: [ "Enable.Motion.OccupancySensor", "Enable.Opener.OccupancySensor" ] },
+      { expected: [], name: "a duration with its sensor off is silent",
+        options: [ "Enable.Motion.OccupancySensor.Duration.45", "Enable.Opener.OccupancySensor.Duration.600" ] },
+      { expected: [], name: "a motion duration on hardware with no motion is silent",
+        options: [ "Enable.Motion.OccupancySensor", "Enable.Motion.OccupancySensor.Duration.45" ], variant: RatgdoVariant.KONNECTED }
+    ];
+
+    for(const { expected, name, options, variant } of DURATION_CASES) {
+
+      test(name, () => {
+
+        const { entries } = buildRatgdoAccessory({ device: { variant: variant ?? RatgdoVariant.RATGDO }, userOptions: options });
+
+        assert.deepEqual(linesAt(entries, "info").filter((line) => line.includes("duration")), expected);
+      });
+    }
   });
 
   /* The lock hint is the one hint that decides whether a HomeKit characteristic exists at all, so its net asserts the resulting shape of the garage door service
