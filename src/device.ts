@@ -533,9 +533,9 @@ export class RatgdoAccessory implements Disposable {
    * through refreshInfo(), which the platform also calls on every session the opener's client begins.
    *
    * While the plugin owns the opener's name, the accessory itself is named with it: HBPU's name helper writes the display names and the information service's
-   * ConfiguredName, the one name of the opener's own tile a Home app rename writes, where they differ, so a restored accessory takes the owned name and a fresh one
-   * gains the ConfiguredName it is born without. The platform's save after construction carries the write. With the user owning the name, the accessory keeps the
-   * name it carries.
+   * ConfiguredName where they differ, so a restored accessory takes the owned name and a fresh one gains the ConfiguredName it is born without. The platform's save
+   * after construction carries the write. A Home app rename of the opener's own tile lands on the door service's ConfiguredName rather than here, so the door is named
+   * and watched as a part. With the user owning the name, the accessory keeps the name it carries.
    */
   private configureInfo(): void {
 
@@ -2285,11 +2285,11 @@ export class RatgdoAccessory implements Disposable {
     return Object.entries(this.services) as [RatgdoService, Service][];
   }
 
-  /* Watch the opener's names while the plugin owns them, so a rename in the Home app is put back the moment it lands. The information service carries the name of the
-   * opener's own tile and each part carrying ConfiguredName carries its own, so each of them is watched, and each watch reads the owned name afresh on every rename. A
-   * part HomeKit names with Name alone, the garage door and the battery, gives the Home app nothing to rename, so it is named and never watched. Nothing is watched
-   * while the user owns the name, since a rename of theirs stands. Every watch ends with the lifetime signal at disposal, and no service is removed after
-   * construction, so nothing has to end one sooner.
+  /* Watch the opener's names while the plugin owns them, so a rename in the Home app is put back the moment it lands. The door service carries the name of the opener's
+   * own tile, each other part carrying ConfiguredName carries its own, and the information service carries the accessory's, so each of them is watched, and each watch
+   * reads the owned name afresh on every rename. A part HomeKit names with Name alone, the battery, gives the Home app nothing to rename, so it is named and never
+   * watched. Nothing is watched while the user owns the name, since a rename of theirs stands. Every watch ends with the lifetime signal at disposal, and no service is
+   * removed after construction, so nothing has to end one sooner.
    */
   private holdNames(): void {
 

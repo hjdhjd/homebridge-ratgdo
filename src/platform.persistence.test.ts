@@ -108,25 +108,25 @@ describe("RatgdoPlatform accessory cache", () => {
     assert.deepEqual(expectAt(saves(built), afterConstruction, "the identity save").accessories, built.api.accessories, "and the save carries the opener's accessory");
   });
 
-  test("a fresh accessory with neither a custom Name nor Sync Name is born with the opener's own name and no ConfiguredName on its own tile", async () => {
+  test("a fresh accessory with neither a custom Name nor Sync Name is born with the opener's own name and no ConfiguredName on its information service", async () => {
 
     const built = oneOpener(makeOpenerClient({ mac: MAC }));
     const accessory = await admitOpener(built);
 
     assert.equal(accessory.displayName, "Garage", "the accessory takes the name the opener advertises");
     assert.equal(serviceOf(accessory, Service.AccessoryInformation).testCharacteristic(Characteristic.ConfiguredName), false,
-      "its own tile is given no ConfiguredName, since the plugin owns no name to hold it to");
+      "its information service is given no ConfiguredName, since the plugin owns no name to hold it to");
     assert.equal(getServiceName(serviceOf(accessory, Service.Lightbulb)), "Garage", "and its parts are named from the same name");
   });
 
-  test("a fresh accessory under a custom Name is born with it, its first save carrying the ConfiguredName its own tile is given", async () => {
+  test("a fresh accessory under a custom Name is born with it, its first save carrying the ConfiguredName its information service is given", async () => {
 
     const built = oneOpener(makeOpenerClient({ mac: MAC }), [customNameEntry("Workshop", MAC)]);
     const accessory = await admitOpener(built);
     const info = serviceOf(accessory, Service.AccessoryInformation);
 
     assert.equal(accessory.displayName, "Workshop", "the accessory is born with the custom Name");
-    assert.equal(info.testCharacteristic(Characteristic.ConfiguredName), true, "its own tile is given the ConfiguredName a Home app rename writes");
+    assert.equal(info.testCharacteristic(Characteristic.ConfiguredName), true, "its information service is given a ConfiguredName");
     assert.equal(getServiceName(info), "Workshop", "and that ConfiguredName carries the custom Name");
     assert.equal(getServiceName(serviceOf(accessory, Service.Lightbulb)), "Workshop", "its parts are named from the custom Name");
     assert.equal(logCount(built.entries, "info", "Configuring: Workshop (address: " + ADDRESS), 1, "and the platform names the opener by it");
@@ -152,7 +152,7 @@ describe("RatgdoPlatform accessory cache", () => {
 
       const afterConstruction = saves(built).length;
 
-      assert.equal(getServiceName(info), "Garage", "Sync Name holds the accessory's own tile to the name the opener advertises");
+      assert.equal(getServiceName(info), "Garage", "Sync Name holds the information service to the name the opener advertises");
 
       client.emit("lifecycle", { kind: "disconnect" });
       client.emit("lifecycle", { encrypted: false, kind: "connect" });
@@ -169,12 +169,13 @@ describe("RatgdoPlatform accessory cache", () => {
 
       assert.equal(saves(built).length, afterConstruction + 1, "a session that renames the opener moves the names the cache holds, so it saves");
       assert.deepEqual([ accessory.displayName, getServiceName(info), getServiceName(light), getServiceName(opener) ],
-        [ "Workshop", "Workshop", "Workshop", "Workshop Automation Opener" ], "the accessory, its own tile, and every part are re-stated to the opener's new name");
+        [ "Workshop", "Workshop", "Workshop", "Workshop Automation Opener" ],
+        "the accessory, its information service, and every part are re-stated to the opener's new name");
       assert.equal(logCount(built.entries, "info", "Detected a name change on the device; updating the HomeKit name to Workshop."), 1,
         "and the rename is logged once, naming the opener's new HomeKit name");
 
-      // A plugin-side write of the tile's ConfiguredName stands for a Home app rename still standing when a session begins. The name watch never reads the plugin's
-      // own write as a rename, so nothing puts the tile back before the session's re-state does.
+      // A plugin-side write of the information service's ConfiguredName stands for a rename still standing when a session begins. The name watch never reads the plugin's
+      // own write as a rename, so nothing puts the service back before the session's re-state does.
       info.getCharacteristic(Characteristic.ConfiguredName).updateValue("Shop");
 
       const beforeRestate = saves(built).length;
@@ -185,7 +186,7 @@ describe("RatgdoPlatform accessory cache", () => {
       built.clock.advance(ACCESSORY_SAVE_WINDOW_MS);
 
       assert.equal(saves(built).length, beforeRestate + 1, "a session whose re-state writes over a Home app rename moves a name the cache holds, so it saves once");
-      assert.equal(getServiceName(info), "Workshop", "the re-state puts the opener's own tile back to the name the plugin owns");
+      assert.equal(getServiceName(info), "Workshop", "the re-state puts the information service back to the name the plugin owns");
       assert.equal(accessory.displayName, "Workshop", "while the accessory's display name, which no Home app rename touches, stays where it was");
       assert.equal(logCount(built.entries.slice(restatedFrom), "info", "Detected a name change on the device"), 0,
         "so the session logs no rename, since a write that moves no display name is no change on the device");

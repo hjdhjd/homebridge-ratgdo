@@ -45,13 +45,13 @@ interface NamedPart {
 // The parts HomeKit names with Name alone, which the Home app cannot rename, so the plugin names each of them and watches none.
 const NAME_ONLY_PARTS: readonly NamedPart[] = [
 
-  { part: RatgdoService.GARAGE_DOOR, serviceType: Service.GarageDoorOpener, suffix: "", variant: RatgdoVariant.RATGDO },
   { option: "Enable.Disco.Battery", part: RatgdoService.BATTERY, serviceType: Service.Battery, suffix: "", variant: RatgdoVariant.RATGDO }
 ];
 
 // The parts carrying ConfiguredName, the name a rename in the Home app writes, one for each configure site naming one, so each row reads one site's watch.
 const WATCHED_PARTS: readonly NamedPart[] = [
 
+  { part: RatgdoService.GARAGE_DOOR, serviceType: Service.GarageDoorOpener, suffix: "", variant: RatgdoVariant.RATGDO },
   { part: RatgdoService.LIGHT, serviceType: Service.Lightbulb, suffix: "", variant: RatgdoVariant.RATGDO },
   { option: "Enable.Opener.Dimmer", part: RatgdoService.DIMMER_OPENER_AUTOMATION, serviceType: Service.Lightbulb, subtype: RatgdoService.DIMMER_OPENER_AUTOMATION,
     suffix: " Automation Door Position", variant: RatgdoVariant.RATGDO },
@@ -79,6 +79,9 @@ const WATCHED_PARTS: readonly NamedPart[] = [
   { option: "Enable.Konnected.Switch.Strobe", part: RatgdoService.SWITCH_KONNECTED_STROBE, serviceType: Service.Switch, subtype: RatgdoService.SWITCH_KONNECTED_STROBE,
     suffix: " Strobe", variant: RatgdoVariant.KONNECTED }
 ];
+
+// The door, the part carrying the name of the opener's own tile.
+const GARAGE_DOOR = present(WATCHED_PARTS.find(({ part }) => (part === RatgdoService.GARAGE_DOOR)), "the garage door part");
 
 // The light, the part the rows reading a single watch rename.
 const LIGHT = present(WATCHED_PARTS.find(({ part }) => (part === RatgdoService.LIGHT)), "the light part");
@@ -115,7 +118,7 @@ const partOf = (accessory: TestPlatformAccessory, { part, serviceType, subtype }
   return present(accessory.services.find(isPart), "the " + part + " part's service");
 };
 
-// The information service of an accessory, which carries the name of the opener's own tile.
+// The information service of an accessory, which carries the accessory's name.
 const infoOf = (accessory: TestPlatformAccessory): TestService => present(accessory.getService(Service.AccessoryInformation), "the accessory's information service");
 
 // The listeners a service carries for changes to its characteristics, which is where a watch listens.
@@ -144,7 +147,7 @@ describe("RatgdoAccessory naming", () => {
       const { accessory } = buildOpener();
 
       assert.equal(infoOf(accessory).testCharacteristic(Characteristic.ConfiguredName), false,
-        "the accessory's own tile is given no ConfiguredName, since the plugin owns no name to hold it to");
+        "the information service is given no ConfiguredName, since the plugin owns no name to hold it to");
 
       for(const named of partsOf(RatgdoVariant.RATGDO)) {
 
@@ -167,7 +170,7 @@ describe("RatgdoAccessory naming", () => {
       const { accessory } = buildOpener({ options: [customNameEntry("Workshop")] });
 
       assert.equal(accessory.displayName, "Workshop", "the accessory takes the custom Name");
-      assert.equal(getServiceName(infoOf(accessory)), "Workshop", "and so does the ConfiguredName its own tile is given");
+      assert.equal(getServiceName(infoOf(accessory)), "Workshop", "and so does the ConfiguredName its information service is given");
 
       for(const named of partsOf(RatgdoVariant.RATGDO)) {
 
@@ -188,7 +191,7 @@ describe("RatgdoAccessory naming", () => {
         restart(first, [SYNC_NAME]);
 
         assert.equal(getServiceName(light), "Garage", "once Sync Name owns the name, the restart puts the opener's own name back over the rename");
-        assert.equal(getServiceName(infoOf(first.accessory)), "Garage", "and names the accessory's own tile with it");
+        assert.equal(getServiceName(infoOf(first.accessory)), "Garage", "and names the information service with it");
 
         await renameInHomeApp(light, "Workshop Light");
 
@@ -227,14 +230,42 @@ describe("RatgdoAccessory naming", () => {
       });
     }
 
-    test("holds the accessory's own tile to a custom Name through the ConfiguredName of its information service", async () => {
+    /* A restored door can carry no ConfiguredName, since HBPU names only a service it creates and the plugin's re-state is the one other writer. While the user owns the
+     * name nothing re-states the door, so it stays as it was restored, and once the plugin owns the name the re-state attaches the characteristic ahead of the watch.
+     */
+    test("a door restored without ConfiguredName stays without one while the user owns the name, and gains one with a watch once the plugin owns it", async () => {
+
+      const restoredDoor = (): BuildRatgdoAccessoryResult => {
+
+        const built = buildOpener();
+        const door = partOf(built.accessory, GARAGE_DOOR);
+
+        door.removeCharacteristic(door.getCharacteristic(Characteristic.ConfiguredName));
+
+        return built;
+      };
+
+      const userOwned = partOf(restart(restoredDoor(), []).accessory, GARAGE_DOOR);
+
+      assert.equal(userOwned.testCharacteristic(Characteristic.ConfiguredName), false, "a restart leaves the door as it was restored while the user owns the name");
+
+      const owned = partOf(restart(restoredDoor(), [customNameEntry("Workshop")]).accessory, GARAGE_DOOR);
+
+      assert.equal(owned.getCharacteristic(Characteristic.ConfiguredName).value, "Workshop", "the re-state attaches the ConfiguredName carrying the custom Name");
+
+      await renameInHomeApp(owned, "Renamed");
+
+      assert.equal(getServiceName(owned), "Workshop", "and the watch puts the custom Name back over a Home app rename");
+    });
+
+    test("holds the information service to a custom Name through its ConfiguredName", async () => {
 
       const { accessory } = buildOpener({ options: [customNameEntry("Workshop")] });
       const info = infoOf(accessory);
 
       await renameInHomeApp(info, "Renamed");
 
-      assert.equal(getServiceName(info), "Workshop", "the Home app rename of the accessory's own tile is put back to the custom Name");
+      assert.equal(getServiceName(info), "Workshop", "a controller's write to the information service's ConfiguredName is put back to the custom Name");
       assert.equal(accessory.displayName, "Workshop", "and the accessory's display name never moved");
     });
 
@@ -265,10 +296,10 @@ describe("RatgdoAccessory naming", () => {
       ratgdo[Symbol.dispose]();
 
       await renameInHomeApp(light, "Renamed");
-      await renameInHomeApp(info, "Renamed Tile");
+      await renameInHomeApp(info, "Renamed Accessory");
 
       assert.equal(getServiceName(light), "Renamed", "a disposed accessory puts back no part's name");
-      assert.equal(getServiceName(info), "Renamed Tile", "nor the name of its own tile");
+      assert.equal(getServiceName(info), "Renamed Accessory", "nor its information service's name");
     });
   });
 
