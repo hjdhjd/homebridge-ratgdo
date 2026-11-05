@@ -7,12 +7,13 @@
  * The ESPHome client factory is injected as a fake (makeFakeOpenClient), and the state-capture budget (timeoutSeconds) is injected in fractional seconds (e.g. 0.02)
  * so each wait resolves in milliseconds of real time, driving every branch deterministically without a live device, fake timers, or a fake Homebridge harness.
  */
+import { ConnectionClosedByPeerError, ConnectionRefusedError, ConnectionTimeoutError, EncryptionKeyInvalidError, EncryptionKeyMissingError, EncryptionRequiredError,
+  NegotiationFailedError, entityId } from "esphome-client";
 import type { ConnectionOutcome, EncryptionKeyLookup, ManualConnectionOutcome, OpenConnectionOptions, OpenEspHomeClient,
   OpenManualConnectionOptions } from "./connection.ts";
 import { DeviceIdentityError, applyDeviceInfo, captureInitialState, describePermanentCause, identityRefusal, isEncryptionError, openConnection,
   openManualConnection } from "./connection.ts";
 import type { DeviceInfo, EntityId, NoiseServerHello, TelemetryEvent } from "esphome-client";
-import { EncryptionKeyInvalidError, EncryptionKeyMissingError, EncryptionRequiredError, NegotiationFailedError, entityId } from "esphome-client";
 import { RATGDO_ENTITIES, idFor, ratgdoInitialStateEntityIds } from "./entities.ts";
 import { TestEspHomeClient, TestPermanentError, asEspHomeClient, makeCoverEvent, makeFakeOpenClient, makeLightEvent, makeTelemetry, makeTestDevice, openThroughHello,
   resolverOf } from "./testing.helpers.ts";
@@ -250,16 +251,56 @@ describe("openConnection", () => {
       "the user sees the firmware-mismatch diagnostic carrying the version the client rejected");
   });
 
-  test("generic failure: returns null and logs the catch-all connection diagnostic", async () => {
+  test("generic failure: returns null and warns with the catch-all connection diagnostic", async () => {
 
     // A transient error that is neither an encryption misconfiguration, a PermanentError, nor a state-capture timeout falls through to the generic else branch.
     const { entries, result } = await run(makeFakeOpenClient(new Error("connection refused")));
 
     assert.ok(!result.ok, "an unclassified failure skips the discovery attempt");
     assert.equal(result.reason, "unknown", "the failure outcome carries the unknown reason token");
-    assert.ok(loggedAt(entries, "error", "Failed to establish connection: Error: connection refused"),
-      "the user sees the catch-all connection diagnostic carrying the inspected error");
+    assert.deepEqual(linesAt(entries, "warn"), ["Failed to establish connection: connection refused."],
+      "the user sees one warning sentence carrying the failure's own words, since a failure with nothing recognizable on it heals itself");
+    assert.deepEqual(linesAt(entries, "error"), [], "and nothing at error");
   });
+
+  // The errno error Node's socket raises, which esphome-client carries as the cause of its own.
+  const errno = (message: string, code: string): Error => Object.assign(new Error(message), { code });
+
+  /* The level a connect failure reaches the log at is HBPU's connection fault rule read for a dial, and each row reads the one line its failure earns: a fault that
+   * heals itself warns, and a host name that does not resolve, which stays broken until someone fixes it, is an error. The socket rows feed the error esphome-client
+   * raises for that fault, cause and all, and the codeless row stands for any failure carrying no code: esphome-client raises none of that shape, and the rule reads
+   * one as a fault that heals itself.
+   */
+  const socketFaults: { error: Error; level: "error" | "warn"; line: string; why: string }[] = [
+
+    { error: new ConnectionRefusedError("Connection to 192.0.2.10:6053 failed: connection refused.", "ECONNREFUSED",
+      { cause: errno("connect ECONNREFUSED 192.0.2.10:6053", "ECONNREFUSED") }), level: "warn",
+    line: "Failed to establish connection: Connection to 192.0.2.10:6053 failed: connection refused: connect ECONNREFUSED 192.0.2.10:6053.",
+    why: "a connection the device refused" },
+    { error: new ConnectionTimeoutError("Connection to 192.0.2.10:6053 failed: connection timed out.", "ETIMEDOUT",
+      { cause: errno("connect ETIMEDOUT 192.0.2.10:6053", "ETIMEDOUT") }), level: "warn",
+    line: "Failed to establish connection: Connection to 192.0.2.10:6053 failed: connection timed out: connect ETIMEDOUT 192.0.2.10:6053.",
+    why: "a connection that timed out" },
+    { error: new ConnectionRefusedError("Connection to garage.local:6053 failed: ENOTFOUND.", "ENOTFOUND",
+      { cause: errno("getaddrinfo ENOTFOUND garage.local", "ENOTFOUND") }), level: "error",
+    line: "Failed to establish connection: Connection to garage.local:6053 failed: ENOTFOUND: getaddrinfo ENOTFOUND garage.local.",
+    why: "a host name that does not resolve" },
+    { error: new ConnectionClosedByPeerError("The device closed the connection."), level: "warn",
+      line: "Failed to establish connection: The device closed the connection.", why: "a failure carrying no code" }
+  ];
+
+  for(const { error, level, line, why } of socketFaults) {
+
+    test(why + " is logged once, at " + level, async () => {
+
+      const { entries, result } = await run(makeFakeOpenClient(error));
+
+      assert.ok(!result.ok, "a socket fault skips the discovery attempt");
+      assert.equal(result.reason, "unknown", "and carries the unknown reason token");
+      assert.deepEqual(linesAt(entries, level), [line], "the failure is one sentence at the level the connection fault rule answers for a dial");
+      assert.deepEqual(linesAt(entries, (level === "error") ? "warn" : "error"), [], "and nothing at the other level");
+    });
+  }
 
   test("timeout: returns null, logs the timeout diagnostic, and disposes the client", async () => {
 
@@ -281,8 +322,8 @@ describe("openConnection", () => {
 
     assert.ok(!result.ok, "a factory rejection skips the discovery attempt");
     assert.equal(result.reason, "unknown", "a TimeoutError the factory rejects with carries the unknown reason token");
-    assert.ok(loggedAt(entries, "error", "Failed to establish connection: DOMException [TimeoutError]: timed out"),
-      "the user sees the catch-all connection diagnostic carrying the inspected error");
+    assert.deepEqual(linesAt(entries, "warn"), ["Failed to establish connection: timed out."],
+      "the user sees the catch-all connection diagnostic as one warning, since a dial that timed out went unanswered rather than broke");
     assert.equal(logCount(entries, "error", "Initial-state capture timed out"), 0, "no capture-timeout diagnostic is logged for a timeout the library raised");
   });
 

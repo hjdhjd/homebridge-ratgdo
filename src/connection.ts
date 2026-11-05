@@ -21,12 +21,12 @@ import { EncryptionKeyInvalidError, EncryptionKeyMissingError, EncryptionRequire
 import type { EntityId, EspHomeClient, NoiseServerHello, PskResolver, TelemetryEvent } from "esphome-client";
 import type { HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
 import { classifyDeviceInfo, deviceInfoName, normalizeMac } from "./discovery.ts";
+import { classifyTransportError, connectionFaultLevel, formatErrorMessage, waitWithSignal } from "homebridge-plugin-utils";
 import { presentEntityIds, ratgdoInitialStateEntityIds } from "./entities.ts";
 import type { DiscoveredRatgdo } from "./discovery.ts";
 import { RATGDO_INITIAL_STATE_TIMEOUT } from "./settings.ts";
 import type { RatgdoDevice } from "./types.ts";
 import util from "node:util";
-import { waitWithSignal } from "homebridge-plugin-utils";
 
 /* The injectable ESPHome client-factory port. Aliased to the real factory's type so the boundary stays bound to esphome-client's signature: if `openEspHomeClient`'s
  * shape changes, this alias and every default-arg site that resolves to it move with it. Production never passes it (the default real factory runs); a unit test passes
@@ -248,7 +248,8 @@ export async function openManualConnection(options: OpenManualConnectionOptions)
  * and the caught value being that deadline's own reason, so a TimeoutError from any other source - the library's connect timeout among them - falls to the generic
  * branch as the library's failure. The refusals a user can act on - the identity refusal, a key fault, and an API version the client cannot speak - share the one
  * branch the describer words, ahead of the branch every other PermanentError takes, so the user sees a focused diagnostic instead of a wrapped stack trace. Everything
- * else falls through to the generic else with the unfiltered util.inspect output.
+ * else falls through to the generic branch, which logs the failure's own sentences at the level HBPU's connection fault rule answers for a dial: an error for a fault
+ * that stays broken until someone fixes it, such as a host name that does not resolve, and a warning for one that heals itself.
  *
  * Every failure - a thrown one and a refused one alike - leaves through the single tail below rather than returning from where it was decided, which is what makes
  * the dispose one statement instead of one per branch.
@@ -396,7 +397,12 @@ resolveWaitList: (client: EspHomeClient) => WaitListOutcome<TIdentity, TRefusal>
       reason = "timeout";
     } else {
 
-      log.error("Failed to establish connection: %s", util.inspect(error, { depth: null }));
+      /* A failure no cause above names is the transport's, and HBPU's connection fault rule answers its level, read for a connection still being dialed. The rule
+       * answers quiet only for a teardown, which the shutdown branch above has already taken, so every answer but an error is logged as the warning it heals as.
+       */
+      const level = (connectionFaultLevel(classifyTransportError(error), { open: false }) === "error") ? "error" : "warn";
+
+      log[level]("Failed to establish connection: %s.", formatErrorMessage(error));
       reason = "unknown";
     }
   }

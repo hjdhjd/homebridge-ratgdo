@@ -166,11 +166,12 @@ export function governingAddress(current: string | undefined, candidate: string,
  * corrected on the device, a firmware update, or an opener reclaiming an address another device held is picked up by a later attempt rather than by a restart, which
  * is the rule every plugin in the family follows for a refused sign-in. Shutdown ends the loop, because the plugin is going away.
  *
- * An opener that is simply not there fails the same way every retry interval for the life of the plugin, and the connect layer reports each failure at error
- * because from where it sits every failure is news. Repeating one line at every interval forever is not news, it is noise. So every attempt runs through one
- * repeat-demoting adapter: the first report of a reason reaches the user at the level the connect layer chose, and an unchanged reason after it goes to debug,
- * where a support request can still find it. One adapter serves the whole loop, because what it remembers from one attempt to the next is what makes a repeat
- * recognizable as one, and it is the caller's own when the caller's episode began before the loop did. A loop handed a log instead opens its own on that log.
+ * An opener that is simply not there fails the same way every retry interval for the life of the plugin, and the connect layer reports each failure in full, at
+ * error or at warning, because from where it sits every failure is news. Repeating one line at every interval forever is not news, it is noise. So every attempt
+ * runs through one repeat-demoting adapter: the first report of a reason reaches the user at the level the connect layer chose, and an unchanged reason after it
+ * goes to debug, where a support request can still find it. One adapter serves the whole loop, because what it remembers from one attempt to the next is what
+ * makes a repeat recognizable as one, and it is the caller's own when the caller's episode began before the loop did. A loop handed a log instead opens its own on
+ * that log.
  *
  * The pause is wakeable, which is what closes the window this loop would otherwise sit in: something can serve this very opener a second after a failed attempt
  * starts the pause between attempts, and a plain delay would leave the loop dialing a device that is already connected. The platform wakes the pause when that

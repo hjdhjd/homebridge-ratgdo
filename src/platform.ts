@@ -1032,7 +1032,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.releaseConnection(ratgdo);
 
     /* The release opens the episode the redial continues should this dial fail, and the dial is that episode's first attempt, run through the adapter the redial
-     * takes. A redial whose first dial fails the same way is then repeating what this dial reported, and says so at debug rather than at error a second time.
+     * takes. A redial whose first dial fails the same way is then repeating what this dial reported, and says so at debug rather than in full a second time.
      */
     const failures = this.openRedialEpisode(ratgdo);
     const dial = (log: HomebridgePluginLogging): Promise<Nullable<ConnectionFailureReason>> => this.dialAndInstall(ratgdo, discovered.address, log);

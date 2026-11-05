@@ -9,7 +9,7 @@
 import type { BuildPlatformResult, ScriptedAnswer, TestEspHomeClient } from "./testing.helpers.ts";
 import { Characteristic, Service, buildPlatform, colonMac, customNameEntry, makeOpenerClient, makeOpenerService, makeScriptedOpenClient,
   nameLookupsDuring } from "./testing.helpers.ts";
-import { ConnectionError, EncryptionKeyInvalidError } from "esphome-client";
+import { ConnectionRefusedError, EncryptionKeyInvalidError } from "esphome-client";
 import type { TestLogEntry, TestPlatformAccessory } from "homebridge-plugin-utils/testing";
 import { describe, test } from "node:test";
 import { expectAt, formatLogEntry, linesAt, logCount, present, settle, settleUntil } from "homebridge-plugin-utils/testing";
@@ -44,8 +44,11 @@ const DEBUG = "Enable.Log.Debug";
 // The cause of a reconnect the client gives up for good: the device refuses the key, which the client never retries.
 const refusedKey = (): EncryptionKeyInvalidError => new EncryptionKeyInvalidError("The device refused the key.");
 
-// A dial nothing answers, which the connect core reports as a failure it cannot classify.
-const unanswered = (): ConnectionError => new ConnectionError("Nothing answers yet.", "CONNECT_FAILED");
+/* A dial nothing answers, which the connect core reports as a failure it cannot classify. It is a host name that does not resolve, a failure the connection
+ * fault rule keeps at error, because the rows below read a repeat on the debug channel, which the platform's debug setting routes through warn, and a
+ * failure reported at warn would land its first report on that same channel.
+ */
+const unanswered = (): ConnectionRefusedError => new ConnectionRefusedError("Connection to the opener failed: ENOTFOUND.", "ENOTFOUND");
 
 // How often a message has been reported at error and repeated on the debug channel, which the platform's debug setting routes through warn.
 const reported = (built: BuildPlatformResult, message: string): [ number, number ] => [ logCount(built.entries, "error", message),

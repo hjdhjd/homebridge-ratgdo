@@ -146,8 +146,9 @@ describe("runManualAddress", () => {
     const dialed: string[] = [];
     const dial = async (attemptLog: Parameters<Parameters<typeof runManualAddress>[0]["dial"]>[0]): Promise<DialOutcome> => {
 
-      // Every attempt says the same thing at error level. What differs between attempts is only whether the loop let that line through, which is what is asserted.
-      attemptLog.error("Failed to establish connection: %s", "ECONNREFUSED");
+      // Every attempt says the same thing at error level, as a dial of a host name that does not resolve does. What differs between attempts is only whether the
+      // loop let that line through, which is what is asserted.
+      attemptLog.error("Failed to establish connection: %s.", "Connection to garage.local:6053 failed: ENOTFOUND");
       dialed.push("attempt");
 
       return script[dialed.length - 1] ?? { ok: false, reason: "timeout" };
