@@ -659,6 +659,39 @@ describe("the ratgdo settings page", () => {
         "a device carrying no group word is offered everything, so an unreadable Model costs a user rows they can ignore rather than rows they cannot reach");
     });
 
+    /* The Disco section follows the hardware as far as a Model can say. A Ratgdo's second word is its firmware's project version rather than a board name, so the
+     * page withholds the section only where that word names the v2 boards' stock firmware, and offers it on every other reading, a custom firmware's version and a
+     * Model carrying no version included. Each device is tagged by the page's own device source, as the sidebar tags it, before the hook is asked about it.
+     */
+    test("offers the Disco section wherever a Ratgdo's Model leaves room for the Disco board, and withholds it from a v2 board", async () => {
+
+      const withDisco = [ "Device", "Log", "Opener", "Light", "Motion", "Mqtt", "Disco" ];
+      const everything = [ "Device", "Log", "Opener", "Light", "Motion", "Mqtt", "Disco", "Konnected" ];
+      const rows: { categories: string[]; model: unknown; why: string }[] = [
+
+        { categories: withDisco, model: "Ratgdo 32disco", why: "a Disco board's stock firmware is offered the section" },
+        { categories: [ "Device", "Log", "Opener", "Light", "Motion", "Mqtt" ], model: "Ratgdo 2.5i", why: "a v2 board's stock firmware is not" },
+        { categories: withDisco, model: "Ratgdo 1.0.0", why: "a version the rule does not recognize, as custom firmware reads, is offered it" },
+        { categories: withDisco, model: "Ratgdo", why: "a Model carrying no version is offered it" },
+        { categories: [ "Device", "Log", "Opener", "Light", "Mqtt", "Konnected" ], model: "Konnected", why: "a Konnected device is withheld it by its variant" },
+        { categories: everything, model: "", why: "an empty Model leaves the device untagged, and it is offered everything" },
+        { categories: everything, model: 42, why: "a Model that is not text leaves the device untagged, and it is offered everything" }
+      ];
+
+      using page = await loadUi({ devices: rows.map(({ model }, index) => ({ model, name: "Opener " + String(index), serialNumber: "AABBCCDDEE0" + String(index) })) });
+
+      const getDevices = page.double.params.getDevices;
+
+      assert.ok(getDevices, "the page supplies its own device source");
+
+      const { devices } = await getDevices(null, { config: {} });
+
+      for(const [ index, { categories, why } ] of rows.entries()) {
+
+        assert.deepEqual(visibleCategories(page, expectAt(devices, index, "the device source hands back every device")), categories, why);
+      }
+    });
+
     test("withholds the vehicle-presence log from a Konnected device and keeps every other logging row", async () => {
 
       using page = await loadUi();

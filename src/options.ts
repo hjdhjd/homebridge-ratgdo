@@ -90,9 +90,13 @@ const mqtt = mqttFeatureOptions<RatgdoOptionMeta>({ defaultTopic: RATGDO_MQTT_TO
  * names a variant is shown only to devices of that variant, and an entry that names none is shown to every device. Which hardware has which feature is therefore stated
  * once, here in the catalog: the settings page decides what a device's page offers by reading this declaration rather than by matching category or option names of its
  * own, and the plugin reads it through optionFitsVariant.
+ *
+ * An entry marked `disco` belongs to the Disco board within its variant. The settings page withholds it from a device whose Model shows it cannot carry that board,
+ * while the plugin reads the variant alone, so an accessory a user has already enabled stays whatever the page offers.
  */
 export interface RatgdoOptionMeta {
 
+  readonly disco?: true;
   readonly variant: RatgdoVariant;
 }
 
@@ -105,7 +109,7 @@ export const featureOptionCategories: FeatureCategoryEntry<RatgdoOptionMeta>[] =
   { description: "Opener light", name: "Light" },
   { description: "Opener motion", meta: { variant: RatgdoVariant.RATGDO }, name: "Motion" },
   mqtt.category,
-  { description: "Ratgdo (ESP32) Disco device-specific", meta: { variant: RatgdoVariant.RATGDO }, name: "Disco" },
+  { description: "Ratgdo (ESP32) Disco device-specific", meta: { disco: true, variant: RatgdoVariant.RATGDO }, name: "Disco" },
   { description: "Konnected device-specific", meta: { variant: RatgdoVariant.KONNECTED }, name: "Konnected" }
 ];
 

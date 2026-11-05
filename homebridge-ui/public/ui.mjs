@@ -4,11 +4,11 @@
  */
 import { FeatureOptions, formatValueList } from "homebridge-plugin-utils/featureOptions.js";
 import { PLATFORM_NAME, RATGDO_WEBUI_PAGE_PROBE_SECONDS } from "./lib/webui/settings.js";
+import { RATGDO_VARIANT_LABELS, mayCarryDisco, modelWords } from "./lib/webui/variants.js";
 import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE, STATUS_WARM_ROUTE } from "./lib/webui/status-routes.js";
 import { canonicalManualAddress, isZonedAddress } from "./lib/webui/manual-address.js";
 import { createActionGuard, withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
 import { PluginConfigSession } from "homebridge-plugin-utils/pluginConfigSession.mjs";
-import { RATGDO_VARIANT_LABELS } from "./lib/webui/variants.js";
 import { STATUS_EVENT } from "homebridge-plugin-utils/webui/status.js";
 import { STATUS_ROW_TEMPLATES } from "./lib/webui/status-rows.js";
 import { createSaveFlow } from "homebridge-plugin-utils/webui/saveflow.js";
@@ -228,21 +228,11 @@ const sidebarGroupRank = (group) => {
 // Each variant keyed by the family word its devices are grouped under, read from the same label table, so a group word maps back to its variant by lookup.
 const VARIANT_OF_GROUP = new Map(Object.entries(RATGDO_VARIANT_LABELS).map(([ variant, label ]) => [ label, variant ]));
 
-/* The sidebar group a device belongs to, read from the leading word of its Model. device.ts composes that Model as the family word followed by the hardware model, for
- * exactly this reason, so the group is available on every install the moment the page loads - nothing is persisted and nothing is migrated. A Model that is not text
- * at all leaves the device untagged, which the framework renders under the top-level device heading.
+/* The sidebar group a device belongs to, read from the leading word of its Model. device.ts composes that Model as the family word followed by the model the device's
+ * firmware reports, for exactly this reason, so the group is available on every install the moment the page loads - nothing is persisted and nothing is migrated. A
+ * Model that is not text at all leaves the device untagged, which the framework renders under the top-level device heading.
  */
-const variantGroup = (model) => {
-
-  if((typeof model !== "string") || (model.length === 0)) {
-
-    return undefined;
-  }
-
-  const space = model.indexOf(" ");
-
-  return (space === -1) ? model : model.slice(0, space);
-};
+const variantGroup = (model) => modelWords(model)[0];
 
 /* The page's device source, and the one place the device fetch and its grouping live. It hands back the framework's own result object - both `devices` and `error`,
  * which the framework's contract guard requires - with each row tagged by its variant group, so the sidebar and the warm recompute read one list processed one way.
@@ -265,15 +255,23 @@ const deviceList = async () => {
  * is the variant's label, and the variant is looked up from it in the label table the plugin composes the Model from, so a word naming no variant offers no variant's
  * rows. A device whose Model the page could not read carries no group word and is offered everything, because a row that does not apply costs a reader far less than a
  * page that hides the row they came to set.
+ *
+ * An entry marked for the Disco board answers one more question, whether the device's Model shows it may carry that board, and that rule is read here and nowhere
+ * else on the page. It withholds the entry only where the Model names a board that cannot, on the same reasoning as above.
  */
 const entryAppliesToDevice = (device, entry) => {
 
-  if(!device || (device.sidebarGroup === undefined) || (entry.meta?.variant === undefined)) {
+  if(!device || (device.sidebarGroup === undefined)) {
 
     return true;
   }
 
-  return VARIANT_OF_GROUP.get(device.sidebarGroup) === entry.meta.variant;
+  if((entry.meta?.variant !== undefined) && (VARIANT_OF_GROUP.get(device.sidebarGroup) !== entry.meta.variant)) {
+
+    return false;
+  }
+
+  return !entry.meta?.disco || mayCarryDisco(device.model);
 };
 
 // Whether a device's page offers one feature option, which is the entry-level reading of the variant rule above.
