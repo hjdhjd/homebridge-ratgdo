@@ -126,7 +126,7 @@ const deviceOptions: RatgdoFeatureOption[] = [
   { default: true, description: "Make this device available in HomeKit.", name: "", scopes: [ "device", "global" ] },
   { default: false, defaultValue: "", description: "Custom HomeKit name for this device and its parts. It always applies, so a rename in the Home app yields to it wherever HomeKit allows.", inputSize: 30, name: "Name", scopes: ["device"] },
   { default: false, description: "Synchronize the ESPHome name of this device and its parts with HomeKit. A rename in the Home app yields to it wherever HomeKit allows. A custom Name takes precedence.", name: "SyncName", scopes: [ "device", "global" ] },
-  { default: false, defaultValue: "", description: "Base64-encoded encryption key to use for the ESPHome API as specified in your YAML configuration.", inputSize: 44, name: "Encryption.Key", scopes: [ "device", "global" ] },
+  { default: false, defaultValue: "", description: "Base64-encoded encryption key to use for the ESPHome API as specified in your YAML configuration.", inputSize: 44, name: "Encryption.Key", scopes: [ "device", "global" ], secret: true },
   { default: false, defaultValue: "", description: "Hostnames or IP addresses of devices to connect to directly, for a device autodiscovery cannot reach or should not choose the address for.", inputSize: 30, multiple: true, name: "Address", scopes: ["global"] }
 ];
 

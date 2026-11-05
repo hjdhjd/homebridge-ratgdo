@@ -240,6 +240,15 @@ describe("the feature-option catalog", () => {
       }
     });
 
+    // A census of the entries the settings page masks, so a secret added or dropped anywhere in the catalog, the library's MQTT group included, moves this list.
+    test("the encryption key is the one secret, so the settings page masks it behind a reveal", () => {
+
+      const secrets = Object.entries(featureOptions).flatMap(([ category, entries ]) => entries.filter((entry) => entry.secret === true)
+        .map((entry) => category + "." + entry.name));
+
+      assert.deepEqual(secrets, ["Device.Encryption.Key"], "an encryption key is a credential, so it renders masked wherever it is configured, and nothing else does");
+    });
+
     test("each category exposes at least one option entry", () => {
 
       for(const [ category, entries ] of Object.entries(featureOptions)) {
