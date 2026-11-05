@@ -4,10 +4,10 @@
  * PlatformConfig into a typed RatgdoOptions, plus a catalog shape audit over featureOptionCategories and featureOptions that holds the structural contract every
  * feature-option consumer (the FeatureOptions engine, the WebUI, the docs renderer) depends on.
  */
+import { ALL_CHOICES, FeatureOptions } from "homebridge-plugin-utils";
 import type { FeatureCategoryEntry, FeatureOptionEntry } from "homebridge-plugin-utils";
 import { describe, test } from "node:test";
 import { describeCategoryScope, describeOptionScope, featureOptionCategories, featureOptions, normalizeConfig, optionFitsVariant } from "./options.ts";
-import { FeatureOptions } from "homebridge-plugin-utils";
 import type { PlatformConfig } from "homebridge";
 import type { RatgdoOptionMeta } from "./options.ts";
 import { RatgdoVariant } from "./types.ts";
@@ -240,6 +240,21 @@ describe("the feature-option catalog", () => {
       }
     });
 
+    test("the event logging list offers its categories through the settings page's source, every one selected by default, and words that selection", () => {
+
+      const entry = entryFor("Log", "Events");
+      const render = entry.render;
+
+      assert.deepEqual({ choices: entry.choices, default: entry.default, defaultValue: entry.defaultValue, multiple: entry.multiple, scopes: entry.scopes },
+        { choices: "logEvents", default: true, defaultValue: ALL_CHOICES, multiple: true, scopes: [ "device", "global" ] },
+        "the list is on by default with every category selected, and settable globally or on one device");
+      assert.equal(typeof render, "function", "its value has a renderer of its own");
+      assert.equal((render as (value: string) => string)(ALL_CHOICES), "every category", "which words the all-categories selection rather than printing its wildcard");
+      assert.equal((render as (value: string) => string)("Opener,Light"), "Opener, Light", "and names a selection's categories by their labels, comma-separated");
+      assert.equal((render as (value: string) => string)("VehiclePresence,Garage"), "Vehicle presence, Garage",
+        "reading each stored category as its label and keeping a value the event table does not name as stored");
+    });
+
     // A census of the entries the settings page masks, so a secret added or dropped anywhere in the catalog, the library's MQTT group included, moves this list.
     test("the encryption key is the one secret, so the settings page masks it behind a reveal", () => {
 
@@ -299,7 +314,7 @@ describe("the feature-option catalog", () => {
 
     test("the device-facing entries declare both the device and the global level", () => {
 
-      for(const [ category, name ] of [ [ "Device", "Encryption.Key" ], [ "Device", "SyncName" ], [ "Log", "Opener" ], [ "Opener", "ReadOnly" ] ] as
+      for(const [ category, name ] of [ [ "Device", "Encryption.Key" ], [ "Device", "SyncName" ], [ "Log", "Events" ], [ "Opener", "ReadOnly" ] ] as
         [ string, string ][]) {
 
         assert.deepEqual(entryFor(category, name).scopes, [ "device", "global" ], category + "." + name + " is settable globally or on one device");
@@ -325,7 +340,7 @@ describe("the feature-option catalog", () => {
 
       assert.equal(describeOptionScope(entryFor("Log", "Debug"), log), "<BR>This option may only be applied globally.",
         "a global-only entry states that it has the one home");
-      assert.equal(describeOptionScope(entryFor("Log", "Opener"), log), "<BR>This option may be applied globally or on individual devices.",
+      assert.equal(describeOptionScope(entryFor("Log", "Events"), log), "<BR>This option may be applied globally or on individual devices.",
         "a device-facing entry states both levels");
       assert.equal(describeOptionScope({ default: true, description: "An entry declaring no scope.", name: "Undeclared" }, log), undefined,
         "an entry declaring no scope contributes no sentence, which is the guard the renderer's own entry type requires");
@@ -367,9 +382,10 @@ describe("the feature-option catalog", () => {
 
   describe("the variant declarations", () => {
 
-    /* Every variant the catalog declares, gathered from both halves and keyed by the entry carrying it - a category by its bare name, an option by its
-     * category-qualified one. Reading the whole catalog rather than probing the declaring entries by name is what makes the assertion below a census: a declaration
-     * added to or dropped from any entry moves this map, so what the settings page hides from a device cannot change without a line changing here.
+    /* Every variant the catalog declares, keyed by the category carrying it. A variant is declared on a category alone, which is what optionFitsVariant reads, so the
+     * census reads the categories and the row after it holds every option to declaring none. Reading the whole catalog rather than probing the declaring entries by
+     * name is what makes the assertion below a census: a declaration added to or dropped from any category moves this map, so what the settings page hides from a
+     * device cannot change without a line changing here.
      */
     const declaredVariants = (): Record<string, RatgdoVariant> => {
 
@@ -383,42 +399,42 @@ describe("the feature-option catalog", () => {
         }
       }
 
-      for(const [ category, entries ] of Object.entries(featureOptions)) {
-
-        for(const entry of entries) {
-
-          if(entry.meta) {
-
-            declared[category + (entry.name.length ? ("." + entry.name) : "")] = entry.meta.variant;
-          }
-        }
-      }
-
       return declared;
     };
 
-    test("exactly the hardware-specific entries name a variant, each naming the one whose firmware serves it", () => {
+    test("exactly the hardware-specific categories name a variant, each naming the one whose firmware serves it", () => {
 
       assert.deepEqual(declaredVariants(), {
 
         "Disco": RatgdoVariant.RATGDO,
         "Konnected": RatgdoVariant.KONNECTED,
-        "Log.VehiclePresence": RatgdoVariant.RATGDO,
         "Motion": RatgdoVariant.RATGDO
-      }, "the Disco and Motion categories and the vehicle-presence log belong to Ratgdo hardware, the Konnected category to Konnected hardware, and nothing else " +
-        "narrows to a variant");
+      }, "the Disco and Motion categories belong to Ratgdo hardware, the Konnected category to Konnected hardware, and nothing else narrows to a variant");
     });
 
-    test("optionFitsVariant reads an option's own declaration, else its category's, and an option naming neither fits every variant", () => {
+    test("no option declares an annotation of its own, since its category's is the one the plugin and the settings page read", () => {
+
+      const annotated = Object.entries(featureOptions).flatMap(([ category, entries ]) => entries.filter((entry) => entry.meta !== undefined)
+        .map((entry) => category + "." + entry.name));
+
+      assert.deepEqual(annotated, [], "an option-level variant would be honored by the settings page and ignored by optionFitsVariant, so none is declared");
+    });
+
+    test("only the Disco category is marked for the Disco board", () => {
+
+      assert.deepEqual(featureOptionCategories.filter((category) => category.meta?.disco).map((category) => category.name), ["Disco"],
+        "the settings page withholds the Disco board's section from a device whose Model shows it cannot carry the board");
+    });
+
+    test("optionFitsVariant reads an option's category's declaration, and an option whose category names none fits every variant", () => {
 
       const cases: { konnected: boolean; option: string; ratgdo: boolean }[] = [
 
         { konnected: false, option: "Disco.Battery", ratgdo: true },
         { konnected: true, option: "Konnected.Switch.Pcw", ratgdo: false },
-        { konnected: false, option: "Log.VehiclePresence", ratgdo: true },
         { konnected: false, option: "Motion", ratgdo: true },
         { konnected: false, option: "Motion.OccupancySensor.Duration", ratgdo: true },
-        { konnected: true, option: "Log.Opener", ratgdo: true },
+        { konnected: true, option: "Log.Events", ratgdo: true },
         { konnected: true, option: "Opener.ReadOnly", ratgdo: true }
       ];
 

@@ -10,7 +10,7 @@
  * surfaces that consume them: the MQTT "garagedoor" get handler (which returns the lowercase translation) and the door-transition info log (which emits the
  * capitalized translation, e.g. "Open.", "Closed."). Door states are driven through ratgdo.updateState() with the EspHomeEvent cover shape.
  */
-import { Characteristic, Service, buildRatgdoAccessory, customNameEntry, makeKonnectedInitialState, makeRatgdoInitialState,
+import { Characteristic, Service, buildRatgdoAccessory, customNameEntry, logEventsWithout, makeKonnectedInitialState, makeRatgdoInitialState,
   makeTestPlatform } from "./testing.helpers.ts";
 import { HAPStatus, MQTT_GET_SUFFIX, ServiceEventTypes, getServiceName } from "homebridge-plugin-utils";
 import { RatgdoService, RatgdoVariant } from "./types.ts";
@@ -316,7 +316,7 @@ describe("RatgdoAccessory naming", () => {
       assert.equal(await mqtt.invokeGet("garagedoor" + MQTT_GET_SUFFIX), "open", "the garagedoor get handler returns the lowercase translation of the open door state");
       assert.equal(mqtt.published.some((entry) => entry.topic.endsWith("garagedoor") && (entry.payload === "open")), true,
         "the open transition publishes the lowercase door state to the garagedoor topic");
-      assert.equal(loggedAt(entries, "info", "Open."), true, "the open transition logs the capitalized door state when Log.Opener is enabled");
+      assert.equal(loggedAt(entries, "info", "Open."), true, "the open transition logs the capitalized door state when the logging list selects opener events");
     });
 
     test("translates a closed door to \"closed\" for MQTT and \"Closed.\" for the info log", async () => {
@@ -331,7 +331,7 @@ describe("RatgdoAccessory naming", () => {
 
       assert.equal(await mqtt.invokeGet("garagedoor" + MQTT_GET_SUFFIX), "closed",
         "the garagedoor get handler returns the lowercase translation of the closed door state");
-      assert.equal(loggedAt(entries, "info", "Closed."), true, "the close transition logs the capitalized door state when Log.Opener is enabled");
+      assert.equal(loggedAt(entries, "info", "Closed."), true, "the close transition logs the capitalized door state when the logging list selects opener events");
     });
 
     test("translates an opening door to \"opening\" for MQTT and \"Opening.\" for the info log", async () => {
@@ -344,7 +344,7 @@ describe("RatgdoAccessory naming", () => {
 
       assert.equal(await mqtt.invokeGet("garagedoor" + MQTT_GET_SUFFIX), "opening",
         "the garagedoor get handler returns the lowercase translation of the opening door state");
-      assert.equal(loggedAt(entries, "info", "Opening."), true, "the opening transition logs the capitalized door state when Log.Opener is enabled");
+      assert.equal(loggedAt(entries, "info", "Opening."), true, "the opening transition logs the capitalized door state when the logging list selects opener events");
     });
 
     test("translates a closing door to \"closing\" for MQTT and \"Closing.\" for the info log", async () => {
@@ -357,7 +357,7 @@ describe("RatgdoAccessory naming", () => {
 
       assert.equal(await mqtt.invokeGet("garagedoor" + MQTT_GET_SUFFIX), "closing",
         "the garagedoor get handler returns the lowercase translation of the closing door state");
-      assert.equal(loggedAt(entries, "info", "Closing."), true, "the closing transition logs the capitalized door state when Log.Opener is enabled");
+      assert.equal(loggedAt(entries, "info", "Closing."), true, "the closing transition logs the capitalized door state when the logging list selects opener events");
     });
 
     test("translates a stopped (partially-open) door to \"stopped\" for MQTT and \"Stopped.\" for the info log", async () => {
@@ -371,7 +371,7 @@ describe("RatgdoAccessory naming", () => {
 
       assert.equal(await mqtt.invokeGet("garagedoor" + MQTT_GET_SUFFIX), "stopped",
         "the garagedoor get handler returns the lowercase translation of the stopped door state");
-      assert.equal(loggedAt(entries, "info", "Stopped."), true, "the stopped transition logs the capitalized door state when Log.Opener is enabled");
+      assert.equal(loggedAt(entries, "info", "Stopped."), true, "the stopped transition logs the capitalized door state when the logging list selects opener events");
     });
 
     test("reports the born-closed door as \"closed\" through MQTT with no transition log", async () => {
@@ -395,19 +395,19 @@ describe("RatgdoAccessory naming", () => {
 
       assert.equal(await mqtt.invokeGet("garagedoor" + MQTT_GET_SUFFIX), "open",
         "the Konnected garage_door cover id resolves through the same translation as the Ratgdo cover");
-      assert.equal(loggedAt(entries, "info", "Open."), true, "the Konnected open transition logs the capitalized door state when Log.Opener is enabled");
+      assert.equal(loggedAt(entries, "info", "Open."), true, "the Konnected open transition logs the capitalized door state when the logging list selects opener events");
     });
 
-    test("does not emit the capitalized door log when Log.Opener is disabled", async () => {
+    test("does not emit the capitalized door log when the logging list leaves opener events out", async () => {
 
-      const { entries, mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true, userOptions: ["Disable.Log.Opener"] });
+      const { entries, mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true, userOptions: [logEventsWithout("Opener")] });
 
       assert.ok(mqtt, "an MQTT double is attached when mqtt is requested");
 
       ratgdo.updateState(coverEvent("cover-door", "OPEN", "IDLE", 1));
 
       assert.equal(await mqtt.invokeGet("garagedoor" + MQTT_GET_SUFFIX), "open", "the MQTT translation still reflects the open state regardless of the logging option");
-      assert.equal(loggedAt(entries, "info", "Open."), false, "with Log.Opener disabled, the capitalized door-state info line is suppressed");
+      assert.equal(loggedAt(entries, "info", "Open."), false, "with opener events left out of the logging list, the capitalized door-state info line is suppressed");
     });
 
     test("does not re-publish the door state when an identical cover event repeats", () => {

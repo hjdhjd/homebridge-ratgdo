@@ -30,14 +30,15 @@ import type { Clock, HomebridgePluginLogging, MdnsService, MqttClient, Nullable 
 import { ConnectionError, CoverOperation, EncryptionKeyMissingError, EncryptionRequiredError, EspHomeError, HealthState, LockState, PermanentError, disconnectedHealth,
   entityId } from "esphome-client";
 import type { ConnectionHealth, DeviceInfo, EntityId, EspHomeClient, LifecycleEvent, LogEventData, NoiseServerHello, PskResolver, TelemetryEvent } from "esphome-client";
-import { FeatureOptions, onAbort } from "homebridge-plugin-utils";
-import { PLATFORM_NAME, RATGDO_NAME_OPTION } from "./webui/settings.ts";
+import { FeatureOptions, formatValueList, onAbort } from "homebridge-plugin-utils";
+import { PLATFORM_NAME, RATGDO_LOG_EVENTS_OPTION, RATGDO_NAME_OPTION } from "./webui/settings.ts";
 import { PLUGIN_NAME, RATGDO_MDNS_SERVICE_TYPE } from "./settings.ts";
 import { TestClock, TestMdnsBrowserFactory, TestMqttClient, capturingLog, expectAt, loadHomebridge, makeService, makeTxtStrings,
   watchServerWarnings } from "homebridge-plugin-utils/testing";
 import type { TestHomebridgeApi, TestLogEntry, TestMdnsBrowser, TestPlatformAccessory } from "homebridge-plugin-utils/testing";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import type { OpenEspHomeClient } from "./connection.ts";
+import { RATGDO_LOG_EVENTS } from "./webui/log-events.ts";
 import { RatgdoAccessory } from "./device.ts";
 import type { RatgdoDevice } from "./types.ts";
 import { RatgdoPlatform } from "./platform.ts";
@@ -555,6 +556,19 @@ export function makeTestDevice(overrides: Partial<RatgdoDevice> = {}): RatgdoDev
 export function customNameEntry(name: string, mac = "AABBCCDDEEFF"): string {
 
   return "Enable." + RATGDO_NAME_OPTION + "." + mac + "=" + name;
+}
+
+/**
+ * Compose the global logging list entry that selects every event category but the ones named, spelled the way the options editor writes it when those boxes are
+ * cleared. The categories are read from the plugin's one event table, so a category the table adds is selected here too.
+ *
+ * @param omitted - The categories the list leaves out, by the value the list stores for each.
+ *
+ * @returns the feature-option string a configuration carries for that selection.
+ */
+export function logEventsWithout(...omitted: string[]): string {
+
+  return "Enable." + RATGDO_LOG_EVENTS_OPTION + "=" + formatValueList(RATGDO_LOG_EVENTS.map(({ value }) => value).filter((value) => !omitted.includes(value)));
 }
 
 /**

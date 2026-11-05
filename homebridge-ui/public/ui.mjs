@@ -4,7 +4,7 @@
  */
 import { FeatureOptions, formatValueList } from "homebridge-plugin-utils/featureOptions.js";
 import { PLATFORM_NAME, RATGDO_WEBUI_PAGE_PROBE_SECONDS } from "./lib/webui/settings.js";
-import { RATGDO_VARIANT_LABELS, mayCarryDisco, modelWords } from "./lib/webui/variants.js";
+import { RATGDO_DISCO_META, RATGDO_VARIANT_LABELS, mayCarryDisco, modelWords } from "./lib/webui/variants.js";
 import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE, STATUS_WARM_ROUTE } from "./lib/webui/status-routes.js";
 import { canonicalManualAddress, isZonedAddress } from "./lib/webui/manual-address.js";
 import { createActionGuard, withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
@@ -12,8 +12,10 @@ import { maskSecrets, mountSecretReveals } from "homebridge-plugin-utils/webUi-s
 import { PluginConfigSession } from "homebridge-plugin-utils/pluginConfigSession.mjs";
 import { STATUS_EVENT } from "homebridge-plugin-utils/webui/status.js";
 import { STATUS_ROW_TEMPLATES } from "./lib/webui/status-rows.js";
+import { createRetiredOptions } from "homebridge-plugin-utils/featureOptions-retired.js";
 import { createSaveFlow } from "homebridge-plugin-utils/webui/saveflow.js";
 import { displayedName } from "homebridge-plugin-utils/homekit-name.js";
+import { logEventChoices } from "./lib/webui/log-events.js";
 import { makeRatgdoConfig } from "./lib/webui/ratgdo-config.js";
 import { webUi } from "homebridge-plugin-utils/webUi.mjs";
 
@@ -281,6 +283,18 @@ const validOption = (device, option) => entryAppliesToDevice(device, option);
 // Whether a device's page offers one feature option category, the same rule applied to the section the framework is about to render.
 const validOptionCategory = (device, category) => entryAppliesToDevice(device, category);
 
+// An entry marked for the Disco board, which is how the page asks the rule above whether the Disco board's options apply to a device.
+const DISCO_ENTRY = { meta: RATGDO_DISCO_META };
+
+/* The choice sources the catalog names, keyed as it names them. The logging list offers every event category the plugin logs, vehicle presence only where the Disco
+ * board's options apply, which the visibility rule decides for the device in view: the global page and a device the page could not classify are offered it, and a
+ * Konnected opener or a v2 board is not.
+ */
+const choices = {
+
+  logEvents: ({ device }) => logEventChoices(entryAppliesToDevice(device, DISCO_ENTRY))
+};
+
 // The card's copy for every verdict a probe can answer with. Keyed by the classified reason so the card renders one sentence per reason rather than branching, and
 // worded in the status panel's own voice: what happened, then what to do about it.
 const PROBE_MESSAGES = {
@@ -303,7 +317,7 @@ const configInterpreter = async () => {
 
   if(!interpreter) {
 
-    interpreter = makeRatgdoConfig({ FeatureOptions, catalog: await ui.featureOptions.catalog(), displayedName, formatValueList });
+    interpreter = makeRatgdoConfig({ FeatureOptions, catalog: await ui.featureOptions.catalog(), createRetiredOptions, displayedName, formatValueList });
     repaintDeviceLinks();
   }
 
@@ -810,7 +824,7 @@ const featureOptionsParams = {
     onServerHello: forceWarmResend,
     placeholderRows: STATUS_ROW_TEMPLATES
   },
-  ui: { validOption, validOptionCategory }
+  ui: { choices, validOption, validOptionCategory }
 };
 
 const ui = new webUi({ featureOptions: featureOptionsParams, name: PLATFORM_NAME });

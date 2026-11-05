@@ -3,16 +3,19 @@
  * config.test.ts: The webUI's pure platform-configuration interpreter, exercised against the REAL feature-option engine and the REAL option catalog so the assertions
  * bind to the same grammar the plugin's runtime resolves against. Covers every arm of the legacy-settings migration - what migrates, what deletes without migrating,
  * and what declines entirely - plus a round trip proving a migrated configuration runs the platform on the same effective values the legacy one did, the precedence
- * rows for the broker and prefix the library resolves ratgdo's client from, and the manual-device reads and writes behind the settings page's Add Device card.
+ * rows for the broker and prefix the library resolves ratgdo's client from, the retired per-event logging options the migration carries into the one events list,
+ * and the manual-device reads and writes behind the settings page's Add Device card.
  *
  * One discipline binds every claim about a deleted property: a patch carries a deletion as a PRESENT key whose value is undefined, and carries a non-deletion by
  * omitting the key. An equality read cannot tell those apart, and the session's shallow-merge commit treats them oppositely, so presence is asserted with
  * Object.hasOwn and absence with its negation - never with a comparison against undefined.
  */
-import { FeatureOptions, displayedName, formatValueList, mqttConnectionSettings } from "homebridge-plugin-utils";
+import { FeatureOptions, createRetiredOptions, displayedName, formatValueList, mqttConnectionSettings } from "homebridge-plugin-utils";
+import { RATGDO_LOG_EVENTS, RATGDO_LOG_EVENTS_FAMILY } from "./webui/log-events.ts";
 import { describe, test } from "node:test";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import type { Nullable } from "homebridge-plugin-utils";
+import { RATGDO_LOG_EVENTS_OPTION } from "./webui/settings.ts";
 import { RATGDO_MQTT_TOPIC } from "./settings.ts";
 import assert from "node:assert/strict";
 import { makeRatgdoConfig } from "./webui/ratgdo-config.ts";
@@ -25,8 +28,10 @@ const OPTION_URL = "mqtt://127.0.0.1:1883";
 // alone.
 const UNRELATED_ENTRY = "Disable.Light.1234567890AB";
 
-// The interpreter under test, built the way the webUI builds it: the real engine class, the real served catalog, and the engine's own list formatter.
-const config = makeRatgdoConfig({ FeatureOptions, catalog: { categories: featureOptionCategories, options: featureOptions }, displayedName, formatValueList });
+// The interpreter under test, built the way the webUI builds it: the real engine class, the real served catalog, HBPU's retired options, and the engine's own list
+// formatter.
+const config = makeRatgdoConfig({ FeatureOptions, catalog: { categories: featureOptionCategories, options: featureOptions }, createRetiredOptions, displayedName,
+  formatValueList });
 
 // Every entry in an options array that addresses a given option, case-insensitively, in either the enabled or the disabled form.
 function entriesFor(options: string[] | undefined, option: string): string[] {
@@ -231,6 +236,78 @@ describe("the ratgdo webUI configuration migration", () => {
       "the migrated config resolves the same effective broker URL and topic prefix");
     assert.equal(after.consolidatedFlag({ fallback: migrated.debug, option: "Log.Debug" }), before.consolidatedFlag({ fallback: legacy.debug, option: "Log.Debug" }),
       "the migrated config resolves the same effective debug flag");
+  });
+});
+
+/* The retired per-event logging options, carried into the one events list through HBPU's retired options and read back through the REAL engine the way the accessory
+ * reads its logging: the list at a device's MAC and at the global level, against every category the plugin logs. Each row states a configuration in the retired
+ * grammar, the entries the migration writes in its place, and what the opener and every other device logged under the retired grammar, and it reads that the
+ * migrated configuration and the platform's boot view of the retired one both log exactly that. A scope's narrower or wider selection the rewrite dropped therefore
+ * fails a reading, not just a spelling.
+ */
+describe("the retired event logging options", () => {
+
+  // The opener a row narrows or widens, and a second device that inherits the global selection.
+  const OPENER = "AABBCCDDEEFF";
+  const OTHER = "112233445566";
+
+  // Every category the plugin logs, which is the domain the accessory reads the list against.
+  const EVERY_EVENT: string[] = RATGDO_LOG_EVENTS.map(({ value }) => value);
+
+  // Every category but light, which is what a global light switch turned off leaves.
+  const WITHOUT_LIGHT = [ "Opener", "Motion", "Obstruction", "VehiclePresence" ];
+
+  // What a device logs under a configuration in the current grammar, read as the accessory reads it.
+  const loggedAt = (options: readonly string[], device: string): readonly string[] => new FeatureOptions(featureOptionCategories, featureOptions, [...options])
+    .valueList({ defaultWhenUnset: true, device, domain: EVERY_EVENT, option: RATGDO_LOG_EVENTS_OPTION });
+
+  // The platform's boot view of a configuration, built as the platform builds it, over the one retired family.
+  const bootView = (options: string[]): readonly string[] => createRetiredOptions({ categories: featureOptionCategories, families: [RATGDO_LOG_EVENTS_FAMILY],
+    options: featureOptions }).translate(options).configuredOptions;
+
+  const rows: { entries: string[]; name: string; opener: string[]; other: string[]; retired: string[] }[] = [
+
+    { entries: [ UNRELATED_ENTRY, "Enable.Log.Events=Opener,Motion,Obstruction,VehiclePresence" ], name: "a global narrowing becomes the global list",
+      opener: WITHOUT_LIGHT, other: WITHOUT_LIGHT, retired: [ "Disable.Log.Light", UNRELATED_ENTRY ] },
+    { entries: ["Enable.Log.Events." + OPENER + "=Opener,Motion,Obstruction,VehiclePresence"],
+      name: "a device's narrowing becomes that device's list, leaving the global selection whole", opener: WITHOUT_LIGHT, other: EVERY_EVENT,
+      retired: ["Disable.Log.Light." + OPENER] },
+    { entries: [ "Enable.Log.Events=Opener,Motion,Obstruction,VehiclePresence", "Enable.Log.Events." + OPENER + "=*" ],
+      name: "a device wider than the global selection keeps every category", opener: EVERY_EVENT, other: WITHOUT_LIGHT,
+      retired: [ "Disable.Log.Light", "Enable.Log.Light." + OPENER ] },
+    { entries: [ "Enable.Log.Events=Opener,Motion,Obstruction,VehiclePresence", "Enable.Log.Events." + OPENER + "=Opener,Obstruction,VehiclePresence" ],
+      name: "a device narrower than a narrowed global selection keeps both narrowings", opener: [ "Opener", "Obstruction", "VehiclePresence" ], other: WITHOUT_LIGHT,
+      retired: [ "Disable.Log.Light", "Disable.Log.Motion." + OPENER ] },
+    { entries: [], name: "every category selected restates the default, so its entries leave and nothing is written in their place", opener: EVERY_EVENT,
+      other: EVERY_EVENT, retired: [ "Enable.Log.Light", "Enable.Log.Opener" ] },
+    { entries: ["Disable.Log.Events"], name: "every category turned off becomes the list turned off", opener: [], other: [],
+      retired: EVERY_EVENT.map((value) => "Disable.Log." + value) }
+  ];
+
+  for(const { entries, name, opener, other, retired } of rows) {
+
+    test(name, () => {
+
+      const patch = config.migrate({ options: retired });
+
+      assert.ok(patch, "a configuration carrying a retired logging option produces a patch");
+      assert.deepEqual(patch.options, entries, "the retired entries leave, and the list entries stating each scope's selection follow the entries that survive");
+      assert.deepEqual(loggedAt(entries, OPENER), opener, "the opener logs what it logged under the retired options");
+      assert.deepEqual(loggedAt(entries, OTHER), other, "and so does a device inheriting the global selection");
+      assert.deepEqual([ loggedAt(bootView(retired), OPENER), loggedAt(bootView(retired), OTHER) ], [ opener, other ],
+        "and the platform's boot view of the unmigrated configuration logs the same, so an upgrader who never opens the page loses nothing");
+      assert.equal(config.migrate({ options: patch.options }), null, "and a second pass over the migrated configuration writes nothing");
+    });
+  }
+
+  test("a retired logging option and a legacy property migrate in one patch", () => {
+
+    const patch = config.migrate({ debug: true, options: ["Disable.Log.Light"] });
+
+    assert.ok(patch, "the configuration produces a patch");
+    assert.deepEqual(patch.options, [ "Enable.Log.Events=Opener,Motion,Obstruction,VehiclePresence", "Enable.Log.Debug" ],
+      "the retired option becomes the list entry, and the debug property composes its entry onto the rewritten configuration");
+    assert.ok(Object.hasOwn(patch, "debug"), "and the property is carried by the patch for deletion");
   });
 });
 

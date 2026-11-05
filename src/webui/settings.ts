@@ -19,6 +19,10 @@ export const RATGDO_DEBUG_OPTION = "Log.Debug";
 // The feature option an encryption key is stored under, globally or at a device's MAC. Every connection reads its key here, and the Add Device card writes one here.
 export const RATGDO_ENCRYPTION_KEY_OPTION = "Device.Encryption.Key";
 
+// The feature option the event categories the plugin logs are selected by, one list globally or at a device's MAC. The accessory reads its logging from it, the
+// settings page offers each device its categories in it, and the retired per-event logging options migrate into it.
+export const RATGDO_LOG_EVENTS_OPTION = "Log.Events";
+
 // The feature option a device's custom HomeKit name is stored under, at the device's MAC. The accessory names itself and its parts from it, the platform and the status
 // feed name the device in their log lines from it, and the settings sidebar shows it as the device's name.
 export const RATGDO_NAME_OPTION = "Device.Name";

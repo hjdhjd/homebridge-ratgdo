@@ -3,6 +3,7 @@
  * variants.ts: The family word each device variant is known by, which the settings page and the plugin both import, and the settings page's reading of the Model
  * those words open.
  */
+import type { RatgdoOptionMeta } from "../options.ts";
 import type { RatgdoVariant } from "../types.ts";
 
 /* The family word each variant's devices are known by. It is the word HomeKit's Model characteristic opens with, which device.ts composes from this table, and it is
@@ -15,6 +16,12 @@ export const RATGDO_VARIANT_LABELS = {
   konnected: "Konnected",
   ratgdo: "Ratgdo"
 } as const satisfies Record<RatgdoVariant, string>;
+
+/* The annotation the catalog marks the Disco board's entries with: the Ratgdo variant, the only one carrying the board, and the Disco mark within it. The catalog's
+ * Disco section carries it, and the settings page asks its visibility rule about it wherever it decides whether Disco options apply to a device, so the two cannot
+ * describe the board differently.
+ */
+export const RATGDO_DISCO_META = { disco: true, variant: "ratgdo" } as const satisfies RatgdoOptionMeta;
 
 /* The words of a device's Model characteristic. device.ts composes the Model as the family word above followed by the model the device's firmware reports, and on a
  * Ratgdo that second word is the firmware's project version rather than the name of a board: live devices read "32disco" or "1.2.2", and custom firmware can read

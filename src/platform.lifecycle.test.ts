@@ -4,7 +4,7 @@
  * injectable defaults set to the doubles, an opener is discovered through the browser double and admitted through a fake dial, and the admitted client delivers its
  * lifecycle events in the orders esphome-client emits them and its telemetry in the shapes the wire carries. Each row reads what the opener's users see: whether
  * HomeKit answers, the info and error lines, the MQTT availability statement, the identity characteristics each session refreshes, the tiles telemetry moves, and
- * the lines the client itself writes, through the log adapter the admitting dial hands it.
+ * the lines the client itself writes, through the log adapter the admitting dial hands it, and the logging a configuration still in the retired grammar selects.
  */
 import type { BuildPlatformResult, TestEspHomeClient } from "./testing.helpers.ts";
 import { Characteristic, Service, buildPlatform, customNameEntry, makeCoverEvent, makeFakeOpenClient, makeOpenerClient, makeOpenerService,
@@ -280,6 +280,22 @@ describe("RatgdoPlatform connection log", () => {
           "the " + level + " level reaches the log under the opener's displayed name whatever the debug setting");
       }
     }
+  });
+});
+
+/* A configuration still carrying a retired per-event logging option, read through the platform's boot view of it. The settings page migrates such a configuration
+ * when it opens, and this is what an upgrader who never opens it runs on.
+ */
+describe("RatgdoPlatform retired logging options", () => {
+
+  test("an opener under the retired light-logging switch turned off logs no light events and every other category as before", async () => {
+
+    const { ratgdo } = await admit({ userOptions: ["Disable.Log.Light"] });
+    const { logLight, logMotion, logObstruction, logOpener, logVehiclePresence } = ratgdo.hints;
+
+    assert.deepEqual({ logLight, logMotion, logObstruction, logOpener, logVehiclePresence },
+      { logLight: false, logMotion: true, logObstruction: true, logOpener: true, logVehiclePresence: true },
+      "the boot view reads the retired switch as the events list it composes into, so the light category alone is off");
   });
 });
 

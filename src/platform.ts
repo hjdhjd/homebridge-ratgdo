@@ -4,8 +4,8 @@
  */
 import type { API, DynamicPlatformPlugin, HAP, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
 import { APIEvent, AccessoryPersistence, CoalescingTask, FeatureOptions, HbpuAbortError, MQTT_AVAILABILITY_OFFLINE, Perms, WakeableWait, createMqttClient,
-  debugGatedLog, discoverServices, displayedName, formatErrorMessage, isAdvertisedAt, mdnsBrowserFactory, mqttConnectionSettings, mqttTopic, notResponding, prefixedLog,
-  repeatDemotedLog, sanitizeName, superviseLoop, systemClock } from "homebridge-plugin-utils";
+  createRetiredOptions, debugGatedLog, discoverServices, displayedName, formatErrorMessage, isAdvertisedAt, mdnsBrowserFactory, mqttConnectionSettings, mqttTopic,
+  notResponding, prefixedLog, repeatDemotedLog, sanitizeName, superviseLoop, systemClock } from "homebridge-plugin-utils";
 import type { Clock, HomebridgePluginLogging, MdnsBrowserFactory, MdnsDiscovery, MdnsDiscoveryEvent, MqttClient, Nullable,
   RepeatDemotedLog } from "homebridge-plugin-utils";
 import type { ConnectionFailureReason, EncryptionKeyLookup, ManualConnectionFailureReason, OpenEspHomeClient, PermanentCauseDescription } from "./connection.ts";
@@ -19,6 +19,7 @@ import { featureOptionCategories, featureOptions, normalizeConfig } from "./opti
 import { governingAddress, manualAddressList, runManualAddress, runRetryLoop } from "./manual.ts";
 import type { DialOutcome } from "./manual.ts";
 import type { DiscoveredRatgdo } from "./discovery.ts";
+import { RATGDO_LOG_EVENTS_FAMILY } from "./webui/log-events.ts";
 import { RatgdoAccessory } from "./device.ts";
 import type { RatgdoDevice } from "./types.ts";
 import type { RatgdoResolvedConfig } from "./options.ts";
@@ -154,10 +155,17 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
     const legacy = normalizeConfig(config);
 
+    /* The engine is built on the boot view of the configured options rather than on the options as written. A configuration still carrying the retired per-event
+     * logging options reads as the one events list they compose into, so an upgrader logs what they logged before, from their first start on, whether or not the
+     * settings page has migrated their configuration yet. Openers sit beneath no controller, so the boot view is the exact translation and no overlay is read.
+     */
+    const options = [...createRetiredOptions({ categories: featureOptionCategories, families: [RATGDO_LOG_EVENTS_FAMILY], options: featureOptions })
+      .translate(legacy.options ?? []).configuredOptions];
+
     this.configuredDevices = new Map();
     this.connections = new Map();
     this.discoveredDevices = new Set();
-    this.featureOptions = new FeatureOptions(featureOptionCategories, featureOptions, legacy.options);
+    this.featureOptions = new FeatureOptions(featureOptionCategories, featureOptions, options);
     this.manualAddresses = manualAddressList(this.featureOptions.valueList({ option: RATGDO_ADDRESS_OPTION }));
     this.manualPauses = new Map();
 
@@ -169,7 +177,7 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
     this.config = {
 
       debug: this.featureOptions.consolidatedFlag({ fallback: legacy.debug, option: RATGDO_DEBUG_OPTION }),
-      options: legacy.options
+      options
     };
 
     this.hap = api.hap;

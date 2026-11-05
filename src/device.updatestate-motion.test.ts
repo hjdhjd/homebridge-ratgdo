@@ -5,18 +5,20 @@
  * updateState() is the central per-telemetry-event router. This file locks in the two transient-sensor branches it owns: the "binary_sensor-motion" case (which latches
  * the MotionDetected characteristic, arms a self-clearing timer, and optionally drives a motion-derived occupancy sensor) and the "binary_sensor-obstruction" case (which
  * mirrors the wire obstruction state onto the GarageDoorOpener service, gates its log / MQTT side effects on an actual transition, and re-states the door's target and
- * the automation switch on a transition that changes whether the obstruction holds the door open). Both branches schedule or read real time, so every timer-dependent
- * assertion drives the platform double's test clock rather than waiting on the wall clock. MQTT is enabled on every build so the publish side effects are observable,
- * and the log capture buffer is asserted against the production log strings verbatim.
+ * the automation switch on a transition that changes whether the obstruction holds the door open), and the door-open occupancy indicator's log, which the motion event
+ * category gates on every opener. Each branch schedules or reads real time, so every timer-dependent assertion drives the platform double's test clock rather than
+ * waiting on the wall clock. MQTT is enabled on every build so the publish side effects are observable, and the log capture buffer is asserted against the production log
+ * strings verbatim.
  */
-import { Characteristic, Service, buildRatgdoAccessory, makeBinarySensorEvent, makeCoverEvent, makeRatgdoInitialState } from "./testing.helpers.ts";
+import { Characteristic, Service, buildRatgdoAccessory, logEventsWithout, makeBinarySensorEvent, makeCoverEvent, makeKonnectedInitialState,
+  makeRatgdoInitialState } from "./testing.helpers.ts";
+import { RatgdoService, RatgdoVariant } from "./types.ts";
 import { describe, test } from "node:test";
 import { logCount, loggedAt, present, triggerGet, triggerSet } from "homebridge-plugin-utils/testing";
 import type { EspHomeEvent } from "./types.ts";
 import { MQTT_GET_SUFFIX } from "homebridge-plugin-utils";
 import { RATGDO_MOTION_DURATION } from "./webui/settings.ts";
 import { RATGDO_OCCUPANCY_DURATION } from "./settings.ts";
-import { RatgdoService } from "./types.ts";
 import assert from "node:assert/strict";
 
 /* The cover event that moves a door born open to closing at half travel, which the table below and the closing-door rows share. Its current_operation field mirrors
@@ -56,7 +58,8 @@ describe("RatgdoAccessory.updateState() motion and obstruction handling", () => 
       const motion = accessory.getService(Service.MotionSensor);
 
       assert.equal(motion?.getCharacteristic(Characteristic.MotionDetected).value, true, "the first motion-ON event latches MotionDetected true");
-      assert.equal(loggedAt(entries, "info", "Motion detected."), true, "the first motion event logs an info-level motion notice when Log.Motion is enabled");
+      assert.equal(loggedAt(entries, "info", "Motion detected."), true,
+        "the first motion event logs an info-level motion notice when the logging list selects motion events");
       assert.deepEqual(mqtt.published.filter((entry) => entry.topic.endsWith("/motion")).map((entry) => entry.payload), ["true"],
         "the first motion event publishes a single motion 'true' to MQTT");
     });
@@ -142,9 +145,9 @@ describe("RatgdoAccessory.updateState() motion and obstruction handling", () => 
       assert.equal(loggedAt(entries, "info", "Occupancy no longer detected."), true, "the motion occupancy clear logs an info-level no-longer-detected notice");
     });
 
-    test("updates the characteristic and publishes but suppresses the info log when Log.Motion is disabled", () => {
+    test("updates the characteristic and publishes but suppresses the info log when the logging list leaves motion events out", () => {
 
-      const { accessory, entries, mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true, userOptions: ["Disable.Log.Motion"] });
+      const { accessory, entries, mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true, userOptions: [logEventsWithout("Motion")] });
 
       assert.ok(mqtt, "the MQTT client double is present when MQTT is enabled");
 
@@ -152,10 +155,11 @@ describe("RatgdoAccessory.updateState() motion and obstruction handling", () => 
 
       const motion = accessory.getService(Service.MotionSensor);
 
-      assert.equal(loggedAt(entries, "info", "Motion detected."), false, "no info-level motion notice is logged when Log.Motion is disabled");
-      assert.equal(motion?.getCharacteristic(Characteristic.MotionDetected).value, true, "disabling Log.Motion does not suppress the MotionDetected update");
+      assert.equal(loggedAt(entries, "info", "Motion detected."), false, "no info-level motion notice is logged when the logging list leaves motion events out");
+      assert.equal(motion?.getCharacteristic(Characteristic.MotionDetected).value, true,
+        "leaving motion events out of the logging list does not suppress the MotionDetected update");
       assert.deepEqual(mqtt.published.filter((entry) => entry.topic.endsWith("/motion")).map((entry) => entry.payload), ["true"],
-        "disabling Log.Motion does not suppress the motion MQTT publish");
+        "leaving motion events out of the logging list does not suppress the motion MQTT publish");
     });
 
     test("ignores a motion-OFF event entirely", async () => {
@@ -207,7 +211,8 @@ describe("RatgdoAccessory.updateState() motion and obstruction handling", () => 
       assert.equal(await triggerGet(door.getCharacteristic(Characteristic.ObstructionDetected)), true, "an obstruction-ON event reports true through the getter");
       assert.deepEqual(mqtt.published.filter((entry) => entry.topic.endsWith("/obstruction")).map((entry) => entry.payload), ["true"],
         "an obstruction transition publishes a single 'true' to MQTT");
-      assert.equal(loggedAt(entries, "info", "Obstruction detected."), true, "an obstruction transition logs an info-level notice when Log.Obstruction is enabled");
+      assert.equal(loggedAt(entries, "info", "Obstruction detected."), true,
+        "an obstruction transition logs an info-level notice when the logging list selects obstruction events");
     });
 
     test("publishes 'false' and logs on the obstruction-cleared transition", async () => {
@@ -456,6 +461,44 @@ describe("RatgdoAccessory.updateState() motion and obstruction handling", () => 
         "only the change writes the target, and the repeated delivery writes it no second time");
       assert.deepEqual(accessory.changesOn(automationSwitch, Characteristic.On).map((change) => change.newValue), [true],
         "only the change writes the switch, and the repeated delivery writes it no second time");
+    });
+  });
+
+  /* The door-open occupancy indicator logs under the motion event category, so the category is offered to a Konnected opener, which reports no motion of its own
+   * but carries the indicator. Each row opens a Konnected door and holds it open for the indicator's duration.
+   */
+  describe("the door-open occupancy log", () => {
+
+    // A Konnected door at rest, fully open. Its current_operation field mirrors the snake_case ESPHome wire shape EspHomeEvent declares, so the camelcase rule is
+    // scoped off for that one line.
+    // eslint-disable-next-line camelcase
+    const KONNECTED_OPEN: EspHomeEvent = { current_operation: "IDLE", id: "cover-garage_door", position: 1, state: "OPEN" };
+
+    // Build a Konnected opener carrying the door-open indicator under the given logging entries, open its door, and let the indicator's duration pass.
+    const holdOpen = (userOptions: string[]): ReturnType<typeof buildRatgdoAccessory> => {
+
+      const built = buildRatgdoAccessory({ device: { variant: RatgdoVariant.KONNECTED }, initialState: makeKonnectedInitialState(),
+        userOptions: [ "Enable.Opener.OccupancySensor", ...userOptions ] });
+
+      built.ratgdo.updateState(KONNECTED_OPEN);
+      built.clock.advance(RATGDO_OCCUPANCY_DURATION * 1000);
+
+      return built;
+    };
+
+    test("logs a Konnected opener's door-open occupancy by default, since the motion category is selected", () => {
+
+      assert.equal(loggedAt(holdOpen([]).entries, "info", "Garage door open occupancy detected."), true,
+        "the indicator's transition logs under the default list on an opener that reports no motion");
+    });
+
+    test("leaves a Konnected opener's door-open occupancy unlogged when the logging list leaves motion events out", () => {
+
+      const { accessory, entries } = holdOpen([logEventsWithout("Motion")]);
+
+      assert.equal(loggedAt(entries, "info", "Garage door open occupancy detected."), false, "the indicator's transition logs nothing");
+      assert.equal(accessory.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_SENSOR_DOOR_OPEN)?.getCharacteristic(Characteristic.OccupancyDetected)
+        .value, Characteristic.OccupancyDetected.OCCUPANCY_DETECTED, "while the indicator itself still raises occupancy");
     });
   });
 });

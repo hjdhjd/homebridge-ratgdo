@@ -692,17 +692,53 @@ describe("the ratgdo settings page", () => {
       }
     });
 
-    test("withholds the vehicle-presence log from a Konnected device and keeps every other logging row", async () => {
+    test("offers every device the logging section's debug switch and its one event list", async () => {
 
       using page = await loadUi();
 
-      assert.deepEqual(visibleOptions(page, konnectedDevice, "Log"), [ "Debug", "Opener", "Light", "Motion", "Obstruction" ],
-        "the vehicle-presence log names the Ratgdo variant and drops off a Konnected device's page, while the motion log - the door-open indicator Konnected drives " +
-        "too - stays");
-      assert.deepEqual(visibleOptions(page, ratgdoDevice, "Log"), [ "Debug", "Opener", "Light", "Motion", "Obstruction", "VehiclePresence" ],
-        "a Ratgdo device is offered the whole logging section, the vehicle-presence row included");
-      assert.deepEqual(visibleOptions(page, undefined, "Log"), [ "Debug", "Opener", "Light", "Motion", "Obstruction", "VehiclePresence" ],
-        "the global page is offered the whole logging section");
+      for(const device of [ ratgdoDevice, konnectedDevice, untaggedDevice, undefined ]) {
+
+        assert.deepEqual(visibleOptions(page, device, "Log"), [ "Debug", "Events" ],
+          "the event categories a device logs are the list's choices rather than rows of their own");
+      }
+    });
+
+    /* The logging list's categories as the page's own choice source answers them, for each device the variant rows above use and for a v2 board. Vehicle presence is the
+     * Disco board's alone, so it is offered wherever the Disco options apply, and motion stays on a Konnected opener, whose door-open indicator logs under it.
+     */
+    test("offers each device the event categories its hardware produces, vehicle presence only where the Disco options apply", async () => {
+
+      using page = await loadUi();
+
+      const source = page.double.params.ui?.choices?.["logEvents"];
+      const option = expectAt(featureOptions["Log"]?.filter((entry) => (entry.name === "Events")) ?? [], 0, "the catalog's event list");
+      const offered = (device: FakeDevice | undefined): string[] => (source?.({ controller: null, device, option }) ?? []).map(({ value }) => value);
+      const every = [ "Opener", "Light", "Motion", "Obstruction", "VehiclePresence" ];
+      const v2Board: FakeDevice = { model: "Ratgdo 2.5i", name: "Garage", serialNumber: MAC, sidebarGroup: "Ratgdo" };
+
+      assert.ok(source, "the page registers the source the catalog names");
+      assert.deepEqual(offered(ratgdoDevice), every, "a Ratgdo device that may carry the Disco board is offered every category");
+      assert.deepEqual(offered(konnectedDevice), [ "Opener", "Light", "Motion", "Obstruction" ], "a Konnected device is offered every category but vehicle presence");
+      assert.deepEqual(offered(v2Board), [ "Opener", "Light", "Motion", "Obstruction" ], "and so is a v2 board, which cannot carry the Disco board");
+      assert.deepEqual(offered(untaggedDevice), every, "a device the page could not classify is offered every category");
+      assert.deepEqual(offered(undefined), every, "and so is the global page");
+      assert.deepEqual(source({ controller: null, device: undefined, option }).map(({ label }) => label),
+        [ "Opener", "Light", "Motion", "Obstruction", "Vehicle presence" ], "each category under its own label");
+    });
+
+    // The framework fails the page at catalog load when an option names a source no resolver answers to, which the double does not model, so this row holds it.
+    test("registers a resolver for every choice source the real catalog names", async () => {
+
+      using page = await loadUi();
+
+      const named = Object.values(featureOptions).flat().map((entry) => entry.choices).filter((choices) => (typeof choices === "string"));
+
+      assert.ok(named.length > 0, "the catalog names at least one source, so the census below reads something");
+
+      for(const name of named) {
+
+        assert.equal(typeof page.double.params.ui?.choices?.[name], "function", "the page answers the source " + name);
+      }
     });
   });
 

@@ -10,9 +10,9 @@
  * value-centric duration hints fall back to RATGDO_OCCUPANCY_DURATION by default and honor a userOptions override; and the custom name resolves through HBPU's
  * custom-name rule, a name HomeKit can carry nothing of resolving to none. The deviation logs the constructor fires after hints resolve - read-only mode and the
  * custom name - are asserted from the captured log entries, as is the wiring of every option's deviation line: the logger each level writes through, the variant
- * check, the occupancy durations, and the event log toggles.
+ * check, the occupancy durations, and the event logging list.
  */
-import { Characteristic, Service, addRatgdoAccessory, buildRatgdoAccessory, customNameEntry, makeKonnectedInitialState, makeRatgdoInitialState,
+import { Characteristic, Service, addRatgdoAccessory, buildRatgdoAccessory, customNameEntry, logEventsWithout, makeKonnectedInitialState, makeRatgdoInitialState,
   makeTestDevice } from "./testing.helpers.ts";
 import { describe, test } from "node:test";
 import { linesAt, loggedAt, triggerSet } from "homebridge-plugin-utils/testing";
@@ -76,11 +76,6 @@ const booleanHintCases: { action: "Disable" | "Enable"; hint: keyof typeof DEFAU
   { action: "Disable", hint: "light", option: "Light", value: false },
   { action: "Disable", hint: "lock", option: "Opener.Lock", value: false },
   { action: "Enable", hint: "lockoutSwitch", option: "Opener.Switch.RemoteLockout", value: true },
-  { action: "Disable", hint: "logLight", option: "Log.Light", value: false },
-  { action: "Disable", hint: "logMotion", option: "Log.Motion", value: false },
-  { action: "Disable", hint: "logObstruction", option: "Log.Obstruction", value: false },
-  { action: "Disable", hint: "logOpener", option: "Log.Opener", value: false },
-  { action: "Disable", hint: "logVehiclePresence", option: "Log.VehiclePresence", value: false },
   { action: "Enable", hint: "motionOccupancySensor", option: "Motion.OccupancySensor", value: true },
   { action: "Disable", hint: "motionSensor", option: "Motion", value: false },
   { action: "Enable", hint: "readOnly", option: "Opener.ReadOnly", value: true },
@@ -119,6 +114,66 @@ describe("RatgdoAccessory hints", () => {
         assert.deepEqual(ratgdo.hints, expected, testCase.option + " flips its hint to " + String(testCase.value) + " and leaves every sibling hint at default");
       });
     }
+  });
+
+  /* The event logging hints, one per category the logging list offers, each read from the one list. A case clears one category the way the options editor does, by
+   * storing every other category, and asserts that its hint alone moves.
+   */
+  describe("the event logging list", () => {
+
+    const EVENT_HINTS: { event: string; hint: keyof typeof DEFAULT_HINTS }[] = [
+
+      { event: "Light", hint: "logLight" },
+      { event: "Motion", hint: "logMotion" },
+      { event: "Obstruction", hint: "logObstruction" },
+      { event: "Opener", hint: "logOpener" },
+      { event: "VehiclePresence", hint: "logVehiclePresence" }
+    ];
+
+    for(const { event, hint } of EVENT_HINTS) {
+
+      test("a list without " + event + " moves only the " + hint + " hint", () => {
+
+        const { ratgdo } = buildRatgdoAccessory({ userOptions: [logEventsWithout(event)] });
+
+        assert.deepEqual(ratgdo.hints, { ...DEFAULT_HINTS, [hint]: false }, "clearing " + event + " turns its logging off and leaves every sibling hint at default");
+      });
+    }
+
+    test("a list turned off turns every event category's logging off, and one set on the opener reads for the opener alone", () => {
+
+      const allOff = { logLight: false, logMotion: false, logObstruction: false, logOpener: false, logVehiclePresence: false };
+
+      assert.deepEqual(buildRatgdoAccessory({ userOptions: ["Disable.Log.Events"] }).ratgdo.hints, { ...DEFAULT_HINTS, ...allOff },
+        "a list turned off globally logs no category");
+      assert.deepEqual(buildRatgdoAccessory({ userOptions: ["Disable.Log.Events.AABBCCDDEEFF"] }).ratgdo.hints, { ...DEFAULT_HINTS, ...allOff },
+        "and so does one turned off on the opener");
+      assert.deepEqual(buildRatgdoAccessory({ userOptions: [ "Disable.Log.Events", "Enable.Log.Events.AABBCCDDEEFF=Opener" ] }).ratgdo.hints,
+        { ...DEFAULT_HINTS, ...allOff, logOpener: true }, "while the opener's own list outranks the global one");
+    });
+
+    /* A list enabled at a scope with nothing stored reads as its registered default, every category, rather than as an empty selection, since the user left the value
+     * out rather than emptying it. Each case reaches that state, globally and on the opener beneath a global list turned off.
+     */
+    for(const userOptions of [ ["Enable.Log.Events"], [ "Disable.Log.Events", "Enable.Log.Events.AABBCCDDEEFF" ] ]) {
+
+      test("a list enabled with nothing stored logs every event category, under " + userOptions.join(" and "), () => {
+
+        const allOn = { logLight: true, logMotion: true, logObstruction: true, logOpener: true, logVehiclePresence: true };
+
+        assert.deepEqual(buildRatgdoAccessory({ userOptions }).ratgdo.hints, { ...DEFAULT_HINTS, ...allOn }, "a list enabled without a selection logs every category");
+      });
+    }
+
+    test("a Konnected opener logs no vehicle presence under the default list, nor under a list that selects it, since its firmware reports no vehicle", () => {
+
+      for(const userOptions of [ [], ["Enable.Log.Events=VehiclePresence,Opener"] ]) {
+
+        const { ratgdo } = buildRatgdoAccessory({ device: { variant: RatgdoVariant.KONNECTED }, initialState: makeKonnectedInitialState(), userOptions });
+
+        assert.equal(ratgdo.hints.logVehiclePresence, false, "vehicle presence logging stays off on a Konnected opener with " + JSON.stringify(userOptions));
+      }
+    });
   });
 
   describe("variant gating", () => {
@@ -312,7 +367,6 @@ describe("RatgdoAccessory hints", () => {
       { option: "Enable.Disco.OccupancySensor.Vehicle.Presence", variant: RatgdoVariant.KONNECTED },
       { option: "Enable.Disco.Switch.Laser", variant: RatgdoVariant.KONNECTED },
       { option: "Enable.Disco.Switch.Led", variant: RatgdoVariant.KONNECTED },
-      { option: "Disable.Log.VehiclePresence", variant: RatgdoVariant.KONNECTED },
       { option: "Disable.Motion", variant: RatgdoVariant.KONNECTED },
       { option: "Enable.Motion.OccupancySensor", variant: RatgdoVariant.KONNECTED }
     ];
@@ -348,22 +402,29 @@ describe("RatgdoAccessory hints", () => {
       assert.deepEqual(linesAt(entries, "info"), ["Ratgdo (ESP32) backup battery status enabled."], "the Ratgdo opener announces it");
     });
 
-    // Each event log toggle defaults on, so turning one off is the setting a reader wants to see when the events they expected stop appearing.
-    const EVENT_LOG_CASES: { line: string; option: string }[] = [
+    /* The event logging list defaults to every category, so a list turned off or narrowed is the setting a reader wants to see when the events they expected stop
+     * appearing. Each case lists the entries configured beside the line they earn, globally through the plugin's logger and on the opener through the opener's. A
+     * narrowed selection names each category by the label the settings page lists it under, and a selection of every category is stored as the wildcard, which the
+     * line words, so an opener wider than the global selection logs a sentence.
+     */
+    const EVENT_LOG_CASES: { expected: string[]; name: string; options: string[] }[] = [
 
-      { line: "Light event logging disabled.", option: "Log.Light" },
-      { line: "Motion event logging disabled.", option: "Log.Motion" },
-      { line: "Obstruction event logging disabled.", option: "Log.Obstruction" },
-      { line: "Opener event logging disabled.", option: "Log.Opener" },
-      { line: "Vehicle presence event logging disabled.", option: "Log.VehiclePresence" }
+      { expected: ["Event logging disabled."], name: "a list turned off globally names the plugin's logger", options: ["Disable.Log.Events"] },
+      { expected: ["Test Ratgdo: Event logging disabled."], name: "a list turned off on the opener names the opener's logger",
+        options: ["Disable.Log.Events.AABBCCDDEEFF"] },
+      { expected: ["Event logging set to Opener, Light."], name: "a narrowed global list states its selection", options: ["Enable.Log.Events=Opener,Light"] },
+      { expected: ["Event logging set to Opener, Vehicle presence."], name: "a narrowed global list names each category by its label",
+        options: ["Enable.Log.Events=Opener,VehiclePresence"] },
+      { expected: ["Test Ratgdo: Event logging set to every category."], name: "an opener wider than the global list words its every-category selection",
+        options: [ "Enable.Log.Events=Opener", "Enable.Log.Events.AABBCCDDEEFF=*" ] },
+      { expected: [], name: "a list at its default is silent", options: [] }
     ];
 
-    for(const { line, option } of EVENT_LOG_CASES) {
+    for(const { expected, name, options } of EVENT_LOG_CASES) {
 
-      test("disabling " + option + " globally reports through the plugin's logger, and on the opener through the opener's", () => {
+      test(name, () => {
 
-        assert.deepEqual(linesAt(buildRatgdoAccessory({ userOptions: ["Disable." + option] }).entries, "info"), [line]);
-        assert.deepEqual(linesAt(buildRatgdoAccessory({ userOptions: ["Disable." + option + ".AABBCCDDEEFF"] }).entries, "info"), ["Test Ratgdo: " + line]);
+        assert.deepEqual(linesAt(buildRatgdoAccessory({ userOptions: options }).entries, "info"), expected);
       });
     }
 

@@ -4,9 +4,10 @@
  * Device card's writes, and to name the sidebar's devices. It lives in the folder the page and the plugin share because the address rule and the option names it reads
  * are defined there.
  */
-import type { FeatureCategoryEntry, FeatureOptionEntry, FeatureOptions, displayedName, formatValueList } from "homebridge-plugin-utils";
+import type { FeatureCategoryEntry, FeatureOptionEntry, FeatureOptions, createRetiredOptions, displayedName, formatValueList } from "homebridge-plugin-utils";
 import { RATGDO_ADDRESS_OPTION, RATGDO_DEBUG_OPTION, RATGDO_ENCRYPTION_KEY_OPTION, RATGDO_NAME_OPTION } from "./settings.ts";
 import { canonicalManualAddress, isZonedAddress } from "./manual-address.ts";
+import { RATGDO_LOG_EVENTS_FAMILY } from "./log-events.ts";
 import type { RatgdoOptions } from "../options.ts";
 
 /* The single home for our plugin-config shape. Every function here is a pure interpreter of the primary platform-config entry the webUI framework injects into our
@@ -16,7 +17,8 @@ import type { RatgdoOptions } from "../options.ts";
  *
  * Two settings substrates meet here. A feature option is where a setting lives, and a handful of configuration properties are a second home the plugin honors so that
  * a configuration nobody has opened the webUI on keeps working. Reconciling the two is one of this module's jobs: the migration moves a property's value into its
- * option and marks the property for deletion. Nothing in this plugin's browser code reads a configuration property.
+ * option and marks the property for deletion. Nothing in this plugin's browser code reads a configuration property. The same migration carries options the plugin
+ * has retired into the ones that took their place, through HBPU's retired options, so a configuration written in an earlier grammar is rewritten in the current one.
  *
  * Another job is composing the writes the page's own affordances make. A manual device is the one setting a user adds from a card rather than from the options
  * editor, and it lands in TWO places at once - the address on a list option, and its key at the device's MAC, which the card learned by testing the address - so the
@@ -102,18 +104,21 @@ export interface RatgdoConfigInterpreter {
   withManualDevice(config: RatgdoLegacyConfig | undefined, device: RatgdoManualDevice): RatgdoManualDevicePatch | null;
 }
 
-/* What the page hands the interpreter: the feature-option engine class, the served catalog, HBPU's display-name rule, and the engine's list formatter. Named apart from
- * the factory's parameter list because the factory binds the engine, the rule, and the formatter under the same names their types are read from.
+/* What the page hands the interpreter: the feature-option engine class, the served catalog, HBPU's retired-options factory, HBPU's display-name rule, and the engine's
+ * list formatter. Named apart from the factory's parameter list because the factory binds the engine, the retired-options factory, the rule, and the formatter under
+ * the same names their types are read from.
  *
- * @property FeatureOptions  - The feature-option engine class.
- * @property catalog         - The served catalog, carrying its categories and its options record.
- * @property displayedName   - HBPU's display-name rule, which answers the custom name where one resolves and the fallback otherwise, as HomeKit carries it.
- * @property formatValueList - The engine's own list formatter.
+ * @property FeatureOptions       - The feature-option engine class.
+ * @property catalog              - The served catalog, carrying its categories and its options record.
+ * @property createRetiredOptions - HBPU's retired-options factory, which translates a retired option family into the option that supersedes it.
+ * @property displayedName        - HBPU's display-name rule, which answers the custom name where one resolves and the fallback otherwise, as HomeKit carries it.
+ * @property formatValueList      - The engine's own list formatter.
  */
 interface RatgdoConfigInjected {
 
   FeatureOptions: typeof FeatureOptions;
   catalog: RatgdoConfigCatalog;
+  createRetiredOptions: typeof createRetiredOptions;
   displayedName: typeof displayedName;
   formatValueList: typeof formatValueList;
 }
@@ -134,25 +139,33 @@ const CONSOLIDATED_SETTINGS: Readonly<Record<LegacyProperty, string>> = {
 };
 
 /**
- * Build the interpreter over an injected feature-option engine class, the option catalog the plugin's own UI server publishes, HBPU's display-name rule, and the
- * engine's list formatter the composition needs. The engine, the rule, and the formatter are handed in because a module in this folder imports values only from the
- * folder itself, and handing them in is also what keeps this module testable under node against the real engine, the real catalog, and the real rule, rather than
- * against a stand-in that could drift from any of them.
+ * Build the interpreter over an injected feature-option engine class, the option catalog the plugin's own UI server publishes, HBPU's retired-options factory, HBPU's
+ * display-name rule, and the engine's list formatter the composition needs. Each is handed in because a module in this folder imports values only from the folder
+ * itself, and handing them in is also what keeps this module testable under node against the real engine, the real catalog, the real retired options, and the real
+ * rule, rather than against a stand-in that could drift from any of them.
  *
- * @param injected.FeatureOptions   - The feature-option engine class.
- * @param injected.catalog          - The served catalog, carrying its categories and its options record.
- * @param injected.displayedName    - HBPU's display-name rule, the one the plugin names an opener's accessory by.
- * @param injected.formatValueList  - The engine's own list formatter, so a list this module writes reads back exactly as the editor's own writes do.
+ * @param injected.FeatureOptions       - The feature-option engine class.
+ * @param injected.catalog              - The served catalog, carrying its categories and its options record.
+ * @param injected.createRetiredOptions - HBPU's retired-options factory, built once here over the catalog and the plugin's retired families.
+ * @param injected.displayedName        - HBPU's display-name rule, the one the plugin names an opener's accessory by.
+ * @param injected.formatValueList      - The engine's own list formatter, so a list this module writes reads back exactly as the editor's own writes do.
  *
  * @returns The interpreter: the legacy-settings migration, the manual-device reads and writes, and the device-row namer.
  */
-export const makeRatgdoConfig = ({ FeatureOptions, catalog, displayedName, formatValueList }: RatgdoConfigInjected): RatgdoConfigInterpreter => {
+export const makeRatgdoConfig = ({ FeatureOptions, catalog, createRetiredOptions, displayedName, formatValueList }: RatgdoConfigInjected): RatgdoConfigInterpreter => {
 
-  // A feature-option engine over the served catalog and the config's own entries. The array is handed in directly rather than copied: the engine's set-option path is
-  // a pure transform that composes a fresh array and reassigns its own field, so the array it was given is never written to. Its entries are the engine's to read,
-  // exactly as the host stored them.
-  const engineFor = (config: RatgdoLegacyConfig | undefined): FeatureOptions => new FeatureOptions(catalog.categories, catalog.options,
-    Array.isArray(config?.options) ? config.options as string[] : []);
+  // The retired option families over the served catalog, built once for the interpreter's life: the per-event logging options the one events list carries forward.
+  const retired = createRetiredOptions({ categories: catalog.categories, families: [RATGDO_LOG_EVENTS_FAMILY], options: catalog.options });
+
+  // The config's own entries, exactly as the host stored them, or none for a config that carries no options array.
+  const optionsOf = (config: RatgdoLegacyConfig | undefined): string[] => Array.isArray(config?.options) ? config.options as string[] : [];
+
+  // A feature-option engine over the served catalog and a list of entries. The array is handed in directly rather than copied: the engine's set-option path is a pure
+  // transform that composes a fresh array and reassigns its own field, so the array it was given is never written to.
+  const engineOver = (options: string[]): FeatureOptions => new FeatureOptions(catalog.categories, catalog.options, options);
+
+  // A feature-option engine over the served catalog and the config's own entries, which the engine reads exactly as the host stored them.
+  const engineFor = (config: RatgdoLegacyConfig | undefined): FeatureOptions => engineOver(optionsOf(config));
 
   /* The value the catalog registers as an option's default, read from the served entry's own defaultValue field. The engine exposes a same-named method that answers a
    * different question - the boolean enabled-state default - so this walks the catalog data instead. The migration needs this to tell a value the user chose from a
@@ -217,8 +230,13 @@ export const makeRatgdoConfig = ({ FeatureOptions, catalog, displayedName, forma
      */
     manualAddresses: (config?: RatgdoLegacyConfig): readonly string[] => engineFor(config).valueList({ option: RATGDO_ADDRESS_OPTION }),
 
-    /* Move any legacy configuration properties into their feature options, as a patch for the session to stage. This is transitional work with a planned end: once a
-     * configuration has been through it, there is nothing left to find and every later pass answers null.
+    /* Move any legacy configuration properties into their feature options, and any retired options into the ones that took their place, as a patch for the session to
+     * stage. This is transitional work with a planned end: once a configuration has been through it, there is nothing left to find and every later pass answers null.
+     *
+     * The retired options go first. HBPU's retired options rewrite the per-event logging options into the one events list, scope by scope, writing an entry only where
+     * a scope's selection differs from what it inherits, so a device logging less or more than the global selection keeps that difference. The rewrite answers the very
+     * array it was handed when nothing in it was retired, so a changed array is what tells this pass it has entries to carry, and the engine the properties migrate onto
+     * below reads the rewritten entries. Openers sit beneath no controller, so the rewrite is exact without a topology to compose through.
      *
      * A property that is present with a defined value always leaves, carried on the patch as an explicitly undefined key so the shallow-merge commit deletes it rather
      * than skipping it. Whether its value additionally becomes an option entry depends on which kind of option it addresses, and the kind is read from the catalog
@@ -249,17 +267,21 @@ export const makeRatgdoConfig = ({ FeatureOptions, catalog, displayedName, forma
         return null;
       }
 
+      const configured = optionsOf(config);
+      const { configuredOptions } = retired.migrate({ configuredOptions: configured });
+      const rewritten = configuredOptions !== configured;
+
       // Object.entries widens a record's keys to string, and the record's own type holds them to the legacy properties.
       const carried = (Object.entries(CONSOLIDATED_SETTINGS) as [LegacyProperty, string][]).filter(([property]) => config[property] !== undefined);
 
-      if(!carried.length) {
+      if(!rewritten && !carried.length) {
 
         return null;
       }
 
-      const engine = engineFor(config);
+      const engine = engineOver([...configuredOptions]);
       const patch: RatgdoConfigPatch = {};
-      let composed = false;
+      let composed = rewritten;
 
       for(const [ property, option ] of carried) {
 
@@ -291,7 +313,8 @@ export const makeRatgdoConfig = ({ FeatureOptions, catalog, displayedName, forma
         composed = true;
       }
 
-      // The entries are carried by the patch only when this pass actually composed one, so a config whose properties all decline stages a pure deletion.
+      // The entries are carried by the patch only when this pass rewrote a retired option or composed an entry, so a config whose properties all decline stages a pure
+      // deletion.
       if(composed) {
 
         patch.options = engine.configuredOptions;

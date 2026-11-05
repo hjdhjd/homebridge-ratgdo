@@ -6,10 +6,10 @@
  * These tests drive RatgdoAccessory.updateState() with EspHomeEvent cover payloads (id, OPEN / CLOSED state, OPENING / CLOSING / IDLE current_operation, and the 0-1
  * float position) and assert the observable contract: CurrentDoorState transitions, the stopped-at-partial semantics for an IDLE cover parked strictly between 0 and 1,
  * the unchanged-state no-op, the door-open occupancy timer (set after the configured duration, plus its clear / cancel paths), the automation dimmer and switch tracking
- * the door, the MQTT garagedoor publish on every real transition, and the capitalized state log gated on Log.Opener. The occupancy duration is exercised by advancing
- * the platform double's test clock, so the test never waits in real time.
+ * the door, the MQTT garagedoor publish on every real transition, and the capitalized state log gated on the logging list's opener events. The occupancy duration
+ * is exercised by advancing the platform double's test clock, so the test never waits in real time.
  */
-import { Characteristic, Service, buildRatgdoAccessory, makeBinarySensorEvent, makeCoverEvent, makeKonnectedInitialState,
+import { Characteristic, Service, buildRatgdoAccessory, logEventsWithout, makeBinarySensorEvent, makeCoverEvent, makeKonnectedInitialState,
   makeRatgdoInitialState } from "./testing.helpers.ts";
 import { RatgdoService, RatgdoVariant } from "./types.ts";
 import { describe, test } from "node:test";
@@ -298,14 +298,14 @@ describe("RatgdoAccessory.updateState() cover events", () => {
         "a door parked at a partial position publishes the stopped state to the garagedoor topic");
     });
 
-    test("logs the capitalized door state at info level when Log.Opener is enabled", () => {
+    test("logs the capitalized door state at info level when the logging list selects opener events", () => {
 
       const { entries, ratgdo } = buildRatgdoAccessory();
 
       ratgdo.updateState(coverEvent("cover-door", "OPENING", "OPEN", 0.5));
 
       assert.ok(loggedAt(entries, "info", "Opening."),
-        "the opening transition logs the capitalized door state at info level, since Log.Opener defaults on");
+        "the opening transition logs the capitalized door state at info level, since the logging list selects every category by default");
 
       ratgdo.updateState(coverEvent("cover-door", "IDLE", "OPEN", 1));
 
@@ -329,14 +329,14 @@ describe("RatgdoAccessory.updateState() cover events", () => {
         "the no-op guard fires before the garagedoor publish, so an unchanged state produces no MQTT traffic");
     });
 
-    test("does not log the door state when Log.Opener is disabled", () => {
+    test("does not log the door state when the logging list leaves opener events out", () => {
 
-      const { entries, ratgdo } = buildRatgdoAccessory({ userOptions: ["Disable.Log.Opener"] });
+      const { entries, ratgdo } = buildRatgdoAccessory({ userOptions: [logEventsWithout("Opener")] });
 
       ratgdo.updateState(coverEvent("cover-door", "IDLE", "OPEN", 1));
 
       assert.equal(loggedAt(entries, "info", "Open."), false,
-        "disabling Log.Opener suppresses the capitalized door state info log on a real transition");
+        "leaving opener events out of the logging list suppresses the capitalized door state info log on a real transition");
     });
 
     test("logs an error and ignores an unknown current_operation", () => {

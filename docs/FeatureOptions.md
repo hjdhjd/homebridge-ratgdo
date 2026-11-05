@@ -59,14 +59,10 @@ Options whose key ends in `=<value>` take a value - replace `=<value>` with your
 
 #### <A NAME="log"></A>Logging
 
-| Option                                                   | Description
-|----------------------------------------------------------|-------------------------------------------------------------
-| <A NAME="Log.Debug"></A>`Log.Debug`                      | Enable debug logging. **(default: disabled)**.<BR>This option may only be applied globally.
-| <A NAME="Log.Opener"></A>`Log.Opener`                    | Log opener events in Homebridge. **(default: enabled)**.<BR>This option may be applied globally or on individual devices.
-| <A NAME="Log.Light"></A>`Log.Light`                      | Log light events in Homebridge. **(default: enabled)**.<BR>This option may be applied globally or on individual devices.
-| <A NAME="Log.Motion"></A>`Log.Motion`                    | Log motion-related events in Homebridge. **(default: enabled)**.<BR>This option may be applied globally or on individual devices.
-| <A NAME="Log.Obstruction"></A>`Log.Obstruction`          | Log obstruction events in Homebridge. **(default: enabled)**.<BR>This option may be applied globally or on individual devices.
-| <A NAME="Log.VehiclePresence"></A>`Log.VehiclePresence`  | Log vehicle presence-related events in Homebridge. This is only valid on Ratgdo (ESP32) Disco openers. **(default: enabled)**.<BR>This option may be applied globally or on individual devices.
+| Option                                         | Description
+|------------------------------------------------|-------------------------------------------------------------
+| <A NAME="Log.Debug"></A>`Log.Debug`            | Enable debug logging. **(default: disabled)**.<BR>This option may only be applied globally.
+| <A NAME="Log.Events"></A>`Log.Events=<value>`  | Log the selected event categories in Homebridge. Every category is selected by default. **(default: all)**.<BR>This option may be applied globally or on individual devices.
 
 #### <A NAME="opener"></A>Opener
 

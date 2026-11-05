@@ -2,10 +2,12 @@
  *
  * options.ts: Feature option and type definitions for Ratgdo.
  */
+import { ALL_CHOICES, buildFixedScopeDescribers, expandOption, mqttFeatureOptions, parseValueList } from "homebridge-plugin-utils";
 import type { FeatureCategoryEntry, FeatureOptionEntry, FeatureOptionScope } from "homebridge-plugin-utils";
 import { RATGDO_MQTT_TOPIC, RATGDO_OCCUPANCY_DURATION } from "./settings.ts";
-import { buildFixedScopeDescribers, expandOption, mqttFeatureOptions } from "homebridge-plugin-utils";
 import type { PlatformConfig } from "homebridge";
+import { RATGDO_DISCO_META } from "./webui/variants.ts";
+import { RATGDO_LOG_EVENTS } from "./webui/log-events.ts";
 import { RatgdoVariant } from "./types.ts";
 
 /* The configuration properties a user's config.json can carry directly, as normalizeConfig narrows them out of Homebridge's open index-signature shape. Every field is
@@ -23,8 +25,9 @@ export type RatgdoOptions = Partial<{
 /* The platform's effective configuration, assembled once by the constructor from each setting's configured feature option and its configuration property. This
  * describes what the plugin actually runs on rather than mirroring the shape of config.json, which is why it is a separate type from the property shape above rather
  * than a widening of it: the two have different value ranges. The debug flag is a plain boolean here because its resolution always reaches an answer - a configured
- * option, a configuration property, or the catalog's own declared default - where the narrowed property it starts from may be absent. The options array is the raw
- * entry list the feature-option engine was built from, carried alongside so a reader of this shape can see what every resolution ran against.
+ * option, a configuration property, or the catalog's own declared default - where the narrowed property it starts from may be absent. The options array is the entry
+ * list the feature-option engine was built from - the configured entries, with any retired option translated into the option that supersedes it - carried alongside so a
+ * reader of this shape can see what every resolution ran against.
  */
 export interface RatgdoResolvedConfig {
 
@@ -109,7 +112,7 @@ export const featureOptionCategories: FeatureCategoryEntry<RatgdoOptionMeta>[] =
   { description: "Opener light", name: "Light" },
   { description: "Opener motion", meta: { variant: RatgdoVariant.RATGDO }, name: "Motion" },
   mqtt.category,
-  { description: "Ratgdo (ESP32) Disco device-specific", meta: { disco: true, variant: RatgdoVariant.RATGDO }, name: "Disco" },
+  { description: "Ratgdo (ESP32) Disco device-specific", meta: RATGDO_DISCO_META, name: "Disco" },
   { description: "Konnected device-specific", meta: { variant: RatgdoVariant.KONNECTED }, name: "Konnected" }
 ];
 
@@ -154,15 +157,29 @@ const lightOptions: RatgdoFeatureOption[] = [
   { default: true, description: "Make the light on the opener available in HomeKit.", name: "", scopes: [ "device", "global" ] }
 ];
 
-// Logging options. The debug switch leads the list: it is the support knob, reached for far more often than the per-event log toggles beneath it.
+/* The event list's value as its deviation line words it. The all-categories selection is worded rather than printed as the wildcard that stores it, which is what a
+ * device reads when its selection is wider than the global one, and the wildcard counts only as the list's one entry, as the engine reads it. Every other entry reads
+ * as the label the settings page lists its category under, and a value RATGDO_LOG_EVENTS does not name is kept as stored.
+ */
+const renderLogEvents = (value: string): string => {
+
+  const entries = parseValueList(value);
+
+  if((entries.length === 1) && (entries[0] === ALL_CHOICES)) {
+
+    return "every category";
+  }
+
+  return entries.map((entry) => RATGDO_LOG_EVENTS.find((event) => event.value === entry)?.label ?? entry).join(", ");
+};
+
+/* Logging options. The debug switch leads the list: it is the support knob, reached for far more often than the event list beneath it. The event list offers its
+ * categories through the settings page's logEvents source, and renderLogEvents words its deviation line.
+ */
 const logOptions: RatgdoFeatureOption[] = [
 
   { default: false, description: "Enable debug logging.", name: "Debug", scopes: ["global"] },
-  { default: true, description: "Log opener events in Homebridge.", name: "Opener", scopes: [ "device", "global" ] },
-  { default: true, description: "Log light events in Homebridge.", name: "Light", scopes: [ "device", "global" ] },
-  { default: true, description: "Log motion-related events in Homebridge.", name: "Motion", scopes: [ "device", "global" ] },
-  { default: true, description: "Log obstruction events in Homebridge.", name: "Obstruction", scopes: [ "device", "global" ] },
-  { default: true, description: "Log vehicle presence-related events in Homebridge. This is only valid on Ratgdo (ESP32) Disco openers.", meta: { variant: RatgdoVariant.RATGDO }, name: "VehiclePresence", scopes: [ "device", "global" ] }
+  { choices: "logEvents", default: true, defaultValue: ALL_CHOICES, description: "Log the selected event categories in Homebridge. Every category is selected by default.", multiple: true, name: "Events", render: renderLogEvents, scopes: [ "device", "global" ] }
 ];
 
 // Motion options.
@@ -207,19 +224,22 @@ export const featureOptions: Record<string, FeatureOptionEntry<RatgdoOptionMeta>
   "Opener": openerOptions
 };
 
-// The variant each option belongs to, keyed by its fully formed name: the option's own declaration, else its category's. An option absent here belongs to every device.
+// The variant each option belongs to, keyed by its fully formed name: its category's, since a variant is declared on a category alone. An option absent here belongs
+// to every device.
 const optionVariants = new Map<string, RatgdoVariant>();
 
 for(const category of featureOptionCategories) {
 
+  const variant = category.meta?.variant;
+
+  if(!variant) {
+
+    continue;
+  }
+
   for(const option of featureOptions[category.name] ?? []) {
 
-    const variant = option.meta?.variant ?? category.meta?.variant;
-
-    if(variant) {
-
-      optionVariants.set(expandOption(category.name, option.name), variant);
-    }
+    optionVariants.set(expandOption(category.name, option.name), variant);
   }
 }
 
@@ -229,7 +249,7 @@ for(const category of featureOptionCategories) {
  * @param option  - The fully formed option name, in the catalog's casing.
  * @param variant - The device's variant.
  *
- * @returns `true` when the option names no variant or names this one.
+ * @returns `true` when the option's category names no variant or names this one.
  */
 export function optionFitsVariant(option: string, variant: RatgdoVariant): boolean {
 

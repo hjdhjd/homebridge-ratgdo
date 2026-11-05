@@ -11,10 +11,12 @@ import { MQTT_AVAILABILITY_OFFLINE, MQTT_AVAILABILITY_ONLINE, TimerRegistry, acq
   prefixedLog, resolveNameOverride, setAccessoryName, setServiceName, validCharacteristic, validService, watchServiceName } from "homebridge-plugin-utils";
 import { RATGDO_ENTITIES, idFor } from "./entities.ts";
 import { RATGDO_KONNECTED_PCW_DURATION, RATGDO_OCCUPANCY_DURATION, RATGDO_UI_REVERT_DELAY } from "./settings.ts";
-import { RATGDO_MOTION_DURATION, RATGDO_NAME_OPTION } from "./webui/settings.ts";
+import { RATGDO_LOG_EVENTS_OPTION, RATGDO_MOTION_DURATION, RATGDO_NAME_OPTION } from "./webui/settings.ts";
 import { RatgdoService, RatgdoVariant } from "./types.ts";
+import { RATGDO_LOG_EVENTS } from "./webui/log-events.ts";
 import { RATGDO_VARIANT_LABELS } from "./webui/variants.ts";
 import type { RatgdoEntityRef } from "./entities.ts";
+import type { RatgdoLogEvent } from "./webui/log-events.ts";
 import type { RatgdoPlatform } from "./platform.ts";
 import { mqttTopics } from "./mqtt.ts";
 import { optionFitsVariant } from "./options.ts";
@@ -234,11 +236,7 @@ export class RatgdoAccessory implements Disposable {
      * any log call that depends on them) is enforced by program order, not by reviewer discipline.
      */
     this.logFeature("Opener.ReadOnly", "Read-only mode");
-    this.logFeature("Log.Light", "Light event logging");
-    this.logFeature("Log.Motion", "Motion event logging");
-    this.logFeature("Log.Obstruction", "Obstruction event logging");
-    this.logFeature("Log.Opener", "Opener event logging");
-    this.logFeature("Log.VehiclePresence", "Vehicle presence event logging");
+    this.logFeature(RATGDO_LOG_EVENTS_OPTION, "Event logging");
     this.logNaming();
 
     this.lifetime = new AbortController();
@@ -472,6 +470,12 @@ export class RatgdoAccessory implements Disposable {
 
     const featureOptions = this.platform.featureOptions;
 
+    // The event categories this opener logs, read once from the one list against every category the plugin logs. A list enabled with nothing stored reads as its
+    // default, every category, and vehicle presence is logged only on the hardware that reports it.
+    const loggedEvents = featureOptions.valueList({ defaultWhenUnset: true, device: this.device.mac, domain: RATGDO_LOG_EVENTS.map(({ value }) => value),
+      option: RATGDO_LOG_EVENTS_OPTION });
+    const logs = (event: RatgdoLogEvent): boolean => loggedEvents.includes(event);
+
     return {
 
       automationDimmer: this.hasFeature("Opener.Dimmer"),
@@ -489,11 +493,11 @@ export class RatgdoAccessory implements Disposable {
       light: this.hasFeature("Light"),
       lock: this.hasFeature("Opener.Lock"),
       lockoutSwitch: this.hasFeature("Opener.Switch.RemoteLockout"),
-      logLight: this.hasFeature("Log.Light"),
-      logMotion: this.hasFeature("Log.Motion"),
-      logObstruction: this.hasFeature("Log.Obstruction"),
-      logOpener: this.hasFeature("Log.Opener"),
-      logVehiclePresence: this.hasFeature("Log.VehiclePresence"),
+      logLight: logs("Light"),
+      logMotion: logs("Motion"),
+      logObstruction: logs("Obstruction"),
+      logOpener: logs("Opener"),
+      logVehiclePresence: (this.device.variant === RatgdoVariant.RATGDO) && logs("VehiclePresence"),
       motionOccupancyDuration: featureOptions.getInteger("Motion.OccupancySensor.Duration", this.device.mac) ?? RATGDO_OCCUPANCY_DURATION,
       motionOccupancySensor: this.hasFeature("Motion.OccupancySensor"),
       motionSensor: this.hasFeature("Motion"),
@@ -2158,7 +2162,8 @@ export class RatgdoAccessory implements Disposable {
     this.status[descriptor.field] = detected;
     this.services[descriptor.service]?.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, this.occupancyDetected(detected));
 
-    // Both occupancy kinds share the motion log gate: there is no dedicated door-open logging hint, so the door-open indicator's log goes through Log.Motion by design.
+    // Every occupancy kind shares the motion log gate: there is no dedicated door-open logging hint, so the door-open indicator's log goes through the Motion event
+    // category by design.
     if(this.hints.logMotion) {
 
       this.log.info("%s %sdetected.", descriptor.label, detected ? "" : "no longer ");

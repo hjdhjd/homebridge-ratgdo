@@ -10,7 +10,7 @@
  * The fixtures sit beside the double because both describe one imagined install - a host holding a configuration and an option catalog, a sidebar holding devices -
  * and a test that varies one of them wants the rest to follow from the same description.
  */
-import type { CommitConfigResult, FeatureCategoryEntry, FeatureOptionEntry, Nullable } from "homebridge-plugin-utils";
+import type { CommitConfigResult, FeatureCategoryEntry, FeatureOptionChoice, FeatureOptionEntry, Nullable } from "homebridge-plugin-utils";
 import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE } from "./webui/status-routes.ts";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import { readFileSync } from "node:fs";
@@ -90,11 +90,13 @@ export interface FeatureOptionsParams {
   sidebar?: { deviceContent?: (device: FakeDevice) => FakeElement | string | null; deviceLabel?: string; groupOrder?: (a: string, b: string) => number };
   statusPanel?: StatusPanelParams;
 
-  /* The framework's two visibility hooks as the page hands them over: one asked whether a device's page should render a given option, the other whether it should
-   * render a given category. Both receive no device at the global scope, which is the case that offers everything.
+  /* The framework's choice sources and its visibility hooks as the page hands them over. Each source answers the list one option offers, called with the selected
+   * controller, the device in view, and the option's raw catalog entry; one hook is asked whether a device's page should render a given option, the other whether it
+   * should render a given category. Each receives no device at the global scope, which is the case that offers everything.
    */
   ui?: {
 
+    choices?: Record<string, (args: { controller: unknown; device: FakeDevice | undefined; option: FeatureOptionEntry }) => FeatureOptionChoice[]>;
     validOption?: (device: FakeDevice | undefined, option: FeatureOptionEntry) => boolean;
     validOptionCategory?: (device: FakeDevice | undefined, category: FeatureCategoryEntry) => boolean;
   };
