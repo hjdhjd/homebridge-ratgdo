@@ -31,7 +31,7 @@ export const RATGDO_MOTION_DURATION = 5;
 // address is watching the card, so the budget is short enough to answer them promptly and long enough to cover a device waking on a busy network.
 export const RATGDO_WEBUI_PROBE_TIMEOUT = 10;
 
-/* The bound, in seconds, the settings page puts on one Test Connection round trip. It is derived from the server's own probe budget and sits above it, so what a slow
+/* The bound, in seconds, the settings page puts on one Validate Device round trip. It is derived from the server's own probe budget and sits above it, so what a slow
  * device produces is the server's classified answer - a timeout the card can explain - rather than the page's bound firing first and leaving the card to guess which of
  * the two happened. The margin is room for the server to settle its own attempt and relay the answer across the bridge.
  */

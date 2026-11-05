@@ -725,11 +725,11 @@ describe("the ratgdo settings page", () => {
   });
 });
 
-/* The Add Device card, exercised against the real page building real elements into the recording document.
+/* The Add Device card, exercised against the real page cloning its card from the real markup into the recording document.
  *
- * Everything below reads the card off what the page BUILT - the button text it wrote, the fields it labelled, the verdict it rendered - rather than off a structure
- * this file describes. That is the whole reason the card is constructed at runtime rather than declared in markup: a card the page builds is a card the harness can
- * hold, and a change to its copy or its shape has to come through here.
+ * Everything below reads the card off what the page shows - the button text the shipped template carries, the fields it labels, the verdict the page rendered -
+ * rather than off a structure this file describes. The double parses the template out of the shipped index.html, so the card the page clones is the file's own, and
+ * a change to its copy or its shape has to come through here.
  */
 describe("the ratgdo settings page's Add Device card", () => {
 
@@ -737,36 +737,71 @@ describe("the ratgdo settings page's Add Device card", () => {
   const ANSWERED = { address: "10.0.0.20", announcesMac: true, encrypted: true, firmwareVersion: "2.0.0", kind: "ok", mac: MAC, model: "Ratgdo Disco",
     name: "North Door", variant: "ratgdo" };
 
-  // Find one element the page built, by the text it carries. Reading by text is how a row addresses a button the way a user would - by what it says.
+  // Find one element standing in the page, by the text it carries. Reading by text is how a row addresses a button the way a user would - by what it says.
   const byText = (page: LoadedUi, text: string): FakeElement => {
 
     const found = page.findElement((element) => (element.textContent === text));
 
-    assert.ok(found, "the page built an element reading " + JSON.stringify(text));
+    assert.ok(found, "the page shows an element reading " + JSON.stringify(text));
 
     return found;
   };
 
-  /* Open the card and hand back what a row drives and reads, so each row says what it is doing rather than re-finding elements. The verdict line is captured here, by
-   * its role, while the card is held, and every verdict a row reads is read through this element. A released card has left the page, so a walk of the page's
-   * tree would read an empty string whether or not a retired action had painted into the card - and a row asserting that nothing was painted would pass against a
-   * card that was painted.
+  // The open card's handles: its fields, its identity readout, its root, its Save and Validate buttons, and its verdict line.
+  interface CardHandles {
+
+    address: FakeValueControl;
+    key: FakeValueControl;
+    readout: FakeElement;
+    region: FakeElement;
+    save: FakeElement;
+    validate: FakeElement;
+    verdict: FakeElement;
+  }
+
+  /* Open the card and hand back what a row drives and reads, so each row says what it is doing rather than re-finding elements. The verdict line and the identity
+   * readout are captured here, by their roles, while the card is held, and every verdict and readout a row reads is read through these elements. A released card
+   * has left the page, so a walk of the page's tree would read an empty string whether or not a retired action had painted into the card - and a row asserting that
+   * nothing was painted would pass against a card that was painted.
    */
-  const openCard = (page: LoadedUi): { address: FakeValueControl; key: FakeValueControl; region: FakeElement; save: FakeElement; test: FakeElement;
-    verdict: FakeElement; } => {
+  const openCard = (page: LoadedUi): CardHandles => {
 
     fire(byText(page, "Add Device"), "click");
 
     const address = page.document.getElementById("ratgdoAddressField");
     const key = page.document.getElementById("ratgdoKeyField");
-    const verdict = page.findElement((element) => (element.attributes["role"] === "status"));
     const region = address?.parentElement;
+    const verdict = region?.querySelector("[data-role='verdict']");
+    const readout = region?.querySelector("[data-role='identity']");
 
-    assert.ok(isValueControl(address) && isValueControl(key) && verdict && region,
-      "the open card stands in the page with its address and key fields, each a control that holds a value, and its verdict line");
+    assert.ok(isValueControl(address) && isValueControl(key) && region && verdict && readout,
+      "the open card stands in the page with its address and key fields, each a control that holds a value, its verdict line, and its identity readout");
 
-    return { address, key, region, save: byText(page, "Save"), test: byText(page, "Test Connection"), verdict };
+    return { address, key, readout, region, save: byText(page, "Save"), validate: byText(page, "Validate Device"), verdict };
   };
+
+  /* The identity readout as a user reads it: each [ label, value ] row, read off the definition list's term and detail pairs, and whether the readout is showing at
+   * all. An empty readout is hidden, so a row asserting that no readout stands reads both, and a readout left standing from an earlier verdict fails either one.
+   */
+  const identity = (card: CardHandles): { rows: [ string, string ][]; shown: boolean } => {
+
+    const cells = card.readout.children;
+    const rows: [ string, string ][] = [];
+
+    for(let index = 0; index < cells.length; index += 2) {
+
+      const term = expectAt(cells, index, "a readout row's term");
+      const detail = expectAt(cells, index + 1, "the detail beside the readout row's term");
+
+      assert.equal(term.tagName + "/" + detail.tagName, "dt/dd", "each readout row is a term beside its detail");
+      rows.push([ term.textContent, detail.textContent ]);
+    }
+
+    return { rows, shown: !card.readout.classList.contains("d-none") };
+  };
+
+  // The tone the verdict line reads in, read off its classes: the Bootstrap text color it wears, or none.
+  const toneOf = (card: CardHandles): string | undefined => [ "danger", "success", "warning" ].find((tone) => card.verdict.classList.contains("text-" + tone));
 
   // Whether the card is held: standing in the page inside the framework's takeover element, which the page's tree carries only for as long as the takeover lasts.
   const isHeld = (page: LoadedUi, region: FakeElement): boolean => {
@@ -795,24 +830,28 @@ describe("the ratgdo settings page's Add Device card", () => {
 
   describe("mounting", () => {
 
-    test("inserts its button at the top of the sidebar, and stands the card ahead of the settings content only once it is opened", async () => {
+    test("carries its button above the sidebar in the plugin's own column, and stands the card ahead of the settings content only once it is opened", async () => {
 
       using page = await loadUi();
 
       const sidebar = page.document.getElementById("sidebar");
       const stats = page.document.getElementById("deviceStatsContainer");
+      const column = sidebar?.parentElement;
 
-      assert.ok(sidebar && stats, "the page markup carries the sidebar and the device-stats region");
+      assert.ok(sidebar && stats && column, "the page markup carries the sidebar, inside a column of its own, and the device-stats region");
+      assert.ok(Object.hasOwn(column.attributes, "data-fo-region"),
+        "the column is a plugin-owned region, so the framework hides and reveals it with the page and never clears it");
+      assert.ok([ "fo-sidebar-column", "me-3" ].every((name) => column.classList.contains(name)) && !sidebar.classList.contains("me-3"),
+        "it holds the sidebar's width through the page kit, and carries the gutter, which the sidebar itself does not");
 
-      const launcher = sidebar.children[0];
+      const launcher = expectAt(column.children, 0, "the column's first child").children[0];
 
-      assert.ok(launcher, "the sidebar carries a first child");
-      assert.ok(Object.hasOwn(launcher.attributes, "data-fo-region"),
-        "the button sits in a plugin-owned region, so the framework hides and reveals it with the page and never clears it");
-      assert.equal(launcher.children[0]?.textContent, "Add Device", "and that region holds the Add Device button");
-      assert.equal(sidebar.children[1]?.className, "sidebar-content", "the framework's own sidebar content is still there, after the inserted region");
-      assert.equal(page.findElement((element) => (element.textContent === "Add a device by address")), null,
-        "the card is not in the page until it is opened - mounting it is not opening it");
+      assert.equal(launcher?.tagName, "button", "the column opens with a button");
+      assert.equal(launcher.textContent, "Add Device", "reading Add Device");
+      assert.ok([ "fo-sidebar-control", "fo-action" ].every((name) => launcher.classList.contains(name)), "in the page kit's compact ghost treatment");
+      assert.equal(column.children[1], sidebar, "and the framework's sidebar follows it, below the button");
+      assert.equal(page.findElement((element) => (element.textContent === "Add a Ratgdo or Konnected device")), null,
+        "the card is not in the page until it is opened - cloning it is not opening it");
 
       const card = openCard(page);
       const main = stats.parentElement;
@@ -824,37 +863,45 @@ describe("the ratgdo settings page's Add Device card", () => {
       assert.equal(main.children.indexOf(container) + 1, main.children.indexOf(stats), "immediately ahead of the framework's device-stats region");
     });
 
-    test("builds the card's copy, its labelled fields, and its three actions", async () => {
+    test("clones the card's copy, its labelled fields, its masked key, and its actions from the shipped template", async () => {
 
       using page = await loadUi();
 
-      fire(byText(page, "Add Device"), "click");
+      const card = openCard(page);
+      const secret = card.key.parentElement;
+      const reveal = secret?.querySelector(".fo-secret-toggle");
 
-      const address = page.document.getElementById("ratgdoAddressField");
-      const key = page.document.getElementById("ratgdoKeyField");
-
-      assert.ok(address && key, "both fields exist and carry ids, which is what a label's for attribute resolves against");
-      assert.equal(address.attributes["placeholder"], "garage.local or 10.0.0.20", "the address field shows both address shapes a user might type");
-      assert.ok(address.className.split(" ").includes("fo-monospace") && key.className.split(" ").includes("fo-monospace"),
-        "both fields wear the page kit's monospace, since both carry exact text");
-      assert.ok(address.parentElement?.className.split(" ").includes("fo-page"),
-        "the card region carries the page-kit marker, so the framework's dark-mode form-control corrections reach its fields");
-      assert.equal(byText(page, "Address").attributes["for"], "ratgdoAddressField", "the address label is associated with its field");
+      assert.ok([ "fo-card", "fo-page", "fo-compact-card" ].every((name) => card.region.classList.contains(name)),
+        "the card wears the page kit's card, its dark-mode form-control corrections, and its compact controls");
+      assert.equal(card.region.querySelector("h6")?.textContent, "Add a Ratgdo or Konnected device", "the card names what it adds");
+      assert.equal(card.region.querySelector("p")?.textContent.replace(/\s+/g, " "),
+        "Most people can skip this. If the plugin hasn't found one of your openers, or you want it to use a specific address, enter that address here.",
+        "and says who it is for, read as the page renders it");
+      assert.equal(byText(page, "Device address").attributes["for"], "ratgdoAddressField", "the address label is associated with its field");
       assert.equal(byText(page, "Encryption key (optional)").attributes["for"], "ratgdoKeyField", "and the key label with its own, naming the key as optional");
+      assert.equal(card.address.attributes["placeholder"], "garage.local or 10.0.0.20", "the address field shows both address shapes a user might type");
+      assert.ok(card.address.classList.contains("fo-monospace") && card.key.classList.contains("fo-monospace"),
+        "both fields wear the page kit's monospace, since both carry exact text");
+      assert.ok(secret?.classList.contains("fo-secret-field") && (secret.dataset["secretSubject"] === "encryption key"),
+        "the key field sits in the page kit's secret field, which names what it holds");
+      assert.equal(card.key.type, "password", "the key opens masked");
+      assert.equal(reveal?.tagName, "button", "beside a reveal toggle the library mounts on it");
+      assert.equal(reveal.attributes["aria-label"], "Show the encryption key.", "which names what its next press does");
 
-      for(const label of [ "Test Connection", "Save", "Cancel" ]) {
+      for(const label of [ "Validate Device", "Save", "Cancel" ]) {
 
-        assert.ok(byText(page, label), "the card offers " + label);
+        assert.equal(byText(page, label).tagName, "button", "the card offers " + label + " as a button");
       }
 
-      assert.ok(page.findElement((element) => (element.attributes["role"] === "status")), "the verdict line is a status region, so each verdict is announced");
+      assert.equal(card.verdict.attributes["role"], "status", "the verdict line is a status region, so each verdict is announced");
+      assert.ok(card.verdict.classList.contains("fo-result"), "holding its own height whether or not it is saying anything");
+      assert.deepEqual(identity(card), { rows: [], shown: false }, "and the identity readout is empty and hidden until a device answers");
     });
 
-    test("mounts once for the page's life, and a later show cycle ends the takeover rather than rebuilding the card", async () => {
+    test("clones the card once for the page's life, and a later show cycle ends the takeover rather than rebuilding the card", async () => {
 
       using page = await loadUi();
 
-      const sidebar = page.document.getElementById("sidebar");
       const card = openCard(page);
 
       assert.ok(isHeld(page, card.region), "the card is open");
@@ -862,9 +909,28 @@ describe("the ratgdo settings page's Add Device card", () => {
       await page.double.show();
       await settle();
 
-      assert.equal(sidebar?.children.filter((child) => Object.hasOwn(child.attributes, "data-fo-region")).length, 1,
-        "a second cycle builds no second button - the framework promises never to clear a plugin region, so rebuilding would only duplicate it");
-      assert.equal(isHeld(page, card.region), false, "and the new cycle ends the takeover, so the card leaves the page");
+      assert.equal(isHeld(page, card.region), false, "the new cycle ends the takeover, so the card leaves the page");
+
+      const reopened = openCard(page);
+
+      assert.equal(reopened.region, card.region, "the launcher reopens the same card rather than a fresh clone");
+      assert.equal(reopened.region.querySelectorAll(".fo-secret-toggle").length, 1, "and its key field carries the one reveal toggle it was given at load");
+    });
+
+    test("wires its launcher as the page loads, so a page whose launch failed answers it, and opens the card once a cycle establishes", async () => {
+
+      using page = await loadUi({ failNextShow: true });
+
+      // The launch failed, so the framework announced no loaded model, and the launcher answers its click anyway. A takeover needs a live cycle, so it gives nothing.
+      fire(byText(page, "Add Device"), "click");
+
+      assert.equal(page.findElement((element) => (element.textContent === "Add a Ratgdo or Konnected device")), null,
+        "with no live cycle, the framework gives the card no area to stand in");
+
+      await page.double.show();
+      await settle();
+
+      assert.ok(isHeld(page, openCard(page).region), "the next cycle that establishes gives the area, and the launcher opens the card into it");
     });
 
     test("gives the content area back on Cancel, and the launcher reopens the card with its fields and verdict cleared", async () => {
@@ -875,7 +941,7 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       card.address.value = "10.0.0.20";
       card.key.value = KEY;
-      fire(card.test, "click");
+      fire(card.validate, "click");
 
       await settle();
 
@@ -892,6 +958,50 @@ describe("the ratgdo settings page's Add Device card", () => {
       assert.equal(reopened.address.value, "", "the address field opens empty");
       assert.equal(reopened.key.value, "", "and so does the key field");
       assert.equal(reopened.verdict.textContent, "", "and the verdict from the last visit is gone");
+      assert.equal(toneOf(reopened), undefined, "with its tone");
+      assert.deepEqual(identity(reopened), { rows: [], shown: false }, "and the identity readout beneath it");
+    });
+
+    test("puts the focus in the address field on every open, once the card stands in the page", async () => {
+
+      using page = await loadUi();
+
+      const card = openCard(page);
+
+      assert.equal(page.document.activeElement, card.address, "the open focuses the field the user opened the card to type into");
+
+      fire(byText(page, "Cancel"), "click");
+
+      assert.equal(page.document.activeElement, null, "the focus leaves with the closed card");
+
+      card.key.focus();
+
+      assert.equal(page.document.activeElement, null, "and a closed card's field cannot take it, since it is no longer in the page");
+
+      openCard(page);
+
+      assert.equal(page.document.activeElement, card.address, "and a reopen focuses the address again");
+    });
+
+    test("masks the key again on every open, whatever the last visit left it showing", async () => {
+
+      using page = await loadUi();
+
+      const card = openCard(page);
+      const reveal = card.key.parentElement?.querySelector(".fo-secret-toggle");
+
+      assert.ok(reveal, "the key field carries its reveal toggle");
+
+      fire(reveal, "click");
+
+      assert.equal(card.key.type, "text", "the reveal shows the key");
+      assert.equal(reveal.attributes["aria-label"], "Hide the encryption key.", "and the toggle now names hiding it");
+
+      fire(byText(page, "Cancel"), "click");
+      openCard(page);
+
+      assert.equal(card.key.type, "password", "a fresh open reads masked");
+      assert.equal(reveal.attributes["aria-label"], "Show the encryption key.", "with the toggle naming the reveal again");
     });
 
     test("leaves the page when a re-show fails, and the launcher opens it again once a cycle establishes", async () => {
@@ -925,7 +1035,7 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       card.address.value = "10.0.0.20";
       card.key.value = KEY;
-      fire(card.test, "click");
+      fire(card.validate, "click");
 
       await settle();
 
@@ -953,7 +1063,7 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       const card = openCard(page);
       const sidebar = page.document.getElementById("sidebar");
-      const content = page.document.querySelector("sidebar-content");
+      const content = page.document.querySelector(".sidebar-content");
 
       assert.ok(sidebar && content, "the page markup carries the sidebar and its content wrapper");
 
@@ -976,7 +1086,7 @@ describe("the ratgdo settings page's Add Device card", () => {
       const card = openCard(page);
 
       card.address.value = "10.0.0.20";
-      fire(card.test, "click");
+      fire(card.validate, "click");
 
       await settle();
 
@@ -1007,7 +1117,7 @@ describe("the ratgdo settings page's Add Device card", () => {
       const card = openCard(page);
       const before = page.host.requests.filter((entry) => (entry.route === STATUS_PROBE_ROUTE)).length;
 
-      fire(card.test, "click");
+      fire(card.validate, "click");
 
       await settle();
 
@@ -1023,7 +1133,7 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       card.address.value = "  10.0.0.20  ";
       card.key.value = " secret ";
-      fire(card.test, "click");
+      fire(card.validate, "click");
 
       await settle();
 
@@ -1032,21 +1142,15 @@ describe("the ratgdo settings page's Add Device card", () => {
       assert.equal(probes.length, 1, "one test is one request");
       assert.deepEqual(probes[0]?.body, { address: "10.0.0.20", psk: "secret" }, "the typed address and key are sent trimmed, exactly as typed otherwise");
       assert.equal(card.verdict.textContent, "This device answered.", "the card says so plainly");
-
-      const readout = page.findElement((element) => (element.textContent === "MAC: "))?.parentElement;
-
-      assert.ok(readout, "the identity readout names the MAC");
-      assert.equal(readout.children[1]?.textContent, MAC, "and carries the value beside the label");
-
-      for(const label of [ "Name", "Model", "Firmware", "Encrypted" ]) {
-
-        assert.ok(page.findElement((element) => (element.textContent === (label + ": "))), "the readout names " + label);
-      }
+      assert.deepEqual(identity(card), { rows: [ [ "Name", "North Door" ], [ "Model", "Ratgdo Disco" ], [ "MAC", MAC ], [ "Firmware", "2.0.0" ],
+        [ "Encrypted", "Yes" ] ], shown: true }, "the identity readout shows what answered, each label beside its value");
+      assert.ok(card.readout.children.filter((cell) => (cell.tagName === "dd")).every((value) => value.classList.contains("fo-monospace")),
+        "and every value in the page kit's monospace, since each is exact text");
     });
 
     test("replaces the identity readout between verdicts rather than stacking them", async () => {
 
-      /* Two successful probes in ONE page session, which is the only input that can tell a readout that is cleared from one that is appended to. The card is built
+      /* Two successful probes in ONE page session, which is the only input that can tell a readout that is cleared from one that is appended to. The card is cloned
        * once and reused, so a readout that merely appended would show the first device's identity underneath the second's - and a user testing two addresses in a row
        * would be reading a row that belongs to neither.
        */
@@ -1058,14 +1162,14 @@ describe("the ratgdo settings page's Add Device card", () => {
       const card = openCard(page);
 
       card.address.value = "10.0.0.20";
-      fire(card.test, "click");
+      fire(card.validate, "click");
 
       await settle();
 
       assert.ok(page.findElement((element) => (element.textContent === "North Door")), "the first device's name is shown");
 
       card.address.value = "10.0.0.21";
-      fire(card.test, "click");
+      fire(card.validate, "click");
 
       await settle();
 
@@ -1073,10 +1177,8 @@ describe("the ratgdo settings page's Add Device card", () => {
       assert.equal(page.findElement((element) => (element.textContent === "North Door")), null,
         "and the first device's name is gone, because the readout is replaced between verdicts rather than added to");
 
-      const readout = page.findElement((element) => (element.textContent === "MAC: "))?.parentElement?.parentElement;
-
-      assert.ok(readout, "the readout is found");
-      assert.equal(readout.children.length, 5, "it carries exactly one verdict's worth of rows, not two stacked");
+      assert.deepEqual(identity(card).rows.map(([label]) => label), [ "Name", "Model", "MAC", "Firmware", "Encrypted" ],
+        "the readout carries exactly one verdict's worth of rows, not two stacked");
     });
 
     test("renders one sentence per failure reason, and omits the encrypted row for a plaintext device", async () => {
@@ -1100,7 +1202,7 @@ describe("the ratgdo settings page's Add Device card", () => {
         const card = openCard(page);
 
         card.address.value = "10.0.0.20";
-        fire(card.test, "click");
+        fire(card.validate, "click");
 
         // eslint-disable-next-line no-await-in-loop
         await settle();
@@ -1113,12 +1215,87 @@ describe("the ratgdo settings page's Add Device card", () => {
       const card = openCard(plaintext);
 
       card.address.value = "10.0.0.20";
-      fire(card.test, "click");
+      fire(card.validate, "click");
 
       await settle();
 
-      assert.equal(plaintext.findElement((element) => (element.textContent === "Encrypted: ")), null,
-        "a device that negotiated no encryption shows no Encrypted row - its absence is not a fact worth a line");
+      assert.deepEqual(identity(card).rows.map(([label]) => label), [ "Name", "Model", "MAC", "Firmware" ],
+        "a device that negotiated no encryption shows its readout without an Encrypted row - its absence is not a fact worth a line");
+    });
+
+    test("paints the interim line in no tone, an answer in success, and a refusal in danger, and an edit takes the tone away", async () => {
+
+      const answer = Promise.withResolvers<unknown>();
+
+      using page = await loadUi({ probe: () => answer.promise });
+
+      const card = openCard(page);
+
+      card.address.value = "10.0.0.20";
+      fire(card.validate, "click");
+
+      await settle();
+
+      assert.equal(card.verdict.textContent, "Connecting to the device...", "the interim line stands while the test runs");
+      assert.equal(toneOf(card), undefined, "in the card's own text color, since it says nothing yet about the device");
+
+      answer.resolve(ANSWERED);
+
+      await settle();
+
+      assert.equal(toneOf(card), "success", "an answer reads in the success tone");
+
+      card.address.value = "";
+      fire(card.address, "input");
+
+      assert.equal(toneOf(card), undefined, "an edit blanks the line and its tone together");
+
+      fire(card.validate, "click");
+
+      await settle();
+
+      assert.equal(card.verdict.textContent, "Please enter the device's address.", "a refusal the card makes itself");
+      assert.equal(toneOf(card), "danger", "reads in the danger tone");
+
+      using refused = await loadUi({ probe: async () => ({ kind: "error", reason: "auth-invalid" }) });
+
+      const refusedCard = openCard(refused);
+
+      refusedCard.address.value = "10.0.0.20";
+      fire(refusedCard.validate, "click");
+
+      await settle();
+
+      assert.match(refusedCard.verdict.textContent, /refused that encryption key/, "and a refusal the device answers with");
+      assert.equal(toneOf(refusedCard), "danger", "reads in the danger tone too");
+    });
+
+    test("paints the already-listed notice in the warning tone and a failed write in danger", async () => {
+
+      using listed = await loadUi({ config: configWith("Enable.Device.Address=10.0.0.20"), probe: async () => ANSWERED });
+
+      const listedCard = openCard(listed);
+
+      listedCard.address.value = "10.0.0.20";
+      fire(listedCard.save, "click");
+
+      await settle();
+
+      assert.equal(listedCard.verdict.textContent, "This device is already listed.", "a save with nothing to change says so");
+      assert.equal(toneOf(listedCard), "warning", "in the warning tone, since nothing went wrong and nothing was saved");
+
+      using failed = await loadUi({ probe: async () => ANSWERED });
+
+      const failedCard = openCard(failed);
+
+      failed.double.featureOptions.nextCommit = { error: new Error("the host refused the write"), kind: "failed" };
+      failedCard.address.value = "10.0.0.20";
+      fire(failedCard.save, "click");
+
+      await settle();
+
+      assert.equal(failedCard.verdict.textContent, "the host refused the write", "a failed write shows the host's own words");
+      assert.equal(toneOf(failedCard), "danger", "in the danger tone");
     });
 
     test("waits out the page's own bound on a test nothing answers, and only then paints the unreachable verdict", async (t) => {
@@ -1131,7 +1308,7 @@ describe("the ratgdo settings page's Add Device card", () => {
       const card = openCard(page);
 
       card.address.value = "10.0.0.20";
-      fire(card.test, "click");
+      fire(card.validate, "click");
 
       await settle();
 
@@ -1392,7 +1569,8 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       assert.equal(card.verdict.textContent, "This device answered, but its firmware does not announce its MAC address, so the plugin can reach it only with the " +
         "global encryption key. Update the device to ESPHome 2025.4.0 or newer, or set the global encryption key to this key.", "the card names the limit and the fix");
-      assert.ok(page.findElement((element) => (element.textContent === "MAC: ")), "and still shows the device that answered");
+      assert.ok(identity(card).rows.some(([ label, value ]) => (label === "MAC") && (value === MAC)), "and still shows the device that answered");
+      assert.equal(toneOf(card), "danger", "in the danger tone, since Save will not write it");
       assert.equal(page.double.featureOptions.commits.length, 0, "while Save commits nothing");
 
       card.key.value = "global-key";
@@ -1419,12 +1597,12 @@ describe("the ratgdo settings page's Add Device card", () => {
       const card = openCard(page);
 
       card.address.value = "10.0.0.20";
-      fire(card.test, "click");
+      fire(card.validate, "click");
 
       await settle();
 
       card.address.value = "10.0.0.21";
-      fire(card.test, "click");
+      fire(card.validate, "click");
 
       await settle();
 
@@ -1450,13 +1628,13 @@ describe("the ratgdo settings page's Add Device card", () => {
       const card = openCard(page);
 
       card.address.value = "10.0.0.20";
-      fire(card.test, "click");
+      fire(card.validate, "click");
 
       await settle();
 
-      // A Test click is a new action from the click itself, so the refusal below retires the test still in flight even though it sends nothing of its own.
+      // A Validate Device click is a new action from the click itself, so the refusal below retires the test still in flight even though it sends nothing of its own.
       card.address.value = "";
-      fire(card.test, "click");
+      fire(card.validate, "click");
 
       await settle();
 
@@ -1479,7 +1657,7 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       page.double.featureOptions.nextCommit = { error: new Error("the host refused the write"), kind: "failed" };
       card.address.value = "10.0.0.20";
-      fire(card.test, "click");
+      fire(card.validate, "click");
 
       await settle();
 
@@ -1498,7 +1676,7 @@ describe("the ratgdo settings page's Add Device card", () => {
 
     test("renders nothing and schedules no warm when a probe answers after the card closed", async () => {
 
-      // A user who presses Test Connection and then Cancel must not have the card light up underneath them afterward.
+      // A user who presses Validate Device and then Cancel must not have the card light up underneath them afterward.
       const answer = Promise.withResolvers<unknown>();
 
       using page = await loadUi({ probe: () => answer.promise });
@@ -1507,7 +1685,7 @@ describe("the ratgdo settings page's Add Device card", () => {
       const warms = warmSends(page).length;
 
       card.address.value = "10.0.0.20";
-      fire(card.test, "click");
+      fire(card.validate, "click");
 
       await settle();
 
@@ -1949,7 +2127,7 @@ describe("the ratgdo settings page's Add Device card", () => {
 
         card.address.value = "10.0.0.20";
         card.key.value = KEY;
-        fire(card.test, "click");
+        fire(card.validate, "click");
 
         await settle();
 
@@ -1988,7 +2166,7 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       await settle();
 
-      fire(card.test, "click");
+      fire(card.validate, "click");
 
       await settle();
 
@@ -2061,10 +2239,11 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       await settle();
 
-      const readout = page.findElement((element) => (element.textContent === "MAC: "));
+      // The readout's cells as the first save painted them, held by identity so a repaint of the same answer would still read as a repaint.
+      const cells = card.readout.children;
 
       assert.equal(card.verdict.textContent, "This device answered.", "the save names the device that answered while its write runs");
-      assert.ok(readout, "with the identity readout beneath it");
+      assert.ok(identity(card).shown && (cells.length > 0), "with the identity readout beneath it");
 
       const probes = page.host.requests.filter((entry) => (entry.route === STATUS_PROBE_ROUTE)).length;
 
@@ -2074,7 +2253,8 @@ describe("the ratgdo settings page's Add Device card", () => {
 
       assert.equal(page.host.requests.filter((entry) => (entry.route === STATUS_PROBE_ROUTE)).length, probes, "the second press sends no probe");
       assert.equal(card.verdict.textContent, "This device answered.", "and leaves the verdict line as the first save painted it");
-      assert.equal(page.findElement((element) => (element.textContent === "MAC: ")), readout, "with the same identity readout beneath it");
+      assert.deepEqual(card.readout.children, cells, "with the same identity readout beneath it, cell for cell");
+      assert.ok(card.readout.children.every((cell, index) => (cell === cells[index])), "and every cell the very element the first save painted");
       assert.deepEqual(page.host.toasts, [], "and raises no toast");
       assert.ok(isHeld(page, card.region), "while the card stays held");
 
@@ -2134,7 +2314,7 @@ describe("the ratgdo settings page's Add Device card", () => {
     const unwritten: { commit?: CommitConfigResult; config?: FakeConfigEntry[]; name: string; probe: unknown; verdict: string }[] = [
 
       { name: "the device refused", probe: { kind: "error", reason: "auth-missing" },
-        verdict: "This device requires its API encryption key. Enter the key from the device's YAML configuration and test again." },
+        verdict: "This device requires its API encryption key. Enter the key from the device's YAML configuration and validate again." },
       { config: configWith("Enable.Device.Address=10.0.0.20"), name: "found the device already listed", probe: ANSWERED, verdict: "This device is already listed." },
       { commit: { error: new Error("the host refused the write"), kind: "failed" }, name: "failed to write", probe: ANSWERED, verdict: "the host refused the write" }
     ];
@@ -2159,7 +2339,7 @@ describe("the ratgdo settings page's Add Device card", () => {
 
         assert.ok(isHeld(page, card.region), "the card stays held, since the save wrote nothing and the user may want to try again");
         assert.equal(card.verdict.textContent, outcome.verdict, "the verdict line reads that outcome's own sentence");
-        assert.equal(page.findElement((element) => (element.textContent === "MAC: ")), null, "and no identity readout stands beneath it");
+        assert.deepEqual(identity(card), { rows: [], shown: false }, "and no identity readout stands beneath it");
       });
     }
 
@@ -2172,7 +2352,7 @@ describe("the ratgdo settings page's Add Device card", () => {
         const card = openCard(page);
 
         card.address.value = "10.0.0.20";
-        fire(card.test, "click");
+        fire(card.validate, "click");
 
         await settle();
 
@@ -2182,7 +2362,7 @@ describe("the ratgdo settings page's Add Device card", () => {
         fire(card[field], "input");
 
         assert.equal(card.verdict.textContent, "", "the edit blanks it, since it describes the text that was tested rather than what the field holds");
-        assert.equal(page.findElement((element) => (element.textContent === "MAC: ")), null, "and the readout beneath it goes with it");
+        assert.deepEqual(identity(card), { rows: [], shown: false }, "and the readout beneath it goes with it");
       });
     }
   });

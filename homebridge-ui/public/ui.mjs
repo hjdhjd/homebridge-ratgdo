@@ -8,6 +8,7 @@ import { RATGDO_VARIANT_LABELS, mayCarryDisco, modelWords } from "./lib/webui/va
 import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE, STATUS_WARM_ROUTE } from "./lib/webui/status-routes.js";
 import { canonicalManualAddress, isZonedAddress } from "./lib/webui/manual-address.js";
 import { createActionGuard, withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
+import { maskSecrets, mountSecretReveals } from "homebridge-plugin-utils/webUi-secret.mjs";
 import { PluginConfigSession } from "homebridge-plugin-utils/pluginConfigSession.mjs";
 import { STATUS_EVENT } from "homebridge-plugin-utils/webui/status.js";
 import { STATUS_ROW_TEMPLATES } from "./lib/webui/status-rows.js";
@@ -285,7 +286,7 @@ const validOptionCategory = (device, category) => entryAppliesToDevice(device, c
 const PROBE_MESSAGES = {
 
   "auth-invalid": "The device refused that encryption key. Check the key in this device's YAML configuration and try again.",
-  "auth-missing": "This device requires its API encryption key. Enter the key from the device's YAML configuration and test again.",
+  "auth-missing": "This device requires its API encryption key. Enter the key from the device's YAML configuration and validate again.",
   "misconfigured": "Something answered at that address, but it is not a Ratgdo or Konnected opener this plugin supports.",
   "timeout": "The device did not answer in time. Check that it is powered on and reachable at that address.",
   "unreachable": "Nothing answered at that address. Check the address, and that the device is on the network.",
@@ -378,82 +379,40 @@ const repaintDeviceLinks = () => {
   }
 };
 
-/* Build one element through plain DOM calls. Every part of the Add Device card is composed with this and nothing else: no HTML string is ever parsed, because every
- * value the card shows came from a user or from a device, and `textContent` cannot be talked into being markup the way an HTML sink can.
- *
- * @param {string} tag                 - The element to create.
- * @param {Object} [options]           - What to set on it.
- * @param {Object} [options.attributes] - Attributes to set, by name.
- * @param {Array}  [options.children]  - Elements to append, in order.
- * @param {string} [options.className] - The class list.
- * @param {string} [options.text]      - The text content.
- *
- * @returns {Object} The built element.
- */
-const buildElement = (tag, { attributes = {}, children = [], className = "", text = "" } = {}) => {
-
-  const element = document.createElement(tag);
-
-  if(className) {
-
-    element.className = className;
-  }
-
-  if(text) {
-
-    element.textContent = text;
-  }
-
-  for(const [ name, value ] of Object.entries(attributes)) {
-
-    element.setAttribute(name, value);
-
-    // The id is what a label's `for` resolves against, so it is set as a property too rather than only as an attribute.
-    if(name === "id") {
-
-      element.id = value;
-    }
-  }
-
-  element.append(...children);
-
-  return element;
-};
-
 /* The Add Device card: a labelled field pair, a live connection test, and a save that writes only what answered.
  *
- * The card is built at runtime rather than declared in the page's markup, for two reasons that both matter. The markup file carries a generated region the UI build
- * restamps, so hand-authored structure in it is the owner's to place rather than this feature's; and the settings-page harness verifies exactly what the page builds,
- * so a card the page constructs is a card the suite can hold, down to its labels and its copy.
+ * The card is declared once in the page's markup, as the `#ratgdoDeviceCard` template, and cloned once as the page loads. The one clone is kept for the page's life,
+ * which is what lets its labels name their fields by id, and what keeps the card's lifecycle as it is: its guard, its flow, and its listeners are made once, beside
+ * the clone, and every open shows that same card. Every value the card shows came from a user or from a device, and each reaches the card through `textContent`,
+ * which cannot be talked into being markup the way an HTML sink can.
  *
- * The Add Device button is sidebar chrome: it sits at the top of the sidebar in a plugin-owned region carrying `data-fo-region`, so the framework hides and reveals it
- * with the rest of the page and never clears it. The card itself stands in the page's content area through the framework's takeover, which hides the framework's
+ * The Add Device button is sidebar chrome: it sits above the sidebar in the plugin's own column, which carries `data-fo-region`, so the framework hides and reveals
+ * it with the rest of the page and never clears it. The card itself stands in the page's content area through the framework's takeover, which hides the framework's
  * content regions while the card holds the area and gives them back when the card releases it, when the user navigates, or when the page cycle ends. Nothing of the
- * framework's is written on or moved: the launcher is inserted beside the framework's own markup and the card is handed to the framework to place, so the framework
- * remains the only writer of its own regions.
+ * framework's is written on or moved: the launcher is the page's own markup and the card is handed to the framework to place, so the framework remains the only
+ * writer of its own regions.
  */
 const card = {
 
-  // The elements the card's behavior reads and writes, filled in at mount. Held together rather than looked up by id at each use, because the card is built once and
-  // these are the same elements for the page's life.
+  // The elements the card's behavior reads and writes, filled in at load from the clone. Held together rather than looked up at each use, because the card is cloned
+  // once and these are the same elements for the page's life.
   address: null,
 
-  // The card's save flow, minted at mount directly after the guard and kept for the page's life. It owns the delivery decision, the card or a toast, and the one fact
+  // The card's save flow, minted at load directly after the guard and kept for the page's life. It owns the delivery decision, the card or a toast, and the one fact
   // no single action holds, whether a write is in flight; the card keeps its guard, its takeover, and its copy. The flow holds the card's Save button disabled while
-  // a write is in flight. Null until mount.
+  // a write is in flight. Null until load.
   flow: null,
 
-  /* The latest-action-wins guard, minted once at mount and kept for the page's life, and the one place the card decides which action is current. A connection test
+  /* The latest-action-wins guard, minted once at load and kept for the page's life, and the one place the card decides which action is current. A connection test
    * starts on it at its click, a save starts on it through the card's flow, and starting one retires whatever action was still in flight - except that a save pressed
    * while another save's write is in flight is answered busy by the flow, so it begins nothing and retires nothing. An edit to either field cancels the action in
    * flight as well, so a slow answer never paints over newer input and a save never writes text the user has since changed. An edit, a test, and a save are the only
    * cancellers. The guard has no parent, so a Cancel, a navigation, a later open, and the page cycle ending all leave a pressed save running to its write: the card's
    * lifetime decides only where that save's outcome is shown, never whether it writes. A test joins its own open's takeover on top of this guard, which is what drops
-   * a test whose card has closed. Null until mount.
+   * a test whose card has closed. Null until load.
    */
   guard: null,
   key: null,
-  mounted: false,
   readout: null,
   region: null,
 
@@ -463,21 +422,48 @@ const card = {
   verdict: null
 };
 
-// Render the card's verdict line, and clear the identity readout unless the caller is filling it. The verdict element carries role="status", so a screen reader
-// announces each new verdict without the user having to go looking for it.
-const renderVerdict = (message, rows = []) => {
+// The tones a verdict line can carry, each the Bootstrap text color of the same name. A verdict in none of them, such as the interim connecting line, reads in the
+// card's own text color.
+const VERDICT_TONES = [ "danger", "success", "warning" ];
+
+/* Render the card's verdict line in its tone, and fill the identity readout with the rows the caller hands over, or clear it when there are none. The verdict element
+ * carries role="status", so a screen reader announces each new verdict without the user having to go looking for it. The readout is a definition list of what the
+ * device said about itself, each value in the page kit's monospace, and it is hidden whenever it has nothing to show.
+ *
+ * @param {string} message        - The verdict.
+ * @param {Object} [options]      - How to paint it.
+ * @param {Array}  [options.rows] - The identity readout's [ label, value ] rows, in order.
+ * @param {string} [options.tone] - The verdict's tone, one of VERDICT_TONES, or none.
+ */
+const renderVerdict = (message, { rows = [], tone } = {}) => {
 
   card.verdict.textContent = message;
+
+  for(const name of VERDICT_TONES) {
+
+    card.verdict.classList.toggle("text-" + name, name === tone);
+  }
 
   // replaceChildren with no arguments is the DOM's own way to empty a node. `children` is an HTMLCollection whose length is a getter, so assigning to it throws.
   card.readout.replaceChildren();
 
   for(const [ label, value ] of rows) {
 
-    card.readout.append(buildElement("div", { children: [ buildElement("span", { className: "fw-bold", text: label + ": " }),
-      buildElement("span", { text: value }) ] }));
+    const term = document.createElement("dt");
+    const detail = document.createElement("dd");
+
+    term.className = "col-5 mb-0 fw-normal";
+    term.textContent = label;
+    detail.className = "col-7 mb-0 fo-monospace";
+    detail.textContent = value;
+    card.readout.append(term, detail);
   }
+
+  card.readout.classList.toggle("d-none", !rows.length);
 };
+
+// Paint a probe's outcome: an answer in the success tone, beside the rows naming what answered, and a refusal in the danger tone, beside any rows it carries.
+const paintOutcome = ({ kind, message, rows }) => renderVerdict(message, { rows, tone: (kind === "answered") ? "success" : "danger" });
 
 // Close the card by giving the content area back. The release ends the takeover the card was opened under, which drops a test in flight - a test joins that takeover -
 // and stops the card presenting a pressed save without stopping it, so the flow's delivery decision sends that save's outcome to a toast.
@@ -486,18 +472,21 @@ const closeCard = () => {
   card.takeover.release();
 };
 
-/* Open the card, fresh, in the page's content area. The fields and the verdict are cleared rather than left as the last visit wrote them, because the card is built
- * once and reused - a stale verdict above empty fields would read as a claim about the device the user is about to type. Each open takes the area anew, so an open
- * made while the card already holds the area ends the standing takeover first, and a test the earlier open had in flight retires with it. The open cancels nothing
- * on the guard: a save pressed before it keeps running, and because the takeover it was pressed under has ended, the flow's delivery decision reports its outcome by
- * toast rather than onto this card.
+/* Open the card, fresh, in the page's content area. The fields and the verdict are cleared rather than left as the last visit wrote them, because the card is cloned
+ * once and reused - a stale verdict above empty fields would read as a claim about the device the user is about to type - and the key goes back behind its mask,
+ * whatever the last visit left it showing. Each open takes the area anew, so an open made while the card already holds the area ends the standing takeover first,
+ * and a test the earlier open had in flight retires with it. The open cancels nothing on the guard: a save pressed before it keeps running, and because the takeover
+ * it was pressed under has ended, the flow's delivery decision reports its outcome by toast rather than onto this card. The address takes the focus once the card
+ * stands in the page, since that is the field a user opens the card to type into.
  */
 const openCard = () => {
 
   card.takeover = ui.featureOptions.takeover(card.region);
   card.address.value = "";
   card.key.value = "";
+  maskSecrets(card.region);
   renderVerdict("");
+  card.address.focus();
 };
 
 // Answer an edit to either field. A verdict describes the text that was tested, and a save in flight is about to write that text, so an edit retires whatever action
@@ -608,9 +597,9 @@ const runProbe = async (signal) => {
   }
 };
 
-/* Test: run one connection test and paint its outcome on the card it was pressed on. The action starts on the card's guard joined with the takeover of the open it was
- * pressed in, so an edit, a newer action, a Cancel, a navigation, and a later open all retire it at once. A retired test paints nothing and raises nothing: a test
- * answers a question about the card in front of the user, so a test whose card has closed is dropped rather than reported by toast.
+/* Validate Device: run one connection test and paint its outcome on the card it was pressed on. The action starts on the card's guard joined with the takeover of the
+ * open it was pressed in, so an edit, a newer action, a Cancel, a navigation, and a later open all retire it at once. A retired test paints nothing and raises
+ * nothing: a test answers a question about the card in front of the user, so a test whose card has closed is dropped rather than reported by toast.
  */
 const testCard = async () => {
 
@@ -622,7 +611,7 @@ const testCard = async () => {
     return;
   }
 
-  renderVerdict(outcome.message, outcome.rows);
+  paintOutcome(outcome);
 };
 
 /* Begin a Save's action: the starter the card's flow calls for every press it does not answer busy. It captures the takeover the press is made under, starts the
@@ -680,7 +669,7 @@ const saveCard = async () => {
 
       if(presented()) {
 
-        renderVerdict(outcome.message, outcome.rows);
+        paintOutcome(outcome);
       }
 
       const { address, answer, key } = outcome;
@@ -724,9 +713,7 @@ const saveCard = async () => {
 
     case "declined": {
 
-      const { message, rows } = result.reason;
-
-      result.deliver({ channel: "error", paint: () => renderVerdict(message, rows), text: message });
+      result.deliver({ channel: "error", paint: () => paintOutcome(result.reason), text: result.reason.message });
 
       return;
     }
@@ -735,7 +722,7 @@ const saveCard = async () => {
 
       const notice = "This device is already listed.";
 
-      result.deliver({ channel: "info", paint: () => renderVerdict(notice), text: notice });
+      result.deliver({ channel: "info", paint: () => renderVerdict(notice, { tone: "warning" }), text: notice });
 
       return;
     }
@@ -744,7 +731,7 @@ const saveCard = async () => {
 
       const message = String(result.error?.message ?? result.error);
 
-      result.deliver({ channel: "error", paint: () => renderVerdict(message), text: message });
+      result.deliver({ channel: "error", paint: () => renderVerdict(message, { tone: "danger" }), text: message });
 
       return;
     }
@@ -769,78 +756,6 @@ const saveCard = async () => {
   }
 };
 
-/* Mount the card, once per page life. The framework announces a loaded model on every show cycle, so a later cycle finds the card already built and returns at once:
- * that cycle's teardown has already ended any takeover the card held, so there is nothing to close, and rebuilding would discard the launcher the framework has
- * promised never to clear and register a second set of listeners on the card.
- */
-const mountCard = () => {
-
-  if(card.mounted) {
-
-    return;
-  }
-
-  const sidebar = document.getElementById("sidebar");
-
-  // A page whose markup does not carry the sidebar is a page the launcher has nothing to attach to. It says nothing and stays unmounted rather than throwing out of
-  // the framework's load announcement.
-  if(!sidebar) {
-
-    return;
-  }
-
-  card.address = buildElement("input", { attributes: { autocapitalize: "off", autocomplete: "off", id: "ratgdoAddressField", placeholder:
-    "garage.local or 10.0.0.20", spellcheck: "false", type: "text" }, className: "form-control fo-monospace" });
-  card.key = buildElement("input", { attributes: { autocapitalize: "off", autocomplete: "off", id: "ratgdoKeyField", spellcheck: "false", type: "text" },
-    className: "form-control fo-monospace" });
-  card.verdict = buildElement("div", { attributes: { role: "status" }, className: "mt-2" });
-  card.readout = buildElement("div", { className: "mt-2" });
-
-  const test = buildElement("button", { attributes: { type: "button" }, className: "btn btn-primary me-2", text: "Test Connection" });
-  const save = buildElement("button", { attributes: { type: "button" }, className: "btn btn-primary me-2", text: "Save" });
-  const cancel = buildElement("button", { attributes: { type: "button" }, className: "btn btn-secondary", text: "Cancel" });
-
-  card.guard = createActionGuard();
-
-  // The commit is a call through the feature-options instance rather than a reference to its method, so the method runs with its instance and is read at the moment
-  // a press reaches its write. The flow is handed the Save button as its control and holds it disabled for the span of each write, restoring what it found when the
-  // write settles, so the page carries no disable logic of its own.
-  card.flow = createSaveFlow({
-
-    commit: (compose, options) => ui.featureOptions.commitConfig(compose, options),
-    control: save,
-    start: startSave,
-    toast: homebridge.toast
-  });
-
-  card.region = buildElement("div", { children: [
-
-    buildElement("h5", { text: "Add a device by address" }),
-    buildElement("p", { text: "The plugin finds openers on your network by itself. Add one here when it sits somewhere autodiscovery cannot reach, or when you want " +
-      "the plugin to use a specific address for it." }),
-    buildElement("label", { attributes: { for: "ratgdoAddressField" }, className: "form-label", text: "Address" }),
-    card.address,
-    buildElement("label", { attributes: { for: "ratgdoKeyField" }, className: "form-label mt-2", text: "Encryption key (optional)" }),
-    card.key,
-    buildElement("div", { children: [ test, save, cancel ], className: "mt-3" }),
-    card.verdict,
-    card.readout
-  ], className: "fo-card fo-page mb-3 p-3" });
-
-  const open = buildElement("button", { attributes: { type: "button" }, className: "btn btn-sm w-100", text: "Add Device" });
-  const launcher = buildElement("div", { attributes: { "data-fo-region": "" }, children: [open], className: "mb-2" });
-
-  sidebar.prepend(launcher);
-  card.mounted = true;
-
-  open.addEventListener("click", openCard);
-  test.addEventListener("click", () => void testCard());
-  save.addEventListener("click", () => void saveCard());
-  cancel.addEventListener("click", closeCard);
-  card.address.addEventListener("input", editCard);
-  card.key.addEventListener("input", editCard);
-};
-
 /* The feature-options parameters. onLoaded is the page's first warm: the framework announces it once per show cycle that reaches a loaded model, with the status panel's
  * handle already minted and the configuration session established, which is exactly the state the recompute's own establishment gate waits for. The statusPanel
  * configuration supplies exactly the parts ratgdo owns and inherits the shared homebridge-plugin-utils panel around them:
@@ -851,11 +766,7 @@ const mountCard = () => {
 const featureOptionsParams = {
 
   getDevices: deviceList,
-  onLoaded: () => {
-
-    mountCard();
-    void recomputeWarmSet();
-  },
+  onLoaded: () => void recomputeWarmSet(),
   // An options edit repaints the device names it moved, so a custom Name shows in the sidebar as soon as it is entered and before it is saved, and warms the panel.
   onOptionsEdited: () => {
 
@@ -959,6 +870,41 @@ document.addEventListener("visibilitychange", () => {
  * establishment gate bounds what it produces exactly as it bounds every other trigger.
  */
 ui.liveness.onResume(forceWarmResend);
+
+/* Wire the Add Device card and its launcher, once, for the life of the page. The card is cloned from its template here and kept, so its elements, its guard, and its
+ * save flow are made once, and the secret field's reveal is mounted on the clone once: each open masks the key again rather than mounting anything. The launcher and
+ * the card are part of this page's own markup and live as long as the page does, so their listeners carry no signal, and they are wired here rather than on the
+ * framework's load announcement, which comes once per show cycle. Each field's edit listener is on the field itself.
+ */
+const cardRoot = document.getElementById("ratgdoDeviceCard").content.firstElementChild.cloneNode(true);
+const cardControl = (action) => cardRoot.querySelector("[data-action='" + action + "']");
+
+card.address = cardRoot.querySelector("[data-field='address']");
+card.key = cardRoot.querySelector("[data-field='key']");
+card.readout = cardRoot.querySelector("[data-role='identity']");
+card.region = cardRoot;
+card.verdict = cardRoot.querySelector("[data-role='verdict']");
+card.guard = createActionGuard();
+
+// The commit is a call through the feature-options instance rather than a reference to its method, so the method runs with its instance and is read at the moment a
+// press reaches its write. The flow is handed the Save button as its control and holds it disabled for the span of each write, restoring what it found when the write
+// settles, so the page carries no disable logic of its own.
+card.flow = createSaveFlow({
+
+  commit: (compose, options) => ui.featureOptions.commitConfig(compose, options),
+  control: cardControl("save"),
+  start: startSave,
+  toast: homebridge.toast
+});
+
+mountSecretReveals({ root: cardRoot });
+
+document.getElementById("ratgdoAddDevice").addEventListener("click", openCard);
+cardControl("validate").addEventListener("click", () => void testCard());
+cardControl("save").addEventListener("click", () => void saveCard());
+cardControl("cancel").addEventListener("click", closeCard);
+card.address.addEventListener("input", editCard);
+card.key.addEventListener("input", editCard);
 
 /* The bound in seconds on the configuration wiring below. Five seconds settles the envelope provably inside the page boot monitor's ten-second watchdog, so a wiring
  * step that hangs against an unresponsive host can never be what makes the settings panel look broken.

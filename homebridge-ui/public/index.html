@@ -11,6 +11,33 @@
 <img class="chrome-logo" src="https://raw.githubusercontent.com/hjdhjd/homebridge-ratgdo/main/images/homebridge-ratgdo.svg" alt="homebridge-ratgdo: Native HomeKit support for Ratgdo" />
 <!-- LOGO:END -->
 </p>
+<!-- The Add Device card, defined once and cloned by ui.mjs as the page loads. The one clone is kept for the page's life and stands in the page's content area
+     through the framework's takeover each time the Add Device control above the sidebar opens it, which is what lets its labels name their fields by id: no
+     second copy is ever on the page. Its controls are addressed by data attributes, fields by data-field, actions by data-action, and the verdict line and the
+     identity readout by data-role. The card root wears fo-page, the framework's opt-in marker scoping its dark-mode form-control corrections, and the page kit's
+     fo-compact-card, which renders its buttons at the panel's own type scale. -->
+<template id="ratgdoDeviceCard">
+  <div class="fo-card fo-page fo-compact-card mb-3 p-3">
+    <h6 class="mb-1">Add a Ratgdo or Konnected device</h6>
+    <p class="small mb-3">Most people can skip this. If the plugin hasn't found one of your openers, or you want it to use a specific address,
+      enter that address here.</p>
+    <label class="form-label mb-1" for="ratgdoAddressField">Device address</label>
+    <input type="text" class="form-control fo-monospace" id="ratgdoAddressField" data-field="address" autocapitalize="off" autocomplete="off"
+      placeholder="garage.local or 10.0.0.20" spellcheck="false">
+    <label class="form-label mb-1 mt-3" for="ratgdoKeyField">Encryption key (optional)</label>
+    <div class="fo-secret-field" data-secret-subject="encryption key">
+      <input type="password" class="form-control fo-monospace" id="ratgdoKeyField" data-field="key" autocapitalize="off" autocomplete="new-password"
+        spellcheck="false">
+    </div>
+    <div class="d-flex flex-wrap gap-2 mt-3">
+      <button type="button" class="btn btn-primary btn-sm" data-action="validate">Validate Device</button>
+      <button type="button" class="btn btn-primary btn-sm" data-action="save">Save</button>
+      <button type="button" class="btn btn-primary btn-sm" data-action="cancel">Cancel</button>
+    </div>
+    <div class="fo-result small mt-2" data-role="verdict" role="status"></div>
+    <dl class="row small mb-0 mt-2 d-none" data-role="identity"></dl>
+  </div>
+</template>
 <div id="pageFirstRun" style="display: none;">
   <div class="text-left">
     <p>Welcome to <strong>homebridge-ratgdo</strong>. To get started:
@@ -33,12 +60,22 @@
 <div id="pageFeatureOptions" class="mt-2" style="display: none;" tabindex="0">
   <div id="headerInfo" class="alert alert-info bg-transparent py-2 px-3 mb-2"></div>
   <div class="feature-main-content">
-    <aside id="sidebar" class="me-3">
-      <div class="sidebar-content">
-        <nav id="controllersContainer" class="p-2"></nav>
-        <nav id="devicesContainer" class="p-2"></nav>
+    <!-- The plugin-owned sidebar column. The framework manages only the #sidebar region inside it - its visibility, and its containers' contents - so the control
+         anchored here sits directly above the device list and survives the framework's re-renders. The data-fo-region attribute joins the column to the page's
+         own visibility: it hides with the page's teardown and reveals with the page, while remaining the plugin's to fill - the framework never clears it. The page
+         kit's fo-sidebar-column holds the column at the sidebar's own width, so the control keeps that width in every state. Its click handler lives in ui.mjs and
+         opens the Add Device card. -->
+    <div class="fo-sidebar-column d-flex flex-column me-3" data-fo-region>
+      <div class="mb-2">
+        <button type="button" class="btn btn-sm w-100 fo-sidebar-control fo-action" id="ratgdoAddDevice">Add Device</button>
       </div>
-    </aside>
+      <aside id="sidebar">
+        <div class="sidebar-content">
+          <nav id="controllersContainer" class="p-2"></nav>
+          <nav id="devicesContainer" class="p-2"></nav>
+        </div>
+      </aside>
+    </div>
     <main class="feature-content">
       <div id="deviceStatsContainer"></div>
       <div id="search" class="mb-3"></div>

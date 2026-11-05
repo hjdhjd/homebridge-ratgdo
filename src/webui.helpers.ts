@@ -15,8 +15,9 @@
  * The page is imported once per test under a fresh query string, which is what gives each test its own module instance: the page holds its warm-set memory and its
  * debounce handle in module scope, and a second test reading the first test's memory would assert nothing at all.
  *
- * The `document` installed here is the recording one, seeded with the mount points Config UI X's own markup carries. That is what lets the suite hold the Add Device
- * card: the page builds the card through plain DOM calls, and every one of those calls lands in a record a test reads back.
+ * The `document` installed here is the recording one, parsed from the page's own shipped markup. That is what lets the suite hold the Add Device card: the page
+ * clones the card from the template the markup declares, so the card the suite drives is the file's own, and every call the page makes on it lands in a record a test
+ * reads back.
  */
 import type { FakeCatalog, FakeConfigEntry, FakeConsole, FakeDevice, FakeDocument, FakeElement, FakeHost, webUi } from "./webui-double.helpers.ts";
 import { defaultConfig, defaultDevices, makeConsole, makeDocument, makeHost, stageFixture } from "./webui-double.helpers.ts";

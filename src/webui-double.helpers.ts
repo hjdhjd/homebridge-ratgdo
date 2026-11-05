@@ -13,6 +13,7 @@
 import type { CommitConfigResult, FeatureCategoryEntry, FeatureOptionEntry, Nullable } from "homebridge-plugin-utils";
 import { STATUS_ADDRESSES_ROUTE, STATUS_PROBE_ROUTE } from "./webui/status-routes.ts";
 import { featureOptionCategories, featureOptions } from "./options.ts";
+import { readFileSync } from "node:fs";
 
 // The option catalog the page reads, in the two members the framework's own accessor narrows a /getOptions response down to.
 export interface FakeCatalog {
@@ -159,8 +160,9 @@ export interface FakeHost {
   updates: FakeConfigEntry[][];
 }
 
-/* One recorded DOM element. The page builds its Add Device card through plain DOM calls, so this records exactly the calls the page is allowed to make and nothing
- * more - a member the page reaches that this does not carry throws inside the test, which is what makes the harness a drift check rather than a mirror.
+/* One recorded DOM element. The page's markup is parsed into these, and the page clones its Add Device card from that markup and fills its readout through plain DOM
+ * calls, so this records exactly the calls the page is allowed to make and nothing more - a member the page reaches that this does not carry throws inside the test,
+ * which is what makes the harness a drift check rather than a mirror.
  *
  * Every member here is spelled the way the DOM spells it, and that spelling is the whole point. A double carrying a convenience member of its own - a `parent` where
  * the DOM says `parentElement` - accepts page code no browser would run, and the suite then goes green on a card that cannot open. So the names are the DOM's, the
@@ -169,11 +171,13 @@ export interface FakeHost {
  * `disabled` follows that rule: it stands only on the form controls, and an element of any other tag carries no such member, so reading it off a `div` answers
  * undefined as a browser does. The library's save flow accepts a control by its boolean `disabled`, so a card that handed it a `div` must fail here as it fails in a
  * browser. `value` follows it too: it stands only on the controls a form reads a value from, so a card that read its address off the field's wrapper gets undefined
- * here, as it would in a browser, rather than an empty string that reads as a field left blank.
+ * here, as it would in a browser, rather than an empty string that reads as a field left blank. `type` stands only on an input and a button, reflecting the attribute
+ * as the DOM does, and `content` only on a template, holding the elements its markup declares rather than its own children, as a browser's parser places them.
  *
  * `children` is a frozen view rather than the live array for that same reason: the real thing is an HTMLCollection whose `length` is a getter, so `children.length = 0`
- * throws in a browser and has to throw here too. The tree is mutated through `append`, `prepend`, `before`, `remove`, and `replaceChildren`, exactly as it is in a
- * browser.
+ * throws in a browser and has to throw here too. The tree is mutated through `append`, `appendChild`, `before`, `remove`, and `replaceChildren`, exactly as it is in a
+ * browser, and `classList` and `dataset` read and write the class attribute and the data attributes they stand for. `focus` moves the document's `activeElement` only
+ * to an element standing in the page, as a browser's does.
  * There is deliberately no innerHTML and no insertAdjacentHTML: the card renders values that came from a user and from a device, so an HTML-string sink is a member
  * the page must not have.
  */
@@ -181,20 +185,46 @@ export interface FakeElement {
 
   addEventListener: (type: string, listener: FakeListener) => void;
   append: (...nodes: FakeElement[]) => void;
+  appendChild: (node: FakeElement) => FakeElement;
   attributes: Record<string, string>;
   before: (...nodes: FakeElement[]) => void;
   readonly children: readonly FakeElement[];
+  readonly classList: FakeClassList;
   className: string;
+  cloneNode: (deep?: boolean) => FakeElement;
+  closest: (selector: string) => Nullable<FakeElement>;
+  content?: FakeFragment;
+  readonly dataset: Record<string, string | undefined>;
   disabled?: boolean;
+  focus: () => void;
   id: string;
+  namespaceURI: string;
   parentElement: Nullable<FakeElement>;
-  prepend: (...nodes: FakeElement[]) => void;
+  querySelector: (selector: string) => Nullable<FakeElement>;
+  querySelectorAll: (selector: string) => readonly FakeElement[];
   remove: () => void;
   replaceChildren: (...nodes: FakeElement[]) => void;
   setAttribute: (name: string, value: string) => void;
   tagName: string;
   textContent: string;
+  type?: string;
   value?: string;
+}
+
+// An element's class list, as the DOM's token list offers it: the members the page and the library's secret reveal call.
+export interface FakeClassList {
+
+  add: (...names: string[]) => void;
+  contains: (name: string) => boolean;
+  remove: (...names: string[]) => void;
+  toggle: (name: string, force?: boolean) => boolean;
+}
+
+// The fragment a template holds its markup's elements in, carrying what the page reads off it: its elements, and the first of them, which is what it clones.
+export interface FakeFragment {
+
+  readonly children: readonly FakeElement[];
+  readonly firstElementChild: Nullable<FakeElement>;
 }
 
 // A fake element of a tag that carries `value`, which is how a row holds a field it types into and reads back.
@@ -210,8 +240,10 @@ export const isValueControl = (element: Nullable<FakeElement>): element is FakeV
  */
 export interface FakeDocument {
 
+  readonly activeElement: Nullable<FakeElement>;
   addEventListener: (type: string, listener: FakeListener) => void;
   createElement: (tag: string) => FakeElement;
+  createElementNS: (namespace: string, tag: string) => FakeElement;
   getElementById: (id: string) => Nullable<FakeElement>;
   querySelector: (selector: string) => Nullable<FakeElement>;
   querySelectorAll: (selector: string) => readonly FakeElement[];
@@ -392,15 +424,6 @@ export const makeHost = ({ addresses = {}, config = defaultConfig(), probe }: { 
   return host;
 };
 
-/* Build the fake document the page mounts its Add Device card into.
- *
- * The seeded ids are the page markup Config UI X serves: the sidebar the button mounts inside, the sidebar content it mounts ahead of, and the device-stats region
- * a takeover's container stands before. They are seeded rather than created on demand so that a page reaching for an id the real markup does not carry reads null
- * and the mount has to cope, exactly as it would in a browser.
- *
- * Only the DOM surface the card actually uses is modelled. Anything else the page reaches for is undefined and throws inside the test, which is the whole point:
- * this file is a drift check on what the page is allowed to do, not a re-implementation of the DOM.
- */
 /* Each element's live child list, keyed by the element. It sits beside the factory rather than on the element because `children` must hand back a frozen view - the
  * insertion methods need the real array, and nothing outside this file may have it.
  */
@@ -409,17 +432,167 @@ const liveChildren = new WeakMap<FakeElement, FakeElement[]>();
 // The live child list of one element, which every insertion goes through. An element this file did not build has none, and an empty array keeps the walk total.
 const childrenOf = (element: FakeElement): FakeElement[] => liveChildren.get(element) ?? [];
 
+// Each template's content, keyed by the template, held apart from its children for the reason `liveChildren` is: the markup parser fills it, and nothing else may.
+const fragmentChildren = new WeakMap<FakeElement, FakeElement[]>();
+
 // The tags of the form controls, the only elements whose fake carries `disabled`, under the rule FakeElement states.
 const FORM_CONTROL_TAGS: ReadonlySet<string> = new Set([ "button", "fieldset", "input", "optgroup", "option", "select", "textarea" ]);
 
 // The tags of the controls a form reads a value from, the only elements whose fake carries `value`, under the same rule.
 const VALUE_CONTROL_TAGS: ReadonlySet<string> = new Set([ "button", "input", "option", "select", "textarea" ]);
 
+// The tags whose fake carries `type`, each beside the type its element reads when its markup names none, as the DOM's reflection of the attribute answers.
+const TYPE_DEFAULTS: ReadonlyMap<string, string> = new Map([ [ "button", "submit" ], [ "input", "text" ] ]);
+
+// The namespace an element the markup parser or `createElement` builds is in.
+const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
+
+// The settings page's own markup, read once from the file the plugin ships, so every document this file builds parses the same text a browser is served.
+const PAGE_MARKUP = readFileSync(new URL("../homebridge-ui/public/index.html", import.meta.url), "utf8");
+
+// The elements a browser's parser closes on their own, which take no closing tag.
+const VOID_TAGS: ReadonlySet<string> = new Set([ "br", "hr", "img", "input", "link", "meta" ]);
+
+// The character references the markup parser decodes, each beside the character it stands for.
+const CHARACTER_REFERENCES: Readonly<Record<string, string>> = { "#39": "'", "amp": "&", "gt": ">", "lt": "<", "quot": "\"" };
+
+/* One token of the page's markup at the parser's position: a comment, a closing tag, an opening tag with its attributes, or a run of text. An attribute is either bare
+ * or carries a double-quoted value, which is the one spelling the page's markup uses, so markup in any other spelling matches no token, and the parse stops on it by
+ * name rather than reading it some way a browser would not.
+ */
+const MARKUP_TOKEN = /<!--[\s\S]*?-->|<\/([a-z][a-z0-9-]*)\s*>|<([a-z][a-z0-9-]*)((?:\s+[^\s"'=/>]+(?:="[^"]*")?)*)\s*\/?>|([^<]+)/y;
+
+// One attribute of an opening tag the token above read, bare or with its double-quoted value.
+const MARKUP_ATTRIBUTE = /\s+([^\s"'=/>]+)(?:="([^"]*)")?/g;
+
+// Decode the character references in a run of markup text or an attribute value. A reference this file does not decode throws rather than standing in the text as
+// written, since a browser would read it as the character it names.
+const decodeMarkup = (text: string): string => text.replace(/&([#\w]+);/g, (reference: string, name: string): string => {
+
+  const character = CHARACTER_REFERENCES[name];
+
+  if(character === undefined) {
+
+    throw new Error("The fake document's parser decodes no character reference " + reference + ".");
+  }
+
+  return character;
+});
+
+// One compound of a selector: the tag, the id, the classes, and the attributes an element must carry to match it, each optional.
+interface CompoundSelector {
+
+  attributes: { name: string; value: string | undefined }[];
+  classes: string[];
+  id: string | undefined;
+  tag: string | undefined;
+}
+
+// A compound selector as the double reads one, and each of its parts after the tag.
+const COMPOUND_SELECTOR = /^([a-z][a-z0-9-]*)?((?:#[\w-]+|\.[\w-]+|\[[\w-]+(?:=(?:'[^']*'|"[^"]*"))?\])*)$/;
+const SELECTOR_PART = /#([\w-]+)|\.([\w-]+)|\[([\w-]+)(?:=(?:'([^']*)'|"([^"]*)"))?\]/g;
+
+/* Parse a selector into its compounds, outermost first. The double models the shapes the page and the library's secret reveal send - compounds of a tag, an id,
+ * classes, and attributes, joined by the descendant combinator - and any other shape throws, because a selector this file answered with a guess is one the suite
+ * could pass on while a browser answers otherwise.
+ */
+const parseSelector = (selector: string): CompoundSelector[] => selector.trim().split(/\s+/).map((text) => {
+
+  const match = COMPOUND_SELECTOR.exec(text);
+
+  if(!text.length || !match) {
+
+    throw new Error("The fake document models selectors of tags, ids, classes, and attributes joined by descendant combinators, which " + selector + " is not.");
+  }
+
+  const compound: CompoundSelector = { attributes: [], classes: [], id: undefined, tag: match[1] };
+
+  for(const [ , id, className, name, single, double ] of (match[2] ?? "").matchAll(SELECTOR_PART)) {
+
+    if(id !== undefined) {
+
+      compound.id = id;
+    } else if(className !== undefined) {
+
+      compound.classes.push(className);
+    } else if(name !== undefined) {
+
+      compound.attributes.push({ name, value: single ?? double });
+    }
+  }
+
+  return compound;
+});
+
+// Whether one element carries everything one compound names.
+const matchesCompound = (element: FakeElement, { attributes, classes, id, tag }: CompoundSelector): boolean => ((tag === undefined) || (element.tagName === tag)) &&
+  ((id === undefined) || (element.id === id)) && classes.every((name) => element.className.split(" ").includes(name)) &&
+  attributes.every(({ name, value }) => Object.hasOwn(element.attributes, name) && ((value === undefined) || (element.attributes[name] === value)));
+
+/* Whether one element matches a parsed selector: the innermost compound matches the element itself, and each compound outside it matches an ancestor further out than
+ * the one before. Taking the nearest ancestor that matches is enough, because a descendant combinator asks only that some ancestor match, so the nearest one leaves
+ * every further ancestor available to the compounds outside it.
+ */
+const matchesSelector = (element: FakeElement, compounds: readonly CompoundSelector[]): boolean => {
+
+  const innermost = compounds.at(-1);
+
+  if(!innermost || !matchesCompound(element, innermost)) {
+
+    return false;
+  }
+
+  let remaining = compounds.length - 1;
+  let ancestor = element.parentElement;
+
+  while((remaining > 0) && ancestor) {
+
+    const compound = compounds[remaining - 1];
+
+    if(compound && matchesCompound(ancestor, compound)) {
+
+      remaining -= 1;
+    }
+
+    ancestor = ancestor.parentElement;
+  }
+
+  return remaining === 0;
+};
+
+// Every descendant of one element, depth first, which is document order.
+const descendantsOf = (element: FakeElement): FakeElement[] => element.children.flatMap((child) => [ child, ...descendantsOf(child) ]);
+
+/* Build the fake document the page runs against, from the page's own markup.
+ *
+ * The page block and the Add Device card's template are parsed out of the shipped index.html, so the sidebar column the launcher sits in, the regions a takeover
+ * stands among, and every element of the card are the file's own rather than a description of them kept here. The parse builds each element through the same factory
+ * the page's own `createElement` calls reach, so a parsed element and a built one are the same kind of fake. A page reaching for an element the markup does not
+ * carry reads null, exactly as it would in a browser.
+ *
+ * Only the DOM surface the page and the library modules it loads actually use is modelled. Anything else they reach for is undefined and throws inside the test,
+ * which is the whole point: this file is a drift check on what the page is allowed to do, not a re-implementation of the DOM.
+ */
 export const makeDocument = (): FakeDom => {
 
-  const seeded = new Map<string, FakeElement>();
+  // The parsed page's roots, which every lookup and search walks, and the element the document's focus is on.
+  const roots: FakeElement[] = [];
+  let active: Nullable<FakeElement> = null;
 
-  const makeElement = (tag: string): FakeElement => {
+  // Whether an element stands in the page, which is whether it or an ancestor of it is one of the roots.
+  const isConnected = (element: FakeElement): boolean => {
+
+    let node: Nullable<FakeElement> = element;
+
+    while(node && !roots.includes(node)) {
+
+      node = node.parentElement;
+    }
+
+    return node !== null;
+  };
+
+  const makeElement = (tag: string, namespaceURI: string = HTML_NAMESPACE): FakeElement => {
 
     // The live child list. It is held in the closure rather than on the element, so the only way out of it is the frozen view `children` hands back - which is what
     // makes `children.length = 0` throw here exactly as it throws against a real HTMLCollection.
@@ -461,6 +634,12 @@ export const makeDocument = (): FakeDom => {
           kids.push(node);
         }
       },
+      appendChild: (node) => {
+
+        element.append(node);
+
+        return node;
+      },
       attributes: {},
       before: (...nodes) => {
 
@@ -490,19 +669,134 @@ export const makeDocument = (): FakeDom => {
 
         return Object.freeze([...kids]);
       },
+
+      // The class list over the class attribute's words, read afresh at each call, so it always speaks for the element's className as it stands.
+      get classList(): FakeClassList {
+
+        const names = (): string[] => element.className.split(" ").filter((name) => name.length > 0);
+        const add = (...added: string[]): void => {
+
+          element.className = [...new Set([ ...names(), ...added ])].join(" ");
+        };
+
+        const remove = (...removed: string[]): void => {
+
+          element.className = names().filter((name) => !removed.includes(name)).join(" ");
+        };
+
+        return {
+
+          add,
+          contains: (name) => names().includes(name),
+          remove,
+          toggle: (name, force): boolean => {
+
+            const present = force ?? !names().includes(name);
+
+            if(present) {
+
+              add(name);
+            } else {
+
+              remove(name);
+            }
+
+            return present;
+          }
+        };
+      },
       className: "",
-      ...FORM_CONTROL_TAGS.has(tag) ? { disabled: false } : {},
-      id: "",
-      parentElement: null,
-      prepend: (...nodes) => {
 
-        for(const node of nodes) {
+      // Node.cloneNode: the element's attributes, classes, id, and text, and its form state where it carries one, with its children copied too when the clone is
+      // deep. Listeners stay behind, as they do in a browser.
+      cloneNode: (deep = false) => {
 
-          detach(node);
-          node.parentElement = element;
+        const copy = makeElement(tag, namespaceURI);
+
+        for(const [ name, value ] of Object.entries(element.attributes)) {
+
+          copy.setAttribute(name, value);
         }
 
-        kids.unshift(...nodes);
+        copy.className = element.className;
+        copy.id = element.id;
+        copy.textContent = element.textContent;
+
+        if(FORM_CONTROL_TAGS.has(tag)) {
+
+          copy.disabled = element.disabled;
+        }
+
+        if(VALUE_CONTROL_TAGS.has(tag)) {
+
+          copy.value = element.value;
+        }
+
+        if(deep) {
+
+          copy.append(...kids.map((child) => child.cloneNode(true)));
+        }
+
+        return copy;
+      },
+
+      // Element.closest: the element itself or the nearest ancestor matching the selector.
+      closest: (selector) => {
+
+        const compounds = parseSelector(selector);
+        let node: Nullable<FakeElement> = element;
+
+        while(node && !matchesSelector(node, compounds)) {
+
+          node = node.parentElement;
+        }
+
+        return node;
+      },
+
+      // The data attributes as the DOM's dataset maps them: a key's capitals become hyphenated lower case after the data- prefix, in each direction.
+      get dataset(): Record<string, string | undefined> {
+
+        const attributeOf = (key: string): string => "data-" + key.replace(/[A-Z]/g, (capital) => "-" + capital.toLowerCase());
+
+        return new Proxy<Record<string, string | undefined>>({}, {
+
+          get: (_target, key): string | undefined => (typeof key === "string") ? element.attributes[attributeOf(key)] : undefined,
+          set: (_target, key, value: unknown): boolean => {
+
+            if(typeof key === "string") {
+
+              element.setAttribute(attributeOf(key), String(value));
+            }
+
+            return true;
+          }
+        });
+      },
+      ...FORM_CONTROL_TAGS.has(tag) ? { disabled: false } : {},
+
+      // HTMLElement.focus: an element standing in the page takes the document's focus, and one that does not is left alone, as a browser leaves it.
+      focus: () => {
+
+        if(isConnected(element)) {
+
+          active = element;
+        }
+      },
+      id: "",
+      namespaceURI,
+      parentElement: null,
+      querySelector: (selector) => {
+
+        const compounds = parseSelector(selector);
+
+        return descendantsOf(element).find((node) => matchesSelector(node, compounds)) ?? null;
+      },
+      querySelectorAll: (selector) => {
+
+        const compounds = parseSelector(selector);
+
+        return descendantsOf(element).filter((node) => matchesSelector(node, compounds));
       },
 
       // Element.remove: the element leaves its parent, and an element with no parent is left as it is.
@@ -524,144 +818,198 @@ export const makeDocument = (): FakeDom => {
           kids.push(node);
         }
       },
+
+      // The class and id attributes are reflected onto className and id, as the DOM reflects them.
       setAttribute: (name, value) => {
 
         element.attributes[name] = value;
+
+        if(name === "class") {
+
+          element.className = value;
+        } else if(name === "id") {
+
+          element.id = value;
+        }
       },
       tagName: tag,
       textContent: "",
       ...VALUE_CONTROL_TAGS.has(tag) ? { value: "" } : {}
     };
 
+    const typeDefault = TYPE_DEFAULTS.get(tag);
+
+    // An input's and a button's type reflect the type attribute, reading the tag's own default where the markup names none.
+    if(typeDefault !== undefined) {
+
+      Object.defineProperty(element, "type", { enumerable: true, get: (): string => element.attributes["type"] ?? typeDefault,
+        set: (type: string): void => element.setAttribute("type", type) });
+    }
+
+    // A template's content holds the elements its markup declares, which the markup parser places there rather than among the template's own children.
+    if(tag === "template") {
+
+      const content: FakeElement[] = [];
+
+      fragmentChildren.set(element, content);
+      element.content = {
+
+        get children(): readonly FakeElement[] {
+
+          return Object.freeze([...content]);
+        },
+        get firstElementChild(): Nullable<FakeElement> {
+
+          return content[0] ?? null;
+        }
+      };
+    }
+
     liveChildren.set(element, kids);
 
     return element;
   };
 
-  // Depth-first walk from every seeded root, which is how a lookup or a test search reaches an element the page built at any depth.
-  const walk = (element: FakeElement, visit: (node: FakeElement) => boolean): Nullable<FakeElement> => {
+  /* Parse the element the shipped markup carries under one id, with everything inside it, into elements built by makeElement, as a browser's parser builds them:
+   * every attribute set through setAttribute, a template's elements placed in its content rather than among its children, and an element holding only text given
+   * that text. Comments and the whitespace between elements are dropped, since the page reads neither, and an element holding text beside elements throws, because
+   * this double carries no text nodes to hold it in.
+   */
+  const parseMarkup = (id: string): FakeElement => {
 
-    if(visit(element)) {
+    const start = new RegExp("<[a-z][a-z0-9-]*\\s(?:[^>]*\\s)?id=\"" + id + "\"").exec(PAGE_MARKUP)?.index;
 
-      return element;
+    if(start === undefined) {
+
+      throw new Error("The settings page's markup carries no element with the id " + id + ".");
     }
 
-    for(const child of element.children) {
+    const token = new RegExp(MARKUP_TOKEN);
+    const open: { element: FakeElement; text: string }[] = [];
 
-      const found = walk(child, visit);
+    token.lastIndex = start;
 
-      if(found) {
+    for(;;) {
 
-        return found;
+      const at = token.lastIndex;
+      const match = token.exec(PAGE_MARKUP);
+
+      if(!match) {
+
+        throw new Error("The settings page's markup holds a shape the fake document's parser does not read, at offset " + String(at) + ".");
+      }
+
+      const [ , closing, opening, attributes, text ] = match;
+      const current = open.at(-1);
+
+      if(text !== undefined) {
+
+        if(current) {
+
+          current.text += text;
+        }
+
+        continue;
+      }
+
+      if(closing !== undefined) {
+
+        if(current?.element.tagName !== closing) {
+
+          throw new Error("The settings page's markup closes " + closing + " at offset " + String(at) + ", which is not the element open there.");
+        }
+
+        open.pop();
+
+        const held = (current.element.tagName === "template") ? (fragmentChildren.get(current.element) ?? []) : current.element.children;
+
+        if(!held.length) {
+
+          current.element.textContent = decodeMarkup(current.text);
+        } else if(current.text.trim().length) {
+
+          throw new Error("The settings page's markup holds text beside elements inside " + closing + ", which the fake document carries no text node for.");
+        }
+
+        if(!open.length) {
+
+          return current.element;
+        }
+
+        continue;
+      }
+
+      // A comment matches with no group, and the page reads nothing of one.
+      if(opening === undefined) {
+
+        continue;
+      }
+
+      const element = makeElement(opening);
+
+      for(const [ , name, value ] of (attributes ?? "").matchAll(MARKUP_ATTRIBUTE)) {
+
+        if(name !== undefined) {
+
+          element.setAttribute(name, decodeMarkup(value ?? ""));
+        }
+      }
+
+      if(current?.element.tagName === "template") {
+
+        fragmentChildren.get(current.element)?.push(element);
+      } else {
+
+        current?.element.append(element);
+      }
+
+      if(!VOID_TAGS.has(opening)) {
+
+        open.push({ element, text: "" });
       }
     }
-
-    return null;
   };
 
-  const search = (predicate: (element: FakeElement) => boolean): Nullable<FakeElement> => {
-
-    for(const root of seeded.values()) {
-
-      const found = walk(root, predicate);
-
-      if(found) {
-
-        return found;
-      }
-    }
-
-    return null;
-  };
+  // Depth-first walk from every root, which is how a lookup or a test search reaches an element at any depth.
+  const search = (predicate: (element: FakeElement) => boolean): Nullable<FakeElement> => roots.flatMap((root) => [ root, ...descendantsOf(root) ]).find(predicate) ??
+    null;
 
   const document: FakeDocument = {
 
+    // The focused element while it stands in the page. One the page has since removed holds the focus no longer, as in a browser, where the focus returns to the
+    // document itself, which this double reads as null.
+    get activeElement(): Nullable<FakeElement> {
+
+      return (active && isConnected(active)) ? active : null;
+    },
     addEventListener: (type, listener) => {
 
       recordListener(document, type, listener);
     },
-    createElement: makeElement,
-    getElementById: (id) => seeded.get(id) ?? search((element) => (element.id === id)),
+    createElement: (tag) => makeElement(tag),
+    createElementNS: (namespace, tag) => makeElement(tag, namespace),
+    getElementById: (id) => search((element) => (element.id === id)),
+    querySelector: (selector) => {
 
-    /* The one selector shape the page's own harness uses: a class or a tag. The card mounts against the sidebar's own content wrapper, which the real markup
-     * identifies by class rather than by id, so modelling those two keeps the double honest about what may be reached for.
-     */
-    querySelector: (selector) => search((element) => (element.className.split(" ").includes(selector.replace(".", "")) || (element.tagName === selector))),
+      const compounds = parseSelector(selector);
 
-    /* The one selector shape the page's sidebar repaint sends: every element wearing a class beneath the element carrying an id, in document order. Any other shape
-     * is one the page has no reason to send, so it throws rather than answering a guess.
-     */
+      return search((element) => matchesSelector(element, compounds));
+    },
     querySelectorAll: (selector) => {
 
-      const [ , id, className ] = /^#([^ .]+) \.([^ .]+)$/.exec(selector) ?? [];
+      const compounds = parseSelector(selector);
 
-      if((id === undefined) || (className === undefined)) {
-
-        throw new Error("The fake document models only the \"#id .class\" selector shape, which " + selector + " is not.");
-      }
-
-      const found: FakeElement[] = [];
-
-      // Every descendant of one element, depth first, so the answer keeps document order.
-      const collect = (element: FakeElement): void => {
-
-        for(const child of element.children) {
-
-          if(child.className.split(" ").includes(className)) {
-
-            found.push(child);
-          }
-
-          collect(child);
-        }
-      };
-
-      const root = document.getElementById(id);
-
-      if(root) {
-
-        collect(root);
-      }
-
-      return found;
+      return roots.flatMap((root) => [ root, ...descendantsOf(root) ]).filter((element) => matchesSelector(element, compounds));
     },
     visibilityState: "visible"
   };
 
-  // Seed one element the framework's own markup carries, addressable by id. Local rather than a member of the document, because it describes the fixture rather than
-  // anything a page could ask a real document for.
-  const seed = (id: string): FakeElement => {
-
-    const element = makeElement("div");
-
-    element.id = id;
-    seeded.set(id, element);
-
-    return element;
-  };
-
-  /* The markup Config UI X serves, in the shape index.html declares it: one feature-content row holding the sidebar and the main region side by side, the sidebar
-   * holding its own content wrapper with the device links' container inside it, and the main region holding the three framework content regions in order. The
-   * NESTING is what matters here rather than the completeness - the launcher and a takeover's container mount by inserting beside these elements, and the sidebar's
-   * repaint finds its device names beneath the container, so a flat set of roots would let an insertion or a lookup pass that a real document would refuse.
+  /* The markup Config UI X serves this page, in the parts the page reads: the settings page block, holding the plugin's sidebar column with the launcher above
+   * the framework's sidebar and the main region with the framework's content regions in order, and the Add Device card's template. The nesting is the file's own,
+   * which is what matters here - the launcher sits where the markup puts it, a takeover's container mounts by inserting beside the device-stats region, and the
+   * sidebar's repaint finds its device names beneath their container, so an insertion or a lookup a real document would refuse is refused here too.
    */
-  const row = seed("feature-main-content");
-  const sidebar = seed("sidebar");
-  const sidebarContent = makeElement("div");
-  const devices = makeElement("nav");
-  const main = makeElement("main");
-  const stats = seed("deviceStatsContainer");
-  const searchRegion = seed("search");
-  const options = seed("optionsContainer");
-
-  row.className = "feature-main-content";
-  sidebarContent.className = "sidebar-content";
-  devices.id = "devicesContainer";
-  main.className = "feature-content";
-  sidebarContent.append(devices);
-  sidebar.append(sidebarContent);
-  main.append(stats, searchRegion, options);
-  row.append(sidebar, main);
+  roots.push(parseMarkup("pageFeatureOptions"), parseMarkup("ratgdoDeviceCard"));
 
   return { document, find: search };
 };
