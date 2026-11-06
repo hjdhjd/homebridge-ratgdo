@@ -60,15 +60,15 @@ describe("the MQTT topic catalog", () => {
     assert.deepEqual(labels, SUBSCRIPTION_LABELS, "each subscribed tail carries its own label, which is what a user reads in the client's get and set log lines");
   });
 
-  // The per-opener availability entry is the library's, composed with the opener's nouns, so every plugin in the family states a device's reachability on the same
-  // tail and in the same sentence while this document names the opener. It is compared against the library's own composition rather than a restated sentence, so
-  // the sentence is written in the library alone and only the nouns are written here.
+  // The per-opener availability entry is the library's, composed with the opener as its subject, so every plugin in the family states a device's availability on the
+  // same tail and in the same sentence while this document names the opener. It is compared against the library's own composition rather than a restated sentence, so
+  // the sentence is written in the library alone and only the subject is written here.
   test("carries the library's availability entry in the opener's words", () => {
 
     const { label, publish, topic } = mqttTopics.availability;
 
-    assert.deepEqual({ label, publish, topic }, mqttAvailabilityEntryFor({ reaches: "the opener", subject: "An opener" }),
-      "the availability entry is the library's, composed with the opener as what the plugin reaches and what it declares available");
+    assert.deepEqual({ label, publish, topic }, mqttAvailabilityEntryFor({ subject: "An opener" }),
+      "the availability entry is the library's, composed with the opener as what the plugin declares available");
     assert.ok(publish.includes("An opener is available only when"), "so the document speaks of the opener rather than a generic device");
   });
 });

@@ -61,7 +61,7 @@ The topics and messages that `homebridge-ratgdo` publishes are:
 
 | Topic                | Message Published
 |----------------------|----------------------------------
-| `availability`       | `online` when the plugin can reach the opener, `offline` when it cannot. Retained, so a subscriber attaching later reads the last statement. An opener is available only when this topic and the plugin-level `availability` topic both read `online`.
+| `availability`       | `online` when the plugin can vouch for the state it reports, `offline` when it cannot. Retained, so a subscriber attaching later reads the last statement. An opener is available only when this topic and the plugin-level `availability` topic both read `online`.
 | `dooropenoccupancy`  | `true` when the garage door open indicator occupancy is detected. `false` when the garage door open indicator occupancy event is reset.
 | `garagedoor`         | `closed`, `closing`, `open`, `opening`, or `stopped`, when garage door state changes are detected.
 | `laser`              | `true` when the Ratgdo (ESP32) Disco park assistance laser is activated. `false` otherwise.
