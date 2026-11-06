@@ -26,14 +26,14 @@
 // constructs a feed or an accessory reads against globals that are guaranteed to exist.
 import "homebridge-plugin-utils/polyfills";
 import type { API, HAP, Logging } from "homebridge";
-import type { Clock, HomebridgePluginLogging, MdnsService, MqttClient, Nullable } from "homebridge-plugin-utils";
+import type { Clock, HomebridgePluginLogging, MdnsService, Nullable } from "homebridge-plugin-utils";
 import { ConnectionError, CoverOperation, EncryptionKeyMissingError, EncryptionRequiredError, EspHomeError, HealthState, LockState, PermanentError, disconnectedHealth,
   entityId } from "esphome-client";
 import type { ConnectionHealth, DeviceInfo, EntityId, EspHomeClient, LifecycleEvent, LogEventData, NoiseServerHello, PskResolver, TelemetryEvent } from "esphome-client";
 import { FeatureOptions, formatValueList, onAbort } from "homebridge-plugin-utils";
 import { PLATFORM_NAME, RATGDO_LOG_EVENTS_OPTION, RATGDO_NAME_OPTION } from "./webui/settings.ts";
 import { PLUGIN_NAME, RATGDO_MDNS_SERVICE_TYPE } from "./settings.ts";
-import { TestClock, TestMdnsBrowserFactory, TestMqttClient, capturingLog, expectAt, loadHomebridge, makeService, makeTxtStrings,
+import { TestClock, TestMdnsBrowserFactory, TestMqttClient, TestMqttClientFactory, capturingLog, expectAt, loadHomebridge, makeService, makeTxtStrings,
   watchServerWarnings } from "homebridge-plugin-utils/testing";
 import type { TestHomebridgeApi, TestLogEntry, TestMdnsBrowser, TestPlatformAccessory } from "homebridge-plugin-utils/testing";
 import { featureOptionCategories, featureOptions } from "./options.ts";
@@ -42,7 +42,6 @@ import { RATGDO_LOG_EVENTS } from "./webui/log-events.ts";
 import { RatgdoAccessory } from "./device.ts";
 import type { RatgdoDevice } from "./types.ts";
 import { RatgdoPlatform } from "./platform.ts";
-import type { RatgdoPlatformDefaults } from "./platform.ts";
 import type { RatgdoResolvedConfig } from "./options.ts";
 import type { RatgdoTxtKey } from "./discovery.ts";
 import { RatgdoVariant } from "./types.ts";
@@ -885,9 +884,9 @@ export interface BuildPlatformResult {
  * discovery, admission, the bridge, restore and shutdown through the platform's own code with no socket and no real time. Constructing it starts nothing: discovery
  * begins only once a suite emits didFinishLaunching, and a configuration naming no broker builds no MQTT client.
  *
- * The MQTT double lives on the signal the platform hands its factory, as the client lives on it, so the platform's abort tears the double down too. The double is
- * cast to the client type here, the one cast the MQTT factory needs, and the log and API casts are the ones a platform constructor needs, because the kit's API
- * deliberately omits registerPlatform, user and version.
+ * The MQTT client comes from HBPU's factory double, which answers the MQTT double on the signal the platform hands it exactly as the library's factory answers the
+ * client, so the platform's abort tears the double down too. The log and API casts are the ones a platform constructor needs, because the kit's API deliberately
+ * omits registerPlatform, user and version.
  */
 export function buildPlatform({ mqtt = false, openClient = makeFakeOpenClient(new ConnectionError("No device answers in this suite.", "CONNECT_FAILED")),
   userOptions }: BuildPlatformOptions = {}): BuildPlatformResult {
@@ -896,26 +895,12 @@ export function buildPlatform({ mqtt = false, openClient = makeFakeOpenClient(ne
   const browserFactory = new TestMdnsBrowserFactory();
   const clock = new TestClock();
   const log = capturingLog();
-  const doubles: { mqtt: Nullable<TestMqttClient>; mqttSignal: Nullable<AbortSignal> } = { mqtt: null, mqttSignal: null };
-
-  const mqttFactory: NonNullable<RatgdoPlatformDefaults["mqttFactory"]> = (config, init) => {
-
-    const double = new TestMqttClient({ clock, log: config.log });
-    const signal = init?.signal;
-
-    if(signal) {
-
-      onAbort(signal, () => double.abort(signal.reason));
-    }
-
-    doubles.mqtt = double;
-    doubles.mqttSignal = signal ?? null;
-
-    return double as unknown as MqttClient;
-  };
-
+  const mqttFactory = new TestMqttClientFactory({ clock });
   const config = { options: userOptions, platform: PLATFORM_NAME, ...(mqtt ? { mqttUrl: "mqtt://broker.test:1883" } : {}) };
-  const platform = new RatgdoPlatform(log as unknown as Logging, config, api as unknown as API, { browserFactory, clock, mqttFactory, openClient });
+  const platform = new RatgdoPlatform(log as unknown as Logging, config, api as unknown as API, { browserFactory, clock, mqttFactory: mqttFactory.create, openClient });
+
+  // The platform builds its MQTT client in its constructor and only when the configuration names a broker, so the factory holds that one call by here or none.
+  const mqttCall = mqttFactory.createCalls.at(0);
   const browser = (): TestMdnsBrowser => expectAt(browserFactory.createCalls, browserFactory.createCalls.length - 1, "the browser the platform's discovery built")
     .browser;
 
@@ -931,8 +916,8 @@ export function buildPlatform({ mqtt = false, openClient = makeFakeOpenClient(ne
 
       return browser();
     },
-    mqtt: doubles.mqtt,
-    mqttSignal: doubles.mqttSignal,
+    mqtt: mqttCall?.client ?? null,
+    mqttSignal: mqttCall?.init?.signal ?? null,
     platform
   };
 }
