@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 3.2.0 (2026-11-07)
+  * New feature: you can now add a Ratgdo or Konnected device by its IP address or hostname, for devices autodiscovery can't find. Look for Add Device in the HBR webUI.
+  * New feature: custom HomeKit names. Set a device's name with the Name feature option, and HBR puts it back if it's changed in the Home app, wherever HomeKit allows. Turn on Sync Name instead to use the name from your device's ESPHome configuration. These replace the Log Name feature option, which has been retired...if you used it, set Name to the same value.
+  * Improvement: openers HBR can't reach now show as No Response in HomeKit, instead of their last known state.
+  * Improvement: HBR now retries openers it couldn't connect to every five minutes, so you no longer need to restart Homebridge after fixing an issue like a wrong encryption key.
+  * Improvement: when a command fails to reach your opener, HomeKit now reverts to the opener's actual state.
+  * Improvement: HBR now reconnects automatically when a device's IP address changes, and checks that it's talking to the right device every time it connects.
+  * Improvement: the HBR webUI now groups your devices by type and shows only the feature options each device supports.
+  * Improvement: event logging is now one list. Choose which events HBR logs with the Log Events feature option, globally or for a single device. Your existing logging settings carry over automatically.
+  * Improvement: the Disco vehicle sensors are now one list. Choose which sensors HBR adds with the Vehicle Sensors feature option, globally or for a single device. Your existing vehicle sensor settings carry over automatically.
+  * Improvement: the HBR webUI now hides your encryption keys, with a button to show one when you need to check it.
+  * Improvement: connection problems that fix themselves, like a device that's restarting, are now logged as warnings instead of errors.
+  * Improvement: MQTT now reports whether HBR can reach each opener, including when Homebridge shuts down, and only publishes for the HomeKit features you've enabled.
+  * Fix: Konnected openers no longer show a motion sensor, since Konnected devices can't detect motion.
+  * Fix: the door automation dimmer now shows as off when the garage door is closed.
+  * Fix: obstruction detection is now accurate at startup, and obstructions now correctly update the garage door's state in HomeKit.
+  * Housekeeping.
+
 ## 3.1.0 (2026-08-16)
   * New feature: live device status in the HBR webUI. The settings panel now shows each of your Ratgdo and Konnected devices and its connection status in real time, so you can see at a glance whether HBR can reach your devices, as well as individual statuses of the garage door state.
   * Fix: MQTT publish failures are now contained and reported instead of escaping as unhandled errors.
