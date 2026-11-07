@@ -178,6 +178,15 @@ describe("RatgdoAccessory naming", () => {
       }
     });
 
+    test("clearing a custom Name moves the accessory's display name back to the opener's own name at the restart, while HomeKit keeps the names it left", () => {
+
+      const { accessory } = restart(buildOpener({ options: [customNameEntry("Workshop")] }), []);
+
+      assert.equal(accessory.displayName, "Test Ratgdo", "the display name the cache and the settings sidebar read follows the opener's own name");
+      assert.equal(getServiceName(infoOf(accessory)), "Workshop", "the information service keeps the name it carries, since the user now owns it");
+      assert.equal(getServiceName(partOf(accessory, LIGHT)), "Workshop", "and so does every part");
+    });
+
     test("with Sync Name on and no custom Name, the opener's own name owns: a restart puts it back over a Home app rename, and a later rename is put back at once",
       async () => {
 

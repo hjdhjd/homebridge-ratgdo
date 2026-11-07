@@ -536,10 +536,11 @@ export class RatgdoAccessory implements Disposable {
    * from immutable RatgdoDevice fields populated at discovery time), so we write them exactly once here. The Model and FirmwareRevision characteristics route
    * through refreshInfo(), which the platform also calls on every session the opener's client begins.
    *
-   * While the plugin owns the opener's name, the accessory itself is named with it: HBPU's name helper writes the display names and the information service's
-   * ConfiguredName where they differ, so a restored accessory takes the owned name and a fresh one gains the ConfiguredName it is born without. The platform's save
-   * after construction carries the write. A Home app rename of the opener's own tile lands on the door service's ConfiguredName rather than here, so the door is named
-   * and watched as a part. With the user owning the name, the accessory keeps the name it carries.
+   * The accessory itself is named through HBPU's name helper, which holds its display names to the opener's displayed name whoever owns the HomeKit name, so the
+   * accessory cache and the settings sidebar name the opener as the log does. While the plugin owns the name, the helper also writes the information service's
+   * ConfiguredName where it differs, so a restored accessory takes the owned name and a fresh one gains the ConfiguredName it is born without. With the user owning the
+   * name, the information service keeps the name it carries. The platform's save after construction carries any write. A Home app rename of the opener's own tile
+   * lands on the door service's ConfiguredName rather than here, so the door is named and watched as a part.
    */
   private configureInfo(): void {
 
@@ -570,14 +571,16 @@ export class RatgdoAccessory implements Disposable {
   }
 
   /* Refresh the opener's names once a session has refreshed its own name. The displayed name is composed afresh, so the log follows a device renamed in ESPHome, and
-   * while the plugin owns the name the accessory and every part are re-stated to it. With a custom Name the owned name never moves with the device, so the re-state
-   * writes nothing, and with the user owning the name nothing is re-stated, so only a rename on the device under Sync Name writes anything here. Every name is
-   * re-stated whatever the others answer, so the answers are collected before they are read, and the answer is whether any wrote, which is what the platform saves
-   * the accessory on. Every watch reads the owned name afresh, so a rename in the Home app after this one is put back to the refreshed name.
+   * the accessory's display names follow it too, whoever owns the HomeKit name. While the plugin owns the name the information service and every part are re-stated
+   * as well. With a custom Name the displayed name never moves with the device, so the re-state writes nothing; with the user owning the name, a rename on the device
+   * moves the display names alone, and under Sync Name it moves every name. Every name is re-stated whatever the others answer, so the answers are collected before
+   * they are read, and the answer is whether any wrote, which is what the platform saves the accessory on. Every watch reads the owned name afresh, so a rename in
+   * the Home app after this one is put back to the refreshed name.
    *
-   * The rename line is logged only when the accessory's display name moved: the plugin alone writes that name and a Home app rename never touches it, so a move is the
-   * device's own name changing under Sync Name, while a session that moves nothing, or a re-state over a Home app rename, logs nothing. The line names the name HomeKit
-   * carries after the write, the device's name as HomeKit's naming rule cleans it.
+   * The rename line is logged only when the plugin owns the name and the accessory's display name moved: the plugin alone writes that name and a Home app rename
+   * never touches it, so a move under ownership is the device's own name changing under Sync Name, while a session that moves nothing, a re-state over a Home app
+   * rename, or a move with the user owning the name, which changes nothing HomeKit shows, logs nothing. The line names the name HomeKit carries after the write, the
+   * device's name as HomeKit's naming rule cleans it.
    *
    * @returns Whether the re-state wrote anything.
    */
@@ -589,7 +592,7 @@ export class RatgdoAccessory implements Disposable {
 
     const wrote = [ this.restateAccessory(), ...this.parts().map(([ part, service ]) => this.restatePart(part, service)) ].includes(true);
 
-    if(this.accessory.displayName !== previousName) {
+    if((this.ownedHomeKitName !== null) && (this.accessory.displayName !== previousName)) {
 
       this.log.info("Detected a name change on the device; updating the HomeKit name to %s.", this.accessory.displayName);
     }
@@ -2256,14 +2259,13 @@ export class RatgdoAccessory implements Disposable {
     return this.name + PART_SUFFIXES[part];
   }
 
-  /* Re-state the name the plugin owns for the accessory itself, answering whether it wrote. HBPU's name helper writes the display names and the information service's
-   * names where they differ, so an accessory already carrying the owned name writes nothing. While the user owns the opener's name there is nothing to re-state.
+  /* Re-state the accessory's own names, answering whether it wrote. HBPU's name helper holds the display names to the opener's displayed name whoever owns the
+   * HomeKit name, so the cache never keeps a custom Name the user has cleared, and while the plugin owns the name it writes the information service's names as well.
+   * Each name is compared before it is written, so an accessory already carrying its names writes nothing.
    */
   private restateAccessory(): boolean {
 
-    const owned = this.ownedHomeKitName;
-
-    return (owned !== null) && setAccessoryName(this.accessory, owned);
+    return setAccessoryName(this.accessory, this.name, { owned: this.ownedHomeKitName !== null });
   }
 
   // Re-state the name the plugin owns for one part, answering whether it wrote, by the same rule the accessory's re-state follows.

@@ -192,6 +192,31 @@ describe("RatgdoPlatform accessory cache", () => {
         "so the session logs no rename, since a write that moves no display name is no change on the device");
     });
 
+  test("with the user owning the name, a session that renames the opener moves the display name and saves, leaving every HomeKit name and logging no rename",
+    async () => {
+
+      const client = makeOpenerClient({ mac: MAC });
+      const built = oneOpener(client);
+      const accessory = await admitOpener(built);
+      const info = serviceOf(accessory, Service.AccessoryInformation);
+      const light = serviceOf(accessory, Service.Lightbulb);
+
+      built.clock.advance(ACCESSORY_SAVE_WINDOW_MS);
+
+      const afterConstruction = saves(built).length;
+
+      Object.assign(present(client.deviceInfo(), "the opener's device-info record"), { friendlyName: "Workshop" });
+      client.emit("lifecycle", { kind: "disconnect" });
+      client.emit("lifecycle", { encrypted: false, kind: "connect" });
+      built.clock.advance(ACCESSORY_SAVE_WINDOW_MS);
+
+      assert.equal(saves(built).length, afterConstruction + 1, "a session that renames the opener moves the display name the cache holds, so it saves");
+      assert.equal(accessory.displayName, "Workshop", "the accessory's display name follows the opener's new name, as the log does");
+      assert.equal(info.testCharacteristic(Characteristic.ConfiguredName), false, "the information service is still given no ConfiguredName");
+      assert.equal(getServiceName(light), "Garage", "and every part keeps the name it carries, since the user owns it");
+      assert.equal(logCount(built.entries, "info", "Detected a name change on the device"), 0, "so no rename is logged, since nothing HomeKit shows moved");
+    });
+
   test("a device the user disabled is removed from the cache through the persistence helper", async () => {
 
     const built = buildPlatform({ openClient: makeFakeOpenClient(makeOpenerClient({ mac: MAC })), userOptions: ["Disable.Device." + MAC] });
