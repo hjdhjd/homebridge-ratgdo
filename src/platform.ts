@@ -19,7 +19,7 @@ import { featureOptionCategories, featureOptions, normalizeConfig } from "./opti
 import { governingAddress, manualAddressList, runManualAddress, runRetryLoop } from "./manual.ts";
 import type { DialOutcome } from "./manual.ts";
 import type { DiscoveredRatgdo } from "./discovery.ts";
-import { RATGDO_LOG_EVENTS_FAMILY } from "./webui/log-events.ts";
+import { RATGDO_RETIRED_FAMILIES } from "./webui/retired-options.ts";
 import { RatgdoAccessory } from "./device.ts";
 import type { RatgdoDevice } from "./types.ts";
 import type { RatgdoResolvedConfig } from "./options.ts";
@@ -155,11 +155,11 @@ export class RatgdoPlatform implements DynamicPlatformPlugin {
 
     const legacy = normalizeConfig(config);
 
-    /* The engine is built on the boot view of the configured options rather than on the options as written. A configuration still carrying the retired per-event
-     * logging options reads as the one events list they compose into, so an upgrader logs what they logged before, from their first start on, whether or not the
-     * settings page has migrated their configuration yet. Openers sit beneath no controller, so the boot view is the exact translation and no overlay is read.
+    /* The engine is built on the boot view of the configured options rather than on the options as written. A configuration still carrying a retired option reads as
+     * the list that superseded it, through every family RATGDO_RETIRED_FAMILIES names, so an upgrader keeps what they had, from their first start on, whether or not
+     * the settings page has migrated their configuration yet. Openers sit beneath no controller, so the boot view is the exact translation and no overlay is read.
      */
-    const options = [...createRetiredOptions({ categories: featureOptionCategories, families: [RATGDO_LOG_EVENTS_FAMILY], options: featureOptions })
+    const options = [...createRetiredOptions({ categories: featureOptionCategories, families: RATGDO_RETIRED_FAMILIES, options: featureOptions })
       .translate(legacy.options ?? []).configuredOptions];
 
     this.configuredDevices = new Map();

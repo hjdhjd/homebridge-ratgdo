@@ -3,7 +3,7 @@
  * config.test.ts: The webUI's pure platform-configuration interpreter, exercised against the REAL feature-option engine and the REAL option catalog so the assertions
  * bind to the same grammar the plugin's runtime resolves against. Covers every arm of the legacy-settings migration - what migrates, what deletes without migrating,
  * and what declines entirely - plus a round trip proving a migrated configuration runs the platform on the same effective values the legacy one did, the precedence
- * rows for the broker and prefix the library resolves ratgdo's client from, the retired per-event logging options the migration carries into the one events list,
+ * rows for the broker and prefix the library resolves ratgdo's client from, each retired option family the migration carries into the list that superseded it,
  * and the manual-device reads and writes behind the settings page's Add Device card.
  *
  * One discipline binds every claim about a deleted property: a patch carries a deletion as a PRESENT key whose value is undefined, and carries a non-deletion by
@@ -11,12 +11,14 @@
  * Object.hasOwn and absence with its negation - never with a comparison against undefined.
  */
 import { FeatureOptions, createRetiredOptions, displayedName, formatValueList, mqttConnectionSettings } from "homebridge-plugin-utils";
-import { RATGDO_LOG_EVENTS, RATGDO_LOG_EVENTS_FAMILY } from "./webui/log-events.ts";
+import { RATGDO_LOG_EVENTS_OPTION, RATGDO_VEHICLE_SENSORS_OPTION } from "./webui/settings.ts";
 import { describe, test } from "node:test";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import type { Nullable } from "homebridge-plugin-utils";
-import { RATGDO_LOG_EVENTS_OPTION } from "./webui/settings.ts";
+import { RATGDO_LOG_EVENTS } from "./webui/log-events.ts";
 import { RATGDO_MQTT_TOPIC } from "./settings.ts";
+import { RATGDO_RETIRED_FAMILIES } from "./webui/retired-options.ts";
+import { RATGDO_VEHICLE_SENSORS } from "./webui/vehicle-sensors.ts";
 import assert from "node:assert/strict";
 import { makeRatgdoConfig } from "./webui/ratgdo-config.ts";
 
@@ -32,6 +34,10 @@ const UNRELATED_ENTRY = "Disable.Light.1234567890AB";
 // formatter.
 const config = makeRatgdoConfig({ FeatureOptions, catalog: { categories: featureOptionCategories, options: featureOptions }, createRetiredOptions, displayedName,
   formatValueList });
+
+// The platform's boot view of a configuration, built as the platform builds it, over every retired family.
+const bootView = (options: string[]): string[] => [...createRetiredOptions({ categories: featureOptionCategories, families: RATGDO_RETIRED_FAMILIES,
+  options: featureOptions }).translate(options).configuredOptions];
 
 // Every entry in an options array that addresses a given option, case-insensitively, in either the enabled or the disabled form.
 function entriesFor(options: string[] | undefined, option: string): string[] {
@@ -261,10 +267,6 @@ describe("the retired event logging options", () => {
   const loggedAt = (options: readonly string[], device: string): readonly string[] => new FeatureOptions(featureOptionCategories, featureOptions, [...options])
     .valueList({ defaultWhenUnset: true, device, domain: EVERY_EVENT, option: RATGDO_LOG_EVENTS_OPTION });
 
-  // The platform's boot view of a configuration, built as the platform builds it, over the one retired family.
-  const bootView = (options: string[]): readonly string[] => createRetiredOptions({ categories: featureOptionCategories, families: [RATGDO_LOG_EVENTS_FAMILY],
-    options: featureOptions }).translate(options).configuredOptions;
-
   const rows: { entries: string[]; name: string; opener: string[]; other: string[]; retired: string[] }[] = [
 
     { entries: [ UNRELATED_ENTRY, "Enable.Log.Events=Opener,Motion,Obstruction,VehiclePresence" ], name: "a global narrowing becomes the global list",
@@ -308,6 +310,68 @@ describe("the retired event logging options", () => {
     assert.deepEqual(patch.options, [ "Enable.Log.Events=Opener,Motion,Obstruction,VehiclePresence", "Enable.Log.Debug" ],
       "the retired option becomes the list entry, and the debug property composes its entry onto the rewritten configuration");
     assert.ok(Object.hasOwn(patch, "debug"), "and the property is carried by the patch for deletion");
+  });
+});
+
+/* The retired per-sensor vehicle options, carried into the one vehicle sensor list through HBPU's retired options and read back through the REAL engine the way the
+ * accessory reads its sensors: the list at a device's MAC and at the global level, against every sensor the Disco board drives. Each row states a configuration in the
+ * retired grammar, the entries the migration writes in its place, and the sensors the opener and every other device carried under the retired grammar, and it reads
+ * that the migrated configuration and the platform's boot view of the retired one both carry exactly those sensors, so a HomeKit tile a user relies on is never lost.
+ */
+describe("the retired vehicle sensor options", () => {
+
+  // The opener a row narrows or widens, and a second device that inherits the global selection.
+  const OPENER = "AABBCCDDEEFF";
+  const OTHER = "112233445566";
+
+  // Every vehicle sensor, in the order the list reads them back.
+  const EVERY_SENSOR: string[] = RATGDO_VEHICLE_SENSORS.map(({ value }) => value);
+
+  // The sensors a device carries under a configuration in the current grammar, read as the accessory reads them.
+  const sensorsAt = (options: readonly string[], device: string): readonly string[] => new FeatureOptions(featureOptionCategories, featureOptions, [...options])
+    .valueList({ defaultWhenUnset: true, device, option: RATGDO_VEHICLE_SENSORS_OPTION });
+
+  const rows: { entries: string[]; name: string; opener: string[]; other: string[]; retired: string[] }[] = [
+
+    { entries: [ UNRELATED_ENTRY, "Enable.Disco.VehicleSensors=Presence" ], name: "a sensor enabled globally becomes the global list", opener: ["Presence"],
+      other: ["Presence"], retired: [ "Enable.Disco.OccupancySensor.Vehicle.Presence", UNRELATED_ENTRY ] },
+    { entries: ["Enable.Disco.VehicleSensors." + OPENER + "=Presence"], name: "a sensor enabled on a device becomes that device's list alone", opener: ["Presence"],
+      other: [], retired: ["Enable.Disco.OccupancySensor.Vehicle.Presence." + OPENER] },
+    { entries: ["Enable.Disco.VehicleSensors=*"], name: "every sensor enabled globally becomes the list of every sensor", opener: EVERY_SENSOR, other: EVERY_SENSOR,
+      retired: RATGDO_VEHICLE_SENSORS.map(({ retired }) => "Enable." + retired) },
+    { entries: [ "Enable.Disco.VehicleSensors=Presence", "Disable.Disco.VehicleSensors." + OPENER ],
+      name: "a sensor turned off on a device beneath a global one turns that device's list off", opener: [], other: ["Presence"],
+      retired: [ "Enable.Disco.OccupancySensor.Vehicle.Presence", "Disable.Disco.OccupancySensor.Vehicle.Presence." + OPENER ] },
+    { entries: [ "Enable.Disco.VehicleSensors=Arriving", "Enable.Disco.VehicleSensors." + OPENER + "=Presence,Arriving" ],
+      name: "a device with a sensor beyond the global selection keeps both", opener: [ "Presence", "Arriving" ], other: ["Arriving"],
+      retired: [ "Enable.Disco.ContactSensor.Vehicle.Arriving", "Enable.Disco.OccupancySensor.Vehicle.Presence." + OPENER ] },
+    { entries: [], name: "a sensor turned off globally restates the default, so its entry leaves and nothing is written in its place", opener: [], other: [],
+      retired: ["Disable.Disco.OccupancySensor.Vehicle.Presence"] }
+  ];
+
+  for(const { entries, name, opener, other, retired } of rows) {
+
+    test(name, () => {
+
+      const patch = config.migrate({ options: retired });
+
+      assert.ok(patch, "a configuration carrying a retired vehicle sensor option produces a patch");
+      assert.deepEqual(patch.options, entries, "the retired entries leave, and the list entries stating each scope's selection follow the entries that survive");
+      assert.deepEqual(sensorsAt(entries, OPENER), opener, "the opener carries the sensors it carried under the retired options");
+      assert.deepEqual(sensorsAt(entries, OTHER), other, "and so does a device inheriting the global selection");
+      assert.deepEqual([ sensorsAt(bootView(retired), OPENER), sensorsAt(bootView(retired), OTHER) ], [ opener, other ],
+        "and the platform's boot view of the unmigrated configuration carries the same, so an upgrader who never opens the page loses no sensor");
+      assert.equal(config.migrate({ options: patch.options }), null, "and a second pass over the migrated configuration writes nothing");
+    });
+  }
+
+  test("retired logging and vehicle sensor options migrate in one patch", () => {
+
+    const patch = config.migrate({ options: [ "Disable.Log.Light", "Enable.Disco.ContactSensor.Vehicle.Leaving" ] });
+
+    assert.ok(patch, "the configuration produces a patch");
+    assert.deepEqual(patch.options, [ "Enable.Log.Events=Opener,Motion,Obstruction,VehiclePresence", "Enable.Disco.VehicleSensors=Leaving" ],
+      "each retired family composes the list that superseded it");
   });
 });
 

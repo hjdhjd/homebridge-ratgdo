@@ -13,7 +13,7 @@
 import { MQTT_GET_SUFFIX, MQTT_SET_SUFFIX } from "homebridge-plugin-utils";
 import type { TestMqttClient, TestMqttPublish } from "homebridge-plugin-utils/testing";
 import { buildRatgdoAccessory, makeBinarySensorEvent, makeCoverEvent, makeKonnectedInitialState, makeLightEvent, makeLockEvent,
-  makeRatgdoInitialState, makeSwitchEvent } from "./testing.helpers.ts";
+  makeRatgdoInitialState, makeSwitchEvent, vehicleSensorsEntry } from "./testing.helpers.ts";
 import { describe, test } from "node:test";
 import { LockState } from "esphome-client";
 import { RATGDO_MOTION_DURATION } from "./webui/settings.ts";
@@ -452,7 +452,7 @@ describe("RatgdoAccessory MQTT configuration", () => {
     test("adds the Disco laser, LED, and vehicle presence topics when their options are enabled", () => {
 
       const { mqtt } = buildRatgdoAccessory({ initialState: makeRatgdoInitialState([ makeSwitchEvent("laser", true), makeBinarySensorEvent("vehicle_detected", true) ]),
-        mqtt: true, userOptions: [ "Enable.Disco.Switch.Laser", "Enable.Disco.Switch.Led", "Enable.Disco.OccupancySensor.Vehicle.Presence" ] });
+        mqtt: true, userOptions: [ "Enable.Disco.Switch.Laser", "Enable.Disco.Switch.Led", vehicleSensorsEntry("Presence") ] });
 
       assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
 
@@ -526,8 +526,7 @@ describe("RatgdoAccessory MQTT configuration", () => {
 
     test("never restates the momentary motion and vehicle arriving and leaving events, even mid-event", () => {
 
-      const { mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true, userOptions: [ "Enable.Disco.ContactSensor.Vehicle.Arriving",
-        "Enable.Disco.ContactSensor.Vehicle.Leaving" ] });
+      const { mqtt, ratgdo } = buildRatgdoAccessory({ mqtt: true, userOptions: [vehicleSensorsEntry("Arriving", "Leaving")] });
 
       assert.ok(mqtt, "the MQTT double is attached when mqtt is enabled");
 

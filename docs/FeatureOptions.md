@@ -52,10 +52,10 @@ Options whose key ends in `=<value>` take a value - replace `=<value>` with your
 | Option                                                               | Description
 |----------------------------------------------------------------------|-------------------------------------------------------------
 | <A NAME="Device"></A>`Device`                                        | Make this device available in HomeKit. **(default: enabled)**.<BR>This option may be applied globally or on individual devices.
-| <A NAME="Device.Name"></A>`Device.Name=<value>`                      | Custom HomeKit name for this device and its parts. It always applies, so a rename in the Home app yields to it wherever HomeKit allows. **(default: none)**.
+| <A NAME="Device.Name"></A>`Device.Name=<value>`                      | Custom HomeKit name for this device and its parts. It always applies, so a rename in the Home app yields to it wherever HomeKit allows. **(default: disabled, none when enabled)**.
 | <A NAME="Device.SyncName"></A>`Device.SyncName`                      | Synchronize the ESPHome name of this device and its parts with HomeKit. A rename in the Home app yields to it wherever HomeKit allows. A custom Name takes precedence. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
-| <A NAME="Device.Encryption.Key"></A>`Device.Encryption.Key=<value>`  | Base64-encoded encryption key to use for the ESPHome API as specified in your YAML configuration. **(default: none)**.<BR>This option may be applied globally or on individual devices.
-| <A NAME="Device.Address"></A>`Device.Address=<value>`                | Hostnames or IP addresses of devices to connect to directly, for a device autodiscovery cannot reach or should not choose the address for. **(default: none)**.<BR>This option may only be applied globally.
+| <A NAME="Device.Encryption.Key"></A>`Device.Encryption.Key=<value>`  | Base64-encoded encryption key to use for the ESPHome API as specified in your YAML configuration. **(default: disabled, none when enabled)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Device.Address"></A>`Device.Address=<value>`                | Hostnames or IP addresses of devices to connect to directly, for a device autodiscovery cannot reach or should not choose the address for. **(default: disabled, none when enabled)**.<BR>This option may only be applied globally.
 
 #### <A NAME="log"></A>Logging
 
@@ -94,19 +94,17 @@ Options whose key ends in `=<value>` take a value - replace `=<value>` with your
 
 | Option                                         | Description
 |------------------------------------------------|-------------------------------------------------------------
-| <A NAME="Mqtt.Url"></A>`Mqtt.Url=<value>`      | URL of the MQTT broker to connect to (e.g. mqtt://1.2.3.4). **(default: none)**.<BR>This option may only be applied globally.
+| <A NAME="Mqtt.Url"></A>`Mqtt.Url=<value>`      | URL of the MQTT broker to connect to (e.g. mqtt://1.2.3.4). **(default: disabled, none when enabled)**.<BR>This option may only be applied globally.
 | <A NAME="Mqtt.Topic"></A>`Mqtt.Topic=<value>`  | Topic prefix for published and subscribed MQTT messages. **(default: ratgdo)**.<BR>This option may only be applied globally.
 
 #### <A NAME="disco"></A>Ratgdo (ESP32) Disco device-specific
 
-| Option                                                                                         | Description
-|------------------------------------------------------------------------------------------------|-------------------------------------------------------------
-| <A NAME="Disco.Battery"></A>`Disco.Battery`                                                    | Show the state of the backup battery in HomeKit. This requires ensuring the Ratgdo (ESP32) Disco is connected directly to the backup battery. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
-| <A NAME="Disco.OccupancySensor.Vehicle.Presence"></A>`Disco.OccupancySensor.Vehicle.Presence`  | Add an occupancy sensor accessory for vehicle presence detection. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
-| <A NAME="Disco.ContactSensor.Vehicle.Arriving"></A>`Disco.ContactSensor.Vehicle.Arriving`      | Add a contact sensor accessory for vehicle arrival. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
-| <A NAME="Disco.ContactSensor.Vehicle.Leaving"></A>`Disco.ContactSensor.Vehicle.Leaving`        | Add a contact sensor accessory for vehicle departure. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
-| <A NAME="Disco.Switch.Laser"></A>`Disco.Switch.Laser`                                          | Add a switch accessory to control the park assistance laser feature. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
-| <A NAME="Disco.Switch.Led"></A>`Disco.Switch.Led`                                              | Add a switch accessory to control the LED setting. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
+| Option                                                             | Description
+|--------------------------------------------------------------------|-------------------------------------------------------------
+| <A NAME="Disco.Battery"></A>`Disco.Battery`                        | Show the state of the backup battery in HomeKit. This requires ensuring the Ratgdo (ESP32) Disco is connected directly to the backup battery. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Disco.VehicleSensors"></A>`Disco.VehicleSensors=<value>`  | Add sensor accessories for vehicle detection: an occupancy sensor for vehicle presence, and contact sensors for vehicle arrival and departure. Every sensor is included by default; select specific sensors to add only those. Choices: `Presence`, `Arriving`, `Leaving`. **(default: disabled, all when enabled)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Disco.Switch.Laser"></A>`Disco.Switch.Laser`              | Add a switch accessory to control the park assistance laser feature. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
+| <A NAME="Disco.Switch.Led"></A>`Disco.Switch.Led`                  | Add a switch accessory to control the LED setting. **(default: disabled)**.<BR>This option may be applied globally or on individual devices.
 
 #### <A NAME="konnected"></A>Konnected device-specific
 

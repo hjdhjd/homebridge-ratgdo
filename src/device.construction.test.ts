@@ -9,7 +9,7 @@
  * at all) is asserted here through the default and a representative disable; the full hints derivation is netted in device.hints.test.ts.
  */
 import { Characteristic, Service, buildRatgdoAccessory, makeBinarySensorEvent, makeCoverEvent, makeKonnectedInitialState, makeLightEvent, makeLockEvent,
-  makeRatgdoInitialState } from "./testing.helpers.ts";
+  makeRatgdoInitialState, vehicleSensorsEntry } from "./testing.helpers.ts";
 import { CoverOperation, LockState } from "esphome-client";
 import { RatgdoService, RatgdoVariant } from "./types.ts";
 import { describe, test } from "node:test";
@@ -217,7 +217,7 @@ describe("RatgdoAccessory construction", () => {
       const { accessory } = buildRatgdoAccessory({
 
         initialState: makeRatgdoInitialState([makeBinarySensorEvent("vehicle_detected", true)]),
-        userOptions: ["Enable.Disco.OccupancySensor.Vehicle.Presence"]
+        userOptions: [vehicleSensorsEntry("Presence")]
       });
       const presence = accessory.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_DISCO_VEHICLE_PRESENCE);
 
@@ -227,7 +227,7 @@ describe("RatgdoAccessory construction", () => {
 
     test("is born clear when no vehicle is present in the initial snapshot", () => {
 
-      const { accessory } = buildRatgdoAccessory({ userOptions: ["Enable.Disco.OccupancySensor.Vehicle.Presence"] });
+      const { accessory } = buildRatgdoAccessory({ userOptions: [vehicleSensorsEntry("Presence")] });
       const presence = accessory.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_DISCO_VEHICLE_PRESENCE);
 
       assert.equal(presence?.getCharacteristic(Characteristic.OccupancyDetected).value, Characteristic.OccupancyDetected.OCCUPANCY_NOT_DETECTED,

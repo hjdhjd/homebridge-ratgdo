@@ -8,7 +8,7 @@
  * same "only act on a real transition" contract, so every concern is netted with a happy-path transition, an explicit unchanged-state no-op, and - where the branch
  * logs - a feature-gated logging negative. The accessory is built with mqtt:true throughout so the recording MQTT double captures every publish the transitions emit.
  */
-import { Characteristic, Service, buildRatgdoAccessory, logEventsWithout, makeKonnectedInitialState } from "./testing.helpers.ts";
+import { Characteristic, Service, buildRatgdoAccessory, logEventsWithout, makeKonnectedInitialState, vehicleSensorsEntry } from "./testing.helpers.ts";
 import { RatgdoService, RatgdoVariant } from "./types.ts";
 import { describe, test } from "node:test";
 import { formatLogEntry, loggedAt } from "homebridge-plugin-utils/testing";
@@ -18,7 +18,7 @@ describe("RatgdoAccessory.updateState() vehicle, light, switch, and battery tele
 
   // Every Disco vehicle feature defaults off, so every vehicle test enables them all together; this keeps the subtyped services present regardless of which event
   // a given test drives.
-  const vehicleOptions = [ "Enable.Disco.ContactSensor.Vehicle.Arriving", "Enable.Disco.ContactSensor.Vehicle.Leaving", "Enable.Disco.OccupancySensor.Vehicle.Presence" ];
+  const vehicleOptions = [vehicleSensorsEntry()];
 
   describe("the Disco vehicle arriving contact sensor", () => {
 

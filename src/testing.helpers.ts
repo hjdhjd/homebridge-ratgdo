@@ -31,7 +31,7 @@ import { ConnectionError, CoverOperation, EncryptionKeyMissingError, EncryptionR
   entityId } from "esphome-client";
 import type { ConnectionHealth, DeviceInfo, EntityId, EspHomeClient, LifecycleEvent, LogEventData, NoiseServerHello, PskResolver, TelemetryEvent } from "esphome-client";
 import { FeatureOptions, formatValueList, onAbort } from "homebridge-plugin-utils";
-import { PLATFORM_NAME, RATGDO_LOG_EVENTS_OPTION, RATGDO_NAME_OPTION } from "./webui/settings.ts";
+import { PLATFORM_NAME, RATGDO_LOG_EVENTS_OPTION, RATGDO_NAME_OPTION, RATGDO_VEHICLE_SENSORS_OPTION } from "./webui/settings.ts";
 import { PLUGIN_NAME, RATGDO_MDNS_SERVICE_TYPE } from "./settings.ts";
 import { TestClock, TestMdnsBrowserFactory, TestMqttClient, TestMqttClientFactory, capturingLog, expectAt, loadHomebridge, makeService, makeTxtStrings,
   watchServerWarnings } from "homebridge-plugin-utils/testing";
@@ -45,6 +45,7 @@ import { RatgdoPlatform } from "./platform.ts";
 import type { RatgdoResolvedConfig } from "./options.ts";
 import type { RatgdoTxtKey } from "./discovery.ts";
 import { RatgdoVariant } from "./types.ts";
+import type { RatgdoVehicleSensor } from "./webui/vehicle-sensors.ts";
 import { mock } from "node:test";
 
 // The Homebridge runtime every suite runs on, loaded once from this repository's tree: the hap-nodejs copy and the PlatformAccessory class Homebridge itself loads
@@ -568,6 +569,19 @@ export function customNameEntry(name: string, mac = "AABBCCDDEEFF"): string {
 export function logEventsWithout(...omitted: string[]): string {
 
   return "Enable." + RATGDO_LOG_EVENTS_OPTION + "=" + formatValueList(RATGDO_LOG_EVENTS.map(({ value }) => value).filter((value) => !omitted.includes(value)));
+}
+
+/**
+ * Compose the global vehicle sensor list entry that selects the sensors named, spelled the way the options editor writes it. With none named, the list is enabled with
+ * nothing stored, which reads as its default, every sensor.
+ *
+ * @param sensors - The sensors the list selects, by the value the list stores for each.
+ *
+ * @returns the feature-option string a configuration carries for that selection.
+ */
+export function vehicleSensorsEntry(...sensors: RatgdoVehicleSensor[]): string {
+
+  return "Enable." + RATGDO_VEHICLE_SENSORS_OPTION + (sensors.length ? "=" + formatValueList(sensors) : "");
 }
 
 /**

@@ -11,13 +11,14 @@ import { MQTT_AVAILABILITY_OFFLINE, MQTT_AVAILABILITY_ONLINE, TimerRegistry, acq
   prefixedLog, resolveNameOverride, setAccessoryName, setServiceName, validCharacteristic, validService, watchServiceName } from "homebridge-plugin-utils";
 import { RATGDO_ENTITIES, idFor } from "./entities.ts";
 import { RATGDO_KONNECTED_PCW_DURATION, RATGDO_OCCUPANCY_DURATION, RATGDO_UI_REVERT_DELAY } from "./settings.ts";
-import { RATGDO_LOG_EVENTS_OPTION, RATGDO_MOTION_DURATION, RATGDO_NAME_OPTION } from "./webui/settings.ts";
+import { RATGDO_LOG_EVENTS_OPTION, RATGDO_MOTION_DURATION, RATGDO_NAME_OPTION, RATGDO_VEHICLE_SENSORS_OPTION } from "./webui/settings.ts";
 import { RatgdoService, RatgdoVariant } from "./types.ts";
 import { RATGDO_LOG_EVENTS } from "./webui/log-events.ts";
 import { RATGDO_VARIANT_LABELS } from "./webui/variants.ts";
 import type { RatgdoEntityRef } from "./entities.ts";
 import type { RatgdoLogEvent } from "./webui/log-events.ts";
 import type { RatgdoPlatform } from "./platform.ts";
+import type { RatgdoVehicleSensor } from "./webui/vehicle-sensors.ts";
 import { mqttTopics } from "./mqtt.ts";
 import { optionFitsVariant } from "./options.ts";
 
@@ -294,9 +295,7 @@ export class RatgdoAccessory implements Disposable {
     this.configureDiscoBattery();
     this.configureDiscoLaserSwitch();
     this.configureDiscoLedSwitch();
-    this.configureDiscoVehicleArrivingContactSensor();
-    this.configureDiscoVehicleLeavingContactSensor();
-    this.configureDiscoVehiclePresenceOccupancySensor();
+    this.configureDiscoVehicleSensors();
 
     // Configure Konnected-specific features.
     this.configureKonnectedPcwSwitch();
@@ -476,6 +475,12 @@ export class RatgdoAccessory implements Disposable {
       option: RATGDO_LOG_EVENTS_OPTION });
     const logs = (event: RatgdoLogEvent): boolean => loggedEvents.includes(event);
 
+    // The vehicle sensors this opener carries, read once from the one list, against the sensors its catalog entry declares inline. A list enabled with nothing stored
+    // reads as its default, every sensor, and an opener of another variant carries none, whatever the configuration says.
+    const vehicleSensors = optionFitsVariant(RATGDO_VEHICLE_SENSORS_OPTION, this.device.variant) ?
+      featureOptions.valueList({ defaultWhenUnset: true, device: this.device.mac, option: RATGDO_VEHICLE_SENSORS_OPTION }) : [];
+    const carries = (sensor: RatgdoVehicleSensor): boolean => vehicleSensors.includes(sensor);
+
     return {
 
       automationDimmer: this.hasFeature("Opener.Dimmer"),
@@ -483,9 +488,9 @@ export class RatgdoAccessory implements Disposable {
       discoBattery: this.hasFeature("Disco.Battery"),
       discoLaserSwitch: this.hasFeature("Disco.Switch.Laser"),
       discoLedSwitch: this.hasFeature("Disco.Switch.Led"),
-      discoVehicleArriving: this.hasFeature("Disco.ContactSensor.Vehicle.Arriving"),
-      discoVehicleLeaving: this.hasFeature("Disco.ContactSensor.Vehicle.Leaving"),
-      discoVehiclePresence: this.hasFeature("Disco.OccupancySensor.Vehicle.Presence"),
+      discoVehicleArriving: carries("Arriving"),
+      discoVehicleLeaving: carries("Leaving"),
+      discoVehiclePresence: carries("Presence"),
       doorOpenOccupancyDuration: featureOptions.getInteger("Opener.OccupancySensor.Duration", this.device.mac) ?? RATGDO_OCCUPANCY_DURATION,
       doorOpenOccupancySensor: this.hasFeature("Opener.OccupancySensor"),
       konnectedPcwSwitch: this.hasFeature("Konnected.Switch.Pcw"),
@@ -1109,10 +1114,17 @@ export class RatgdoAccessory implements Disposable {
     return true;
   }
 
+  // Configure the vehicle sensors the Disco board drives. The one list selects every one of them, so its setting is reported once, ahead of the sensors it creates.
+  private configureDiscoVehicleSensors(): void {
+
+    this.logFeature(RATGDO_VEHICLE_SENSORS_OPTION, "Ratgdo (ESP32) Disco vehicle sensors");
+    this.configureDiscoVehicleArrivingContactSensor();
+    this.configureDiscoVehicleLeavingContactSensor();
+    this.configureDiscoVehiclePresenceOccupancySensor();
+  }
+
   // Configure the vehicle arriving contact sensor for HomeKit.
   private configureDiscoVehicleArrivingContactSensor(): boolean {
-
-    this.logFeature("Disco.ContactSensor.Vehicle.Arriving", "Ratgdo (ESP32) Disco vehicle arriving contact sensor");
 
     return this.configureSensor({
 
@@ -1128,8 +1140,6 @@ export class RatgdoAccessory implements Disposable {
   // Configure the vehicle leaving contact sensor for HomeKit.
   private configureDiscoVehicleLeavingContactSensor(): boolean {
 
-    this.logFeature("Disco.ContactSensor.Vehicle.Leaving", "Ratgdo (ESP32) Disco vehicle leaving contact sensor");
-
     return this.configureSensor({
 
       cacheKey: RatgdoService.CONTACT_DISCO_VEHICLE_LEAVING,
@@ -1143,8 +1153,6 @@ export class RatgdoAccessory implements Disposable {
 
   // Configure the vehicle presence occupancy sensor for HomeKit.
   private configureDiscoVehiclePresenceOccupancySensor(): boolean {
-
-    this.logFeature("Disco.OccupancySensor.Vehicle.Presence", "Ratgdo (ESP32) Disco vehicle presence occupancy sensor");
 
     return this.configureSensor({
 

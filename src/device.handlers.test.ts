@@ -11,7 +11,7 @@
  * read here too, held true on every sensor service with no read handler of its own.
  */
 import { Characteristic, Service, buildRatgdoAccessory, makeCoverEvent, makeKonnectedInitialState, makeLightEvent, makeLockEvent, makeRatgdoInitialState,
-  makeSwitchEvent } from "./testing.helpers.ts";
+  makeSwitchEvent, vehicleSensorsEntry } from "./testing.helpers.ts";
 import { LockCommand, LockState } from "esphome-client";
 import { RatgdoService, RatgdoVariant } from "./types.ts";
 import { describe, test } from "node:test";
@@ -26,11 +26,9 @@ import assert from "node:assert/strict";
 const ALL_RATGDO_OPTIONS = [
 
   "Enable.Disco.Battery",
-  "Enable.Disco.ContactSensor.Vehicle.Arriving",
-  "Enable.Disco.ContactSensor.Vehicle.Leaving",
-  "Enable.Disco.OccupancySensor.Vehicle.Presence",
   "Enable.Disco.Switch.Laser",
   "Enable.Disco.Switch.Led",
+  vehicleSensorsEntry(),
   "Enable.Motion.OccupancySensor",
   "Enable.Opener.Dimmer",
   "Enable.Opener.OccupancySensor",

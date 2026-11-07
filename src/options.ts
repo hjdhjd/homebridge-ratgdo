@@ -3,8 +3,9 @@
  * options.ts: Feature option and type definitions for Ratgdo.
  */
 import { ALL_CHOICES, buildFixedScopeDescribers, expandOption, mqttFeatureOptions, parseValueList } from "homebridge-plugin-utils";
-import type { FeatureCategoryEntry, FeatureOptionEntry, FeatureOptionScope } from "homebridge-plugin-utils";
+import type { FeatureCategoryEntry, FeatureOptionChoice, FeatureOptionEntry, FeatureOptionScope } from "homebridge-plugin-utils";
 import { RATGDO_MQTT_TOPIC, RATGDO_OCCUPANCY_DURATION } from "./settings.ts";
+import { RATGDO_VEHICLE_SENSORS, RATGDO_VEHICLE_SENSOR_CHOICES } from "./webui/vehicle-sensors.ts";
 import type { PlatformConfig } from "homebridge";
 import { RATGDO_DISCO_META } from "./webui/variants.ts";
 import { RATGDO_LOG_EVENTS } from "./webui/log-events.ts";
@@ -116,6 +117,27 @@ export const featureOptionCategories: FeatureCategoryEntry<RatgdoOptionMeta>[] =
   { description: "Konnected device-specific", meta: { variant: RatgdoVariant.KONNECTED }, name: "Konnected" }
 ];
 
+/* A list option's value as its deviation line words it. The all-choices selection is worded rather than printed as the wildcard that stores it, which is what a device
+ * reads when its selection is wider than the global one, and the wildcard counts only as the list's one entry, as the engine reads it. Every other entry reads as the
+ * label the settings page lists its choice under, matched without regard to case as the engine matches a stored value, and a value the list's table does not name
+ * is kept as stored.
+ */
+const renderSelection = ({ choices, every }: { choices: readonly FeatureOptionChoice[]; every: string }): ((value: string) => string) => (value: string): string => {
+
+  const entries = parseValueList(value);
+
+  if((entries.length === 1) && (entries[0] === ALL_CHOICES)) {
+
+    return every;
+  }
+
+  return entries.map((entry) => choices.find((choice) => choice.value.toLowerCase() === entry.toLowerCase())?.label ?? entry).join(", ");
+};
+
+// The deviation line of each list option the plugin authors, declared ahead of the catalog that names them.
+const renderLogEvents = renderSelection({ choices: RATGDO_LOG_EVENTS, every: "every category" });
+const renderVehicleSensors = renderSelection({ choices: RATGDO_VEHICLE_SENSORS, every: "every sensor" });
+
 /* eslint-disable @stylistic/max-len */
 /* Individual feature options, broken out by category. Every entry declares the scope levels it may be configured at, which the webUI reads to decide where an option
  * renders and the documentation generator restates in prose: a device-facing option belongs at the global level and on an individual device alike, a fact about
@@ -137,9 +159,7 @@ const deviceOptions: RatgdoFeatureOption[] = [
 const discoOptions: RatgdoFeatureOption[] = [
 
   { default: false, description: "Show the state of the backup battery in HomeKit. This requires ensuring the Ratgdo (ESP32) Disco is connected directly to the backup battery.", name: "Battery", scopes: [ "device", "global" ] },
-  { default: false, description: "Add an occupancy sensor accessory for vehicle presence detection.", name: "OccupancySensor.Vehicle.Presence", scopes: [ "device", "global" ] },
-  { default: false, description: "Add a contact sensor accessory for vehicle arrival.", name: "ContactSensor.Vehicle.Arriving", scopes: [ "device", "global" ] },
-  { default: false, description: "Add a contact sensor accessory for vehicle departure.", name: "ContactSensor.Vehicle.Leaving", scopes: [ "device", "global" ] },
+  { choices: RATGDO_VEHICLE_SENSOR_CHOICES, default: false, defaultValue: ALL_CHOICES, description: "Add sensor accessories for vehicle detection: an occupancy sensor for vehicle presence, and contact sensors for vehicle arrival and departure. Every sensor is included by default; select specific sensors to add only those.", multiple: true, name: "VehicleSensors", render: renderVehicleSensors, scopes: [ "device", "global" ] },
   { default: false, description: "Add a switch accessory to control the park assistance laser feature.", name: "Switch.Laser", scopes: [ "device", "global" ] },
   { default: false, description: "Add a switch accessory to control the LED setting.", name: "Switch.Led", scopes: [ "device", "global" ] }
 ];
@@ -156,22 +176,6 @@ const lightOptions: RatgdoFeatureOption[] = [
 
   { default: true, description: "Make the light on the opener available in HomeKit.", name: "", scopes: [ "device", "global" ] }
 ];
-
-/* The event list's value as its deviation line words it. The all-categories selection is worded rather than printed as the wildcard that stores it, which is what a
- * device reads when its selection is wider than the global one, and the wildcard counts only as the list's one entry, as the engine reads it. Every other entry reads
- * as the label the settings page lists its category under, and a value RATGDO_LOG_EVENTS does not name is kept as stored.
- */
-const renderLogEvents = (value: string): string => {
-
-  const entries = parseValueList(value);
-
-  if((entries.length === 1) && (entries[0] === ALL_CHOICES)) {
-
-    return "every category";
-  }
-
-  return entries.map((entry) => RATGDO_LOG_EVENTS.find((event) => event.value === entry)?.label ?? entry).join(", ");
-};
 
 /* Logging options. The debug switch leads the list: it is the support knob, reached for far more often than the event list beneath it. The event list offers its
  * categories through the settings page's logEvents source, and renderLogEvents words its deviation line.

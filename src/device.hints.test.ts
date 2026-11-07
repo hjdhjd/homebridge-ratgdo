@@ -5,21 +5,23 @@
  *
  * buildHints() is private, so we assert it through its public surface: the readonly `hints` field the constructor assigns. Each test drives the REAL FeatureOptions
  * engine through the harness `userOptions` array, then reads the resolved hint back from `ratgdo.hints`. The net covers every contract: every boolean hint flips when its
- * option moves off its default while every sibling stays at default (asserted by a full-object deepEqual against the spelled-out default record); the variant gates
+ * option moves off its default, and each vehicle sensor hint when the vehicle sensor list selects it, while every sibling stays at default (asserted by a full-object
+ * deepEqual against the spelled-out default record); the variant gates
  * (disco* hints exist only on the Ratgdo variant, konnected* hints only on Konnected) hold even when the underlying option is enabled on the wrong variant; the
  * value-centric duration hints fall back to RATGDO_OCCUPANCY_DURATION by default and honor a userOptions override; and the custom name resolves through HBPU's
  * custom-name rule, a name HomeKit can carry nothing of resolving to none. The deviation logs the constructor fires after hints resolve - read-only mode and the
  * custom name - are asserted from the captured log entries, as is the wiring of every option's deviation line: the logger each level writes through, the variant
- * check, the occupancy durations, and the event logging list.
+ * check, the occupancy durations, the event logging list, and the vehicle sensor list.
  */
 import { Characteristic, Service, addRatgdoAccessory, buildRatgdoAccessory, customNameEntry, logEventsWithout, makeKonnectedInitialState, makeRatgdoInitialState,
-  makeTestDevice } from "./testing.helpers.ts";
+  makeTestDevice, vehicleSensorsEntry } from "./testing.helpers.ts";
 import { describe, test } from "node:test";
 import { linesAt, loggedAt, triggerSet } from "homebridge-plugin-utils/testing";
 import { LockCommand } from "esphome-client";
 import { RATGDO_OCCUPANCY_DURATION } from "./settings.ts";
 import { RatgdoAccessory } from "./device.ts";
 import { RatgdoVariant } from "./types.ts";
+import type { RatgdoVehicleSensor } from "./webui/vehicle-sensors.ts";
 import assert from "node:assert/strict";
 
 /* The fully-spelled hint record a default Ratgdo device resolves to. Spelling it out rather than deriving it from the production code makes this the test's independent
@@ -69,9 +71,6 @@ const booleanHintCases: { action: "Disable" | "Enable"; hint: keyof typeof DEFAU
   { action: "Enable", hint: "discoBattery", option: "Disco.Battery", value: true },
   { action: "Enable", hint: "discoLaserSwitch", option: "Disco.Switch.Laser", value: true },
   { action: "Enable", hint: "discoLedSwitch", option: "Disco.Switch.Led", value: true },
-  { action: "Enable", hint: "discoVehicleArriving", option: "Disco.ContactSensor.Vehicle.Arriving", value: true },
-  { action: "Enable", hint: "discoVehicleLeaving", option: "Disco.ContactSensor.Vehicle.Leaving", value: true },
-  { action: "Enable", hint: "discoVehiclePresence", option: "Disco.OccupancySensor.Vehicle.Presence", value: true },
   { action: "Enable", hint: "doorOpenOccupancySensor", option: "Opener.OccupancySensor", value: true },
   { action: "Disable", hint: "light", option: "Light", value: false },
   { action: "Disable", hint: "lock", option: "Opener.Lock", value: false },
@@ -176,12 +175,45 @@ describe("RatgdoAccessory hints", () => {
     });
   });
 
+  // The vehicle sensor hints, one per sensor the list offers, each read from the one list. A case selects one sensor and asserts that its hint alone moves.
+  describe("the vehicle sensor list", () => {
+
+    const SENSOR_HINTS: { hint: keyof typeof DEFAULT_HINTS; sensor: RatgdoVehicleSensor }[] = [
+
+      { hint: "discoVehicleArriving", sensor: "Arriving" },
+      { hint: "discoVehicleLeaving", sensor: "Leaving" },
+      { hint: "discoVehiclePresence", sensor: "Presence" }
+    ];
+
+    for(const { hint, sensor } of SENSOR_HINTS) {
+
+      test("a list selecting " + sensor + " moves only the " + hint + " hint", () => {
+
+        const { ratgdo } = buildRatgdoAccessory({ userOptions: [vehicleSensorsEntry(sensor)] });
+
+        assert.deepEqual(ratgdo.hints, { ...DEFAULT_HINTS, [hint]: true }, "selecting " + sensor + " creates its sensor and leaves every sibling hint at default");
+      });
+    }
+
+    test("a list enabled with nothing stored carries every sensor, and one set on the opener reads for the opener alone", () => {
+
+      const allOn = { discoVehicleArriving: true, discoVehicleLeaving: true, discoVehiclePresence: true };
+
+      assert.deepEqual(buildRatgdoAccessory({ userOptions: [vehicleSensorsEntry()] }).ratgdo.hints, { ...DEFAULT_HINTS, ...allOn },
+        "a list enabled without a selection carries every sensor");
+      assert.deepEqual(buildRatgdoAccessory({ userOptions: [ vehicleSensorsEntry(), "Disable.Disco.VehicleSensors.AABBCCDDEEFF" ] }).ratgdo.hints, DEFAULT_HINTS,
+        "a list turned off on the opener outranks the global one");
+      assert.deepEqual(buildRatgdoAccessory({ userOptions: ["Enable.Disco.VehicleSensors.AABBCCDDEEFF=Leaving"] }).ratgdo.hints,
+        { ...DEFAULT_HINTS, discoVehicleLeaving: true }, "and a list set on the opener alone selects for that opener");
+    });
+  });
+
   describe("variant gating", () => {
 
     test("admits every disco hint on the Ratgdo variant when its option is enabled", () => {
 
       const { ratgdo } = buildRatgdoAccessory({ userOptions: [ "Enable.Disco.Battery", "Enable.Disco.Switch.Laser", "Enable.Disco.Switch.Led",
-        "Enable.Disco.ContactSensor.Vehicle.Arriving", "Enable.Disco.ContactSensor.Vehicle.Leaving", "Enable.Disco.OccupancySensor.Vehicle.Presence" ] });
+        vehicleSensorsEntry() ] });
 
       assert.deepEqual({ discoBattery: ratgdo.hints.discoBattery, discoLaserSwitch: ratgdo.hints.discoLaserSwitch, discoLedSwitch: ratgdo.hints.discoLedSwitch,
         discoVehicleArriving: ratgdo.hints.discoVehicleArriving, discoVehicleLeaving: ratgdo.hints.discoVehicleLeaving,
@@ -192,8 +224,7 @@ describe("RatgdoAccessory hints", () => {
     test("suppresses every disco hint on the Konnected variant even when its option is enabled", () => {
 
       const { ratgdo } = buildRatgdoAccessory({ device: { variant: RatgdoVariant.KONNECTED }, initialState: makeKonnectedInitialState(),
-        userOptions: [ "Enable.Disco.Battery", "Enable.Disco.Switch.Laser", "Enable.Disco.Switch.Led", "Enable.Disco.ContactSensor.Vehicle.Arriving",
-          "Enable.Disco.ContactSensor.Vehicle.Leaving", "Enable.Disco.OccupancySensor.Vehicle.Presence" ] });
+        userOptions: [ "Enable.Disco.Battery", "Enable.Disco.Switch.Laser", "Enable.Disco.Switch.Led", vehicleSensorsEntry() ] });
 
       assert.deepEqual({ discoBattery: ratgdo.hints.discoBattery, discoLaserSwitch: ratgdo.hints.discoLaserSwitch, discoLedSwitch: ratgdo.hints.discoLedSwitch,
         discoVehicleArriving: ratgdo.hints.discoVehicleArriving, discoVehicleLeaving: ratgdo.hints.discoVehicleLeaving,
@@ -362,9 +393,8 @@ describe("RatgdoAccessory hints", () => {
       { option: "Enable.Konnected.Switch.Strobe", variant: RatgdoVariant.RATGDO },
       { option: "Enable.Disco.Battery", variant: RatgdoVariant.KONNECTED },
       { option: "Enable.Disco.Battery.AABBCCDDEEFF", variant: RatgdoVariant.KONNECTED },
-      { option: "Enable.Disco.ContactSensor.Vehicle.Arriving", variant: RatgdoVariant.KONNECTED },
-      { option: "Enable.Disco.ContactSensor.Vehicle.Leaving", variant: RatgdoVariant.KONNECTED },
-      { option: "Enable.Disco.OccupancySensor.Vehicle.Presence", variant: RatgdoVariant.KONNECTED },
+      { option: vehicleSensorsEntry(), variant: RatgdoVariant.KONNECTED },
+      { option: "Enable.Disco.VehicleSensors.AABBCCDDEEFF=Presence", variant: RatgdoVariant.KONNECTED },
       { option: "Enable.Disco.Switch.Laser", variant: RatgdoVariant.KONNECTED },
       { option: "Enable.Disco.Switch.Led", variant: RatgdoVariant.KONNECTED },
       { option: "Disable.Motion", variant: RatgdoVariant.KONNECTED },
@@ -389,6 +419,17 @@ describe("RatgdoAccessory hints", () => {
       assert.deepEqual(linesAt(ratgdo.entries, "info"), [ "Motion sensor disabled.", "Ratgdo (ESP32) backup battery status enabled." ],
         "a Ratgdo opener reports the Motion and Disco settings");
       assert.deepEqual(linesAt(konnected.entries, "info"), ["Konnected pre-close warning switch enabled."], "a Konnected opener reports the Konnected settings");
+    });
+
+    test("the vehicle sensor list reports its selection once, naming each sensor by the label the settings page lists it under", () => {
+
+      const selected = buildRatgdoAccessory({ userOptions: [vehicleSensorsEntry("Presence", "Arriving")] });
+      const every = buildRatgdoAccessory({ userOptions: [vehicleSensorsEntry()] });
+
+      assert.deepEqual(linesAt(selected.entries, "info"), ["Ratgdo (ESP32) Disco vehicle sensors enabled for Presence, Arriving."],
+        "one line names every sensor the list selects");
+      assert.deepEqual(linesAt(every.entries, "info"), ["Ratgdo (ESP32) Disco vehicle sensors enabled for every sensor."],
+        "and a list enabled with nothing stored words its default, every sensor");
     });
 
     test("on a mixed install a global hardware-specific setting is announced when the first opener with the hardware arrives", () => {

@@ -6,7 +6,7 @@
  * which the availability transition leaves alone. The file also nets StatusActive as its own concern: it holds true on every sensor service through the
  * availability transition, which never writes it.
  */
-import { Characteristic, Service, buildRatgdoAccessory, makeLockEvent, makeRatgdoInitialState } from "./testing.helpers.ts";
+import { Characteristic, Service, buildRatgdoAccessory, makeLockEvent, makeRatgdoInitialState, vehicleSensorsEntry } from "./testing.helpers.ts";
 import { assertNoUnhandledRejections, hasGetHandler, loggedAt, settle } from "homebridge-plugin-utils/testing";
 import { describe, test } from "node:test";
 import { LockState } from "esphome-client";
@@ -131,8 +131,7 @@ describe("RatgdoAccessory.updateState() lock and availability", () => {
 
     // Enable every sensor service that carries a StatusActive characteristic so the hold-true row below reads each of them through the availability cycle. Motion is
     // on by default; the occupancy and Disco sensors are opt-in.
-    const sensorOptions = [ "Enable.Disco.ContactSensor.Vehicle.Arriving", "Enable.Disco.ContactSensor.Vehicle.Leaving", "Enable.Disco.OccupancySensor.Vehicle.Presence",
-      "Enable.Motion.OccupancySensor", "Enable.Opener.OccupancySensor" ];
+    const sensorOptions = [ vehicleSensorsEntry(), "Enable.Motion.OccupancySensor", "Enable.Opener.OccupancySensor" ];
 
     test("holds StatusActive true on every sensor service through an offline-then-online cycle, with no read handler bound", () => {
 

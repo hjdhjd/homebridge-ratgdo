@@ -7,7 +7,7 @@
 import type { FeatureCategoryEntry, FeatureOptionEntry, FeatureOptions, createRetiredOptions, displayedName, formatValueList } from "homebridge-plugin-utils";
 import { RATGDO_ADDRESS_OPTION, RATGDO_DEBUG_OPTION, RATGDO_ENCRYPTION_KEY_OPTION, RATGDO_NAME_OPTION } from "./settings.ts";
 import { canonicalManualAddress, isZonedAddress } from "./manual-address.ts";
-import { RATGDO_LOG_EVENTS_FAMILY } from "./log-events.ts";
+import { RATGDO_RETIRED_FAMILIES } from "./retired-options.ts";
 import type { RatgdoOptions } from "../options.ts";
 
 /* The single home for our plugin-config shape. Every function here is a pure interpreter of the primary platform-config entry the webUI framework injects into our
@@ -154,8 +154,8 @@ const CONSOLIDATED_SETTINGS: Readonly<Record<LegacyProperty, string>> = {
  */
 export const makeRatgdoConfig = ({ FeatureOptions, catalog, createRetiredOptions, displayedName, formatValueList }: RatgdoConfigInjected): RatgdoConfigInterpreter => {
 
-  // The retired option families over the served catalog, built once for the interpreter's life: the per-event logging options the one events list carries forward.
-  const retired = createRetiredOptions({ categories: catalog.categories, families: [RATGDO_LOG_EVENTS_FAMILY], options: catalog.options });
+  // The retired option families over the served catalog, built once for the interpreter's life, so each retired family reads as the list that superseded it.
+  const retired = createRetiredOptions({ categories: catalog.categories, families: RATGDO_RETIRED_FAMILIES, options: catalog.options });
 
   // The config's own entries, exactly as the host stored them, or none for a config that carries no options array.
   const optionsOf = (config: RatgdoLegacyConfig | undefined): string[] => Array.isArray(config?.options) ? config.options as string[] : [];
@@ -233,10 +233,11 @@ export const makeRatgdoConfig = ({ FeatureOptions, catalog, createRetiredOptions
     /* Move any legacy configuration properties into their feature options, and any retired options into the ones that took their place, as a patch for the session to
      * stage. This is transitional work with a planned end: once a configuration has been through it, there is nothing left to find and every later pass answers null.
      *
-     * The retired options go first. HBPU's retired options rewrite the per-event logging options into the one events list, scope by scope, writing an entry only where
-     * a scope's selection differs from what it inherits, so a device logging less or more than the global selection keeps that difference. The rewrite answers the very
-     * array it was handed when nothing in it was retired, so a changed array is what tells this pass it has entries to carry, and the engine the properties migrate onto
-     * below reads the rewritten entries. Openers sit beneath no controller, so the rewrite is exact without a topology to compose through.
+     * The retired options go first. HBPU's retired options rewrite each family RATGDO_RETIRED_FAMILIES names into the list that superseded it, scope by scope,
+     * writing an entry only where a scope's selection differs from what it inherits, so a device carrying less or more than the global selection keeps that
+     * difference. The rewrite answers the very array it was handed when nothing in it was retired, so a changed array is what tells this pass it has entries to
+     * carry, and the engine the properties migrate onto below reads the rewritten entries. Openers sit beneath no controller, so the rewrite is exact without a
+     * topology to compose through.
      *
      * A property that is present with a defined value always leaves, carried on the patch as an explicitly undefined key so the shallow-merge commit deletes it rather
      * than skipping it. Whether its value additionally becomes an option entry depends on which kind of option it addresses, and the kind is read from the catalog

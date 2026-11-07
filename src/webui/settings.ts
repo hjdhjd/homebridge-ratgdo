@@ -27,6 +27,10 @@ export const RATGDO_LOG_EVENTS_OPTION = "Log.Events";
 // feed name the device in their log lines from it, and the settings sidebar shows it as the device's name.
 export const RATGDO_NAME_OPTION = "Device.Name";
 
+// The feature option the vehicle sensors a Disco board drives are selected by, one list globally or at a device's MAC. The accessory creates its vehicle sensors from
+// it, and the retired per-sensor options migrate into it.
+export const RATGDO_VEHICLE_SENSORS_OPTION = "Disco.VehicleSensors";
+
 // Duration, in seconds, of a motion sensor event. The accessory clears its motion state after this long, and the settings panel's motion row clears back to its
 // placeholder on the same duration.
 export const RATGDO_MOTION_DURATION = 5;

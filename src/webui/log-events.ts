@@ -40,7 +40,7 @@ export type RatgdoLogEvent = typeof RATGDO_LOG_EVENTS[number]["value"];
 export const logEventChoices = (disco: boolean): FeatureOptionChoice[] => RATGDO_LOG_EVENTS.filter((event: RatgdoLogEventEntry) => disco || !event.disco)
   .map(({ label, value }) => ({ label, value }));
 
-/* The retired grammar of the logging list, one boolean option per category, each on by default, as the one family HBPU's retired options translate into the list. It
+/* The retired grammar of the logging list, one boolean option per category, each on by default, as the family HBPU's retired options translate into the list. It
  * is derived from the table, so every category the list offers is one a retired option of the same name carries forward.
  */
 export const RATGDO_LOG_EVENTS_FAMILY: RetiredFamily = {

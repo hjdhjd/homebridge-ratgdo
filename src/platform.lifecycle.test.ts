@@ -4,7 +4,8 @@
  * injectable defaults set to the doubles, an opener is discovered through the browser double and admitted through a fake dial, and the admitted client delivers its
  * lifecycle events in the orders esphome-client emits them and its telemetry in the shapes the wire carries. Each row reads what the opener's users see: whether
  * HomeKit answers, the info and error lines, the MQTT availability statement, the identity characteristics each session refreshes, the tiles telemetry moves, and
- * the lines the client itself writes, through the log adapter the admitting dial hands it, and the logging a configuration still in the retired grammar selects.
+ * the lines the client itself writes, through the log adapter the admitting dial hands it, and the logging and vehicle sensors a configuration still in the retired
+ * grammar selects.
  */
 import type { BuildPlatformResult, TestEspHomeClient } from "./testing.helpers.ts";
 import { Characteristic, Service, buildPlatform, customNameEntry, makeCoverEvent, makeFakeOpenClient, makeOpenerClient, makeOpenerService,
@@ -283,10 +284,22 @@ describe("RatgdoPlatform connection log", () => {
   });
 });
 
-/* A configuration still carrying a retired per-event logging option, read through the platform's boot view of it. The settings page migrates such a configuration
- * when it opens, and this is what an upgrader who never opens it runs on.
+/* A configuration still carrying a retired option, read through the platform's boot view of it. The settings page migrates such a configuration when it opens, and
+ * this is what an upgrader who never opens it runs on.
  */
-describe("RatgdoPlatform retired logging options", () => {
+describe("RatgdoPlatform retired options", () => {
+
+  test("an opener under the retired vehicle arriving and presence switches carries those two sensors and not the third", async () => {
+
+    const { accessory, ratgdo } = await admit({ userOptions: [ "Enable.Disco.ContactSensor.Vehicle.Arriving", "Enable.Disco.OccupancySensor.Vehicle.Presence" ] });
+    const { discoVehicleArriving, discoVehicleLeaving, discoVehiclePresence } = ratgdo.hints;
+
+    assert.deepEqual({ discoVehicleArriving, discoVehicleLeaving, discoVehiclePresence },
+      { discoVehicleArriving: true, discoVehicleLeaving: false, discoVehiclePresence: true },
+      "the boot view reads the retired switches as the vehicle sensor list they compose into");
+    assert.ok(accessory.getServiceById(Service.ContactSensor, RatgdoService.CONTACT_DISCO_VEHICLE_ARRIVING), "so the arriving sensor stays in HomeKit");
+    assert.ok(accessory.getServiceById(Service.OccupancySensor, RatgdoService.OCCUPANCY_DISCO_VEHICLE_PRESENCE), "and so does the presence sensor");
+  });
 
   test("an opener under the retired light-logging switch turned off logs no light events and every other category as before", async () => {
 

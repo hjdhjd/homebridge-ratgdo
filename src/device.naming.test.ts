@@ -11,7 +11,7 @@
  * capitalized translation, e.g. "Open.", "Closed."). Door states are driven through ratgdo.updateState() with the EspHomeEvent cover shape.
  */
 import { Characteristic, Service, buildRatgdoAccessory, customNameEntry, logEventsWithout, makeKonnectedInitialState, makeRatgdoInitialState,
-  makeTestPlatform } from "./testing.helpers.ts";
+  makeTestPlatform, vehicleSensorsEntry } from "./testing.helpers.ts";
 import { HAPStatus, MQTT_GET_SUFFIX, ServiceEventTypes, getServiceName } from "homebridge-plugin-utils";
 import { RatgdoService, RatgdoVariant } from "./types.ts";
 import { describe, test } from "node:test";
@@ -27,6 +27,9 @@ type TestService = TestPlatformAccessory["services"][number];
 
 // The Sync Name entry for every opener, spelled the way the options editor writes it.
 const SYNC_NAME = "Enable.Device.SyncName";
+
+// The vehicle sensor list enabled with nothing stored, which carries every vehicle sensor, so each vehicle part names the one entry that configures all of them.
+const VEHICLE_SENSORS = vehicleSensorsEntry();
 
 /* One part named from the opener: its key, the HAP service it is and the subtype it carries, the suffix it adds to the opener's name, the variant it belongs to, and
  * the feature option that configures it where it is off by default. The suffixes are spelled here rather than read from the accessory, so a part named with the
@@ -68,11 +71,11 @@ const WATCHED_PARTS: readonly NamedPart[] = [
     suffix: " Laser", variant: RatgdoVariant.RATGDO },
   { option: "Enable.Disco.Switch.Led", part: RatgdoService.SWITCH_DISCO_LED, serviceType: Service.Switch, subtype: RatgdoService.SWITCH_DISCO_LED, suffix: " LED",
     variant: RatgdoVariant.RATGDO },
-  { option: "Enable.Disco.ContactSensor.Vehicle.Arriving", part: RatgdoService.CONTACT_DISCO_VEHICLE_ARRIVING, serviceType: Service.ContactSensor,
+  { option: VEHICLE_SENSORS, part: RatgdoService.CONTACT_DISCO_VEHICLE_ARRIVING, serviceType: Service.ContactSensor,
     subtype: RatgdoService.CONTACT_DISCO_VEHICLE_ARRIVING, suffix: " Vehicle Arriving", variant: RatgdoVariant.RATGDO },
-  { option: "Enable.Disco.ContactSensor.Vehicle.Leaving", part: RatgdoService.CONTACT_DISCO_VEHICLE_LEAVING, serviceType: Service.ContactSensor,
+  { option: VEHICLE_SENSORS, part: RatgdoService.CONTACT_DISCO_VEHICLE_LEAVING, serviceType: Service.ContactSensor,
     subtype: RatgdoService.CONTACT_DISCO_VEHICLE_LEAVING, suffix: " Vehicle Leaving", variant: RatgdoVariant.RATGDO },
-  { option: "Enable.Disco.OccupancySensor.Vehicle.Presence", part: RatgdoService.OCCUPANCY_DISCO_VEHICLE_PRESENCE, serviceType: Service.OccupancySensor,
+  { option: VEHICLE_SENSORS, part: RatgdoService.OCCUPANCY_DISCO_VEHICLE_PRESENCE, serviceType: Service.OccupancySensor,
     subtype: RatgdoService.OCCUPANCY_DISCO_VEHICLE_PRESENCE, suffix: " Vehicle Presence", variant: RatgdoVariant.RATGDO },
   { option: "Enable.Konnected.Switch.Pcw", part: RatgdoService.SWITCH_KONNECTED_PCW, serviceType: Service.Switch, subtype: RatgdoService.SWITCH_KONNECTED_PCW,
     suffix: " Pre Close Warning", variant: RatgdoVariant.KONNECTED },
@@ -86,9 +89,9 @@ const GARAGE_DOOR = present(WATCHED_PARTS.find(({ part }) => (part === RatgdoSer
 // The light, the part the rows reading a single watch rename.
 const LIGHT = present(WATCHED_PARTS.find(({ part }) => (part === RatgdoService.LIGHT)), "the light part");
 
-// Every part of one variant, and the feature options that configure each of them, so a build of that variant carries every part it can.
+// Every part of one variant, and the feature options that configure each of them, each named once, so a build of that variant carries every part it can.
 const partsOf = (variant: RatgdoVariant): NamedPart[] => [ ...NAME_ONLY_PARTS, ...WATCHED_PARTS ].filter((named) => (named.variant === variant));
-const partOptions = (variant: RatgdoVariant): string[] => partsOf(variant).flatMap(({ option }) => ((option === undefined) ? [] : [option]));
+const partOptions = (variant: RatgdoVariant): string[] => [...new Set(partsOf(variant).flatMap(({ option }) => ((option === undefined) ? [] : [option])))];
 
 // Build an opener of a variant with every part it can carry, under the given naming options, and under its own name where a row gives it one.
 const buildOpener = ({ name, options = [], variant = RatgdoVariant.RATGDO }: { name?: string; options?: string[]; variant?: RatgdoVariant } = {}):

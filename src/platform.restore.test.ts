@@ -5,7 +5,8 @@
  * the bindings the platform's configureAccessory gave it, and then whatever construction leaves of them once a discovered opener is admitted.
  */
 import type { BuildPlatformResult, TestEspHomeClient } from "./testing.helpers.ts";
-import { Characteristic, Service, buildPlatform, makeCachedAccessory, makeFakeOpenClient, makeOpenerClient, makeOpenerService } from "./testing.helpers.ts";
+import { Characteristic, Service, buildPlatform, makeCachedAccessory, makeFakeOpenClient, makeOpenerClient, makeOpenerService,
+  vehicleSensorsEntry } from "./testing.helpers.ts";
 import { HAPStatus, Perms } from "homebridge-plugin-utils";
 import { describe, test } from "node:test";
 import { drainClock, hapStatus, present, settle, settleUntil, triggerGet, triggerSet } from "homebridge-plugin-utils/testing";
@@ -19,9 +20,8 @@ const MAC = "AABBCCDDEEFF";
 const OTHER = "112233445566";
 
 // The fully loaded Ratgdo configuration, so the cached accessory carries every service a previous run could have attached, each with its own characteristics.
-const ALL_OPTIONS = [ "Enable.Disco.Battery", "Enable.Disco.ContactSensor.Vehicle.Arriving", "Enable.Disco.ContactSensor.Vehicle.Leaving",
-  "Enable.Disco.OccupancySensor.Vehicle.Presence", "Enable.Disco.Switch.Laser", "Enable.Disco.Switch.Led", "Enable.Motion.OccupancySensor", "Enable.Opener.Dimmer",
-  "Enable.Opener.OccupancySensor", "Enable.Opener.Switch", "Enable.Opener.Switch.RemoteLockout" ];
+const ALL_OPTIONS = [ "Enable.Disco.Battery", "Enable.Disco.Switch.Laser", "Enable.Disco.Switch.Led", vehicleSensorsEntry(), "Enable.Motion.OccupancySensor",
+  "Enable.Opener.Dimmer", "Enable.Opener.OccupancySensor", "Enable.Opener.Switch", "Enable.Opener.Switch.RemoteLockout" ];
 
 // The refusal HomeKit renders as No Response.
 const isNoResponse = hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
